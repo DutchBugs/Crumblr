@@ -487,32 +487,41 @@ mean anything should start here.
   plausible.
 
 ### D-034 — The Pepperstone entity is unresolved
-- **Status:** OPEN — owner decision required. Evidence gathered 2026-08-24;
-  not resolved, because that resolution is a legal/business call, not an
-  engineering one
-- **Spec:** owner decision O-001
-- **Gap:** O-001 names **Pepperstone EU**. The MT5 server supplied by the owner
-  on 2026-08-18 is **`PepperstoneUK-Demo`**. Those are different entities.
+- **Status:** RESOLVED FOR THE DEMO ENVIRONMENT ONLY 2026-08-24, by O-005 —
+  **NOT resolved for any future live account**
+- **Spec:** owner decision O-001, refined by O-005 (review 1.9 §2, F-028)
+- **Original gap:** O-001 named **Pepperstone EU**. The MT5 server supplied by
+  the owner on 2026-08-18 is **`PepperstoneUK-Demo`**. Those are different
+  entities.
 - **What first contact showed:** the real account's `company` field reads
-  **`Pepperstone Limited`** (review 1.7/1.8 F-028's required evidence). That
-  name, alongside the `PepperstoneUK-Demo` server, is consistent with the UK
-  entity and does not read as an EU one — but company-name-to-legal-entity
-  mapping is exactly the kind of inference review 1.8 §7 warned against making
-  unilaterally. Recorded as evidence, not as a resolution.
+  **`Pepperstone Limited`** (review 1.7/1.8 F-028's required evidence). This
+  session recorded that as evidence without inferring a conclusion from it
+  (review 1.8 §7 warns explicitly against that inference) — the reviewer/owner
+  decision O-005 that follows is what actually closes this, not the evidence
+  alone.
+- **O-005, the resolution:** for the **current demo/development environment
+  only**, the entity is **Pepperstone Limited (UK)**. This amends O-001's
+  "Pepperstone EU" shorthand for demo purposes; it does not rewrite history
+  (O-001 stays in the record as originally written) and it does **not**
+  pre-select the entity for a live account, which requires its own review
+  against the owner's residence and the actual live-account documentation
+  before any live decision is made.
 - **Why it matters:** the regulator differs, and with it the retail leverage
   cap and the swap treatment. The configured guard expects 1:30, which is the
   ESMA/FCA retail cap in both cases today — so the discrepancy does not
-  currently show up as a mismatch, which is precisely why it needs resolving
+  currently show up as a mismatch, which is exactly why it needed resolving
   deliberately rather than being noticed later.
-- **Code:** `config/paper.yaml` records the supplied server and flags the
-  question in a comment. `account_guard.expected_currency` and
+- **Code:** `config/paper.yaml` records the supplied server, resolved entity
+  and the O-005 scope note. `account_guard.expected_currency` and
   `expected_leverage` are checked against `account_info()` at M1, so a wrong
   account halts rather than trades — and did not, on this run.
-- **Watch for:** still nothing here beyond `company` and `server` has been
-  independently verified (no account statement, no contract note). Keep
-  `UNVERIFIED` in status/config language until the owner closes this, not
-  `RESOLVED`.
-- **Gate affected:** M1.
+- **Watch for:** the resolution is still only `company` + `server`, not an
+  account statement or a contract note — sufficient for a demo integration
+  decision, explicitly not sufficient for a live one. Any future live-account
+  work must treat the entity as open again and re-verify from live
+  documentation, not carry O-005 forward by assumption.
+- **Gate affected:** M1 — closed by O-005. Live promotion — open again by
+  design; see O-005 above.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

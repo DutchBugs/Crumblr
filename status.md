@@ -141,15 +141,19 @@ These block M1 and are tracked there. They are not engineering failures at M0.
 - [x] broker selected — Pepperstone, owner decision O-001 (build.md §29 Q1)
 - [x] exact MT5 server documented — `PepperstoneUK-Demo`, supplied 2026-08-18
       and recorded in `config/paper.yaml` as a claim the account guard checks
-- [ ] **entity confirmed** — O-001 says "Pepperstone EU", the server says UK.
-      Different regulator, leverage cap and swap treatment. Kept `UNVERIFIED`
-      rather than inferred from the server string (review 1.8 F-028) — settled
-      by `company` in the first-contact probe output, not by intent. See D-034
+- [x] **entity confirmed for the demo environment** — O-005 (review 1.9 §2,
+      F-028): `company` from first contact reads `Pepperstone Limited`, the
+      UK entity, matching the `PepperstoneUK-Demo` server. This **amends**
+      O-001's "Pepperstone EU" shorthand for demo/development only — it does
+      **not** pre-select the entity for a future live account, which needs
+      its own review against the owner's residence and live documentation.
+      See D-034
 - [x] MT5 demo account created — 2026-08-24. `Server: PepperstoneUK-Demo`,
       `Currency: EUR`, `Leverage: 1:30` (review 1.7/1.8 F-026). The login itself
       is a local secret and does not belong in this file
 - [x] logged into the MT5 terminal, once, interactively — 2026-08-24
-- [ ] hedging or netting established from `account_info()` (§29 Q2) — not guessed
+- [x] hedging or netting established from `account_info()` (§29 Q2) —
+      `RETAIL_HEDGING`, read 2026-08-24, not guessed
 - [x] Windows x86-64 host with the MetaTrader 5 terminal provisioned
 
 ### Promotion decision
@@ -180,13 +184,13 @@ Owner:
 Current milestone: M0
 Implementation maturity: REPLAY-TESTED
 Gate qualification: NOT PASSED
-Last meaningful update: 2026-08-24 — reviews 1.7/1.8 processed, Windows host
-                initialised and gated, demo account created and logged in
-Next objective: M1 first contact. The adapter is written; the demo account,
-                the Windows x86-64 host and the terminal login are all now
-                done. What remains is running the read-only probe — the
-                entity question resolves from its output, not from a
-                separate human task
+Last meaningful update: 2026-08-24 — review 1.9 processed; first MT5 contact
+                made and verified; O-005 recorded (entity, scoped to demo)
+Next objective: Complete M1 — continuous EUR/USD tick and M5-bar read,
+                persisted immediately, plus reconnect with full
+                post-reconnect revalidation (review 1.9 F-034, HIGH, blocks
+                M1). One successful connection is proven; a long-running,
+                self-healing read is not yet built
 ```
 
 ## Scope
@@ -348,8 +352,8 @@ something was found and dealt with (F-009).
 | APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18** | One-exposure is a hard constant with the reviewer's four cases tested. Intraday entries are refused and a breach halts — **the automatic flatten is M5** (D-033, ADR-004) |
 | APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **PARTLY CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). **Still open:** continuous bar/tick read and observed reconnect behaviour, HANDOVER.md §4.5 |
 | APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | **CLOSED 2026-08-24** | Confirmed against the real terminal (`filling_mode=2`→IOC, `trade_mode=4`→FULL, matching documentation) and fixed: decode logic shared between the gateway and the probe in `mt5_gateway/enums.py` |
-| APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | OPEN | Different regulator, leverage cap and swap treatment. First contact added evidence (`company: "Pepperstone Limited"`, pointing at UK) without resolving it — an owner decision (D-034) |
-| APP-016 | LOW | The terminal reports `trade_allowed: false` even though the account itself reports `trade_allowed: true` | | OPEN | Terminal-level `trade_allowed` most likely reflects the "AlgoTrading" toggle in the MT5 UI, separate from the account's own permission. Did not block any read on first contact; **will silently block every order at M5** if still off then. Confirm before execution work starts, not during it |
+| APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | **CLOSED FOR DEMO 2026-08-24, by O-005** | Owner/reviewer decision: demo entity is **Pepperstone Limited (UK)**, amending O-001 for demo/development only. Does **not** decide the entity for a future live account — that reopens this question against live documentation (D-034) |
+| APP-016 | LOW | The terminal reports `trade_allowed: false` even though the account itself reports `trade_allowed: true` | | **KNOWN / DEFERRED TO M5 READINESS** (review 1.9 §4) | Reviewer/owner decision: **do not enable AlgoTrading yet** — M1 is read-only, and leaving it off is an extra safety layer with no approved execution path. Before M5: account permission, terminal permission, verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO must **all** be true together — the UI toggle alone must never be sufficient |
 | APP-009 | MEDIUM | `feedback.1.4.md` is referenced by review 1.5 but is not in the repository; findings F-016 and F-017 are unaccounted for | | **CLOSED 2026-08-18** | Restored unchanged by the owner. F-016 and F-017 were already resolved by the tracker and deviation rewrites; F-020 was new and is now closed |
 
 ---
@@ -724,6 +728,8 @@ Use this for architectural or risk decisions.
 | 2026-08-17 | Risk values in `config/paper.yaml` are provisional placeholders | They encode risk policy, which build.md §29 reserves for a human; the platform still needs loadable values to be testable | Leave them unset and block all progress | |
 | 2026-08-24 | build.md §29 Q2 answered: the Pepperstone demo account is `RETAIL_HEDGING` | Read from `account_info()` on first contact rather than guessed, per O-001. `risk/policies.py`'s one-exposure rule was written to hold under either mode and needed no code change once the answer was known | Guessing ahead of the terminal; supporting both modes speculatively | Observed, not decided |
 | 2026-08-24 | The Pepperstone entity question (D-034) stays open despite new evidence | First contact returned `company: "Pepperstone Limited"`, which reads as the UK entity rather than the "Pepperstone EU" of O-001 — but a company-name string is evidence, not a legal determination (review 1.8 F-028). Inferring the entity from it would repeat the mistake `APP-014` exists to prevent | Treating the company field as settling the question | Reviewer (F-028); owner decision still pending |
+| 2026-08-24 | **O-005**, superseding the row above: for the demo/development environment only, the Pepperstone entity is **Pepperstone Limited (UK)** | Review 1.9 §2 F-028: `Pepperstone Limited` (UK) and `Pepperstone EU Limited` (Cyprus) are officially distinct entities, and the observed `company`/`server` match the UK one. Scoped deliberately — refines O-001's demo shorthand without pre-deciding a future live account, which needs its own review against the owner's residence and live documentation | Treating this as a live-account entity decision; leaving D-034/APP-013 open indefinitely with no way to close a demo-only question | Reviewer + owner (O-005) |
+| 2026-08-24 | APP-016 (terminal `trade_allowed: false`) recorded as known and deliberately not changed | Review 1.9 §4: keeping the MT5 "AlgoTrading" toggle off is an additional safety layer while no execution path is approved. M5 readiness must require account permission, terminal permission, a verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO — all together, so the toggle alone can never be sufficient | Enabling AlgoTrading now "to be ready"; treating the toggle as the execution gate | Reviewer + owner |
 
 ---
 
@@ -747,7 +753,7 @@ Use this for architectural or risk decisions.
 | A schema change loses data nobody can regenerate | Medium | Alembic baseline, migrated deployment path, proven restore | CLOSED 2026-08-18 — no backup *schedule* exists yet, only a proven restore |
 | A position is carried through the 17:00 rollover | High | entries refused inside the window; a surviving exposure halts | MITIGATED — detection only. The flatten itself is M5 (D-033) |
 | A second EUR/USD exposure is opened | High | hard constant in the risk engine, above the account model | CLOSED 2026-08-18 |
-| The connected account is not the one that was configured | High | server, login, currency and leverage all checked; mismatch halts | MITIGATED — never verified against a terminal |
+| The connected account is not the one that was configured | High | server, login, currency and leverage all checked; mismatch halts | MITIGATED — verified once against a real terminal 2026-08-24, guard passed. **Not yet re-verified on reconnect** — review 1.9 F-034 requires full revalidation after every reconnect, not implemented yet |
 
 ---
 
@@ -786,15 +792,20 @@ Next engineering steps once unblocked:
 
 - [x] ~~Provision a Windows x86-64 host with the MetaTrader 5 terminal.~~ — done
       2026-08-24.
-- [ ] Run `scripts/mt5_probe.py` against the now-logged-in terminal — nothing
-      external blocks this. Record the sanitized output in `status.md` §13
-      per F-031.
-- [ ] Discover the real EUR/USD broker symbol and its full specification —
-      settled by the probe run above.
-- [ ] Implement continuous bar/tick read and observed reconnect behaviour
-      (HANDOVER.md §4.5) — the probe proves one connection, not M1 in full.
+- [x] ~~Run `scripts/mt5_probe.py` against the now-logged-in terminal.~~ — done
+      2026-08-24. Sanitized output recorded in `status.md` §13 (F-031).
+- [x] ~~Discover the real EUR/USD broker symbol and its full specification.~~ —
+      `EURUSD`, no suffix. Recorded 2026-08-24.
+- [ ] **Implement continuous bar/tick read and reconnect with full
+      revalidation** (HANDOVER.md §4.5, review 1.9 F-034 — HIGH, blocks M1).
+      One connection is not M1; reconnect must not resume without re-checking
+      account, server, currency, leverage, mode and symbol spec.
+- [ ] Run a controlled read-only soak with at least one deliberate
+      interruption, and record the evidence (review 1.9 §5).
 - [ ] Persist real Pepperstone ticks and bars immediately — the store and the
       tick→bar pipeline exist and have never seen a real quote.
+- [ ] Build Dashboard v0 — read-only, no MT5 import, no credentials, no
+      control surface (review 1.9 F-035).
 - [ ] Implement the reconciliation loop (M5 prerequisite).
 - [ ] Store feature values, not only their hash — D-031.
 

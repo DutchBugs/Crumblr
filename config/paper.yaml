@@ -42,14 +42,14 @@ intraday:
 #
 # First contact 2026-08-24 (status.md §13) verified the account guard fields
 # above against the real terminal — server, currency and leverage all matched.
-# Still to resolve:
-#   - the account entity (D-034). Owner decision O-001 named "Pepperstone EU";
-#     the server is `PepperstoneUK-Demo` and the account's `company` field
-#     reads "Pepperstone Limited" — evidence pointing at the UK entity, not a
-#     resolution. The difference is not cosmetic — it changes the regulator,
-#     the leverage cap and the swap treatment. Owner decision, not a code fix.
 #
 # Resolved by first contact, no longer TO VERIFY:
+#   - the account entity (D-034), for this demo environment: **Pepperstone
+#     Limited (UK)** — owner/reviewer decision O-005, refining O-001's
+#     "Pepperstone EU" shorthand after the account's `company` field read
+#     "Pepperstone Limited". Scoped to demo/development only: this does NOT
+#     pre-select the entity for a future live account, which needs its own
+#     review against the owner's residence and live-account documentation.
 #   - hedging or netting (build.md §29 Q2): RETAIL_HEDGING. Deliberately not
 #     guessed beforehand; v1 supports exactly this one mode.
 #   - the broker symbol: `EURUSD`, no suffix on this account.

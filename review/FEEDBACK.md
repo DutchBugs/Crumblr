@@ -32,6 +32,7 @@ is only moved to `CLOSED` with evidence — a commit, a file, a test.
 | [feedback.1.6.md](feedback.1.6.md) | 2026-08-18 | GO WITH CONDITIONS · M1 **PREPARE NOW** · M5/P2 **NO-GO** | F-021 … F-025 |
 | [feedback.1.7.md](feedback.1.7.md) | 2026-08-23 | GO WITH CONDITIONS · M1 **READY FOR FIRST CONTACT ONCE WINDOWS HOST EXISTS** · M5/P2 **NO-GO** | F-026 … F-029 |
 | [feedback.1.8.md](feedback.1.8.md) | 2026-08-24 | **GO — PROCEED TO READ-ONLY MT5 FIRST CONTACT** · M5/P2 **NO-GO** | F-030 … F-032, plus 1.7 reprocessed |
+| [feedback.1.9.md](feedback.1.9.md) | 2026-08-24 | **GO — CONTINUE FORWARD** · M1 first contact passed, complete continuous read+reconnect now · Dashboard v0 approved · M5/P2 **NO-GO** | F-033 … F-035, O-005, plus 1.7/1.8 reconfirmed |
 
 > **`feedback.1.4.md` was missing and has been restored** (2026-08-18, review
 > 1.6 §2 asked for it). It was added unchanged and not renumbered. While it was
@@ -87,6 +88,9 @@ different questions and conflating them is how "CLOSED" comes to be misread as
 | F-030 | MEDIUM | Full Windows gate (with PostgreSQL) had not run | CLOSED | SHIPPED | Docker + PostgreSQL 17 started on the Windows host, Alembic migrations applied, full suite run: **663 passed, 3 skipped** — the 3 are exactly the platform-dependent skips predicted in the earlier (no-database) run: the Windows-only mypy/`sys.platform` test (F-031 area) and two `test_halt_survives_restart.py` cases where Windows does not enforce POSIX permission bits. `status.md` §13 fifth 2026-08-24 entry |
 | F-031 | MEDIUM / SECURITY | First-contact evidence must be sanitized before it enters Git/review artifacts | CLOSED | SHIPPED | `scripts/mt5_probe.py::sanitize_report` redacts `account.login`; new `--sanitized-json` CLI flag; `.gitignore` now excludes raw probe output (`first-contact*.json`, `*.mt5probe.json`, `var/`); `HANDOVER.md` §0.4/§4.3 rewritten to use the sanitized flag and a gitignored `var/` path. Three new tests in `tests/unit/test_mt5_probe.py::TestSanitizeReport` |
 | F-032 | MEDIUM | MT5 enum decoding (D-037) must be settled from real observation before instrument specs become authoritative | CLOSED | SHIPPED | First contact 2026-08-24: real terminal reported `filling_mode=2` (→ IOC) and `trade_mode=4` (→ FULL), both matching the documented mapping. Gateway fixed to decode instead of stringify; decode tables shared with the probe in the new `src/crumblr/mt5_gateway/enums.py` so the two cannot drift apart again. `status.md` §13 sixth 2026-08-24 entry; `review/DEVIATIONS.md` D-037 |
+| F-033 | MEDIUM | `status.md` current-state sections still lagged behind the first-contact update | CLOSED | N/A — documentation | M1-dependency checklist, Component 1 objective, milestone tracker, risk table and next-actions all rewritten to current state; historical §13 entries left untouched |
+| F-034 | HIGH | Reconnect must revalidate broker/account truth before data flow resumes | OPEN | PENDING | Blocks M1 qualification. Required: full account/symbol/instrument-spec revalidation after every reconnect, fail-closed on any disagreement or `UNKNOWN`, five specific test scenarios (normal reconnect, wrong account, changed symbol spec, no data, terminal restart). Not yet designed or built |
+| F-035 | HIGH DESIGN | UI v0 must remain read-only and outside the broker execution boundary | OPEN UNTIL BUILT | PENDING | Hard boundary specified: reads PostgreSQL/app state only, no `MetaTrader5` import, no credentials, no `order_send`, no HALT reset, no risk-config write, no `TradeIntent` creation, no buttons. Not yet built |
 
 **Nothing is `SHIPPED` that has met a real broker.** Every entry above was
 exercised against simulated data only. F-018 and F-019 are shipped against a
@@ -143,43 +147,25 @@ reviewer set for the next gates. Tracked here so they are not lost.
 
 ---
 
-## Unreviewed work — `feedback.1.9.md` is now triggered
+## Unreviewed work — `feedback.1.10.md` not yet triggered
 
-`feedback.1.7.md` and `feedback.1.8.md` have both been processed (F-026…F-032
-above). Review 1.8 §13 named two triggers for `feedback.1.9.md`: **the first
-real MT5 read-only evidence, or a CI/domain-contract/M2 gate-closure
-package.** The first one is now met — first contact happened 2026-08-24.
+`feedback.1.7.md` through `feedback.1.9.md` have all been processed (F-026…
+F-035, O-005, above). Review 1.9 §15 names the trigger for `feedback.1.10.md`:
+continuous read/reconnect evidence, first real ticks/bars persisted, Dashboard
+v0 existing, and/or a CI result or M0 contract package.
 
-**Nothing below has been seen by a reviewer yet:**
+**Nothing below has been seen by a reviewer yet** — it is this session's
+response to review 1.9's required next-action order (§13):
 
 | Artifact | What it claims | Where to check it |
 |---|---|---|
-| Windows host, full gate | `uv sync --extra mt5`, ruff/mypy/pytest/determinism all run and green on the Windows x86-64 host for the first time; later reran in full against a real PostgreSQL — **663 passed, 3 skipped**, all three explained | `status.md` §13 third and fifth 2026-08-24 entries |
-| A real, Windows-only mypy defect (not a review finding — found running the gate) | `sys.platform` is statically resolved by mypy against the host it runs on; fixed by switching the guard to `platform.system()` | `tests/unit/test_mt5_readonly_gateway.py`; `status.md` §13 third entry |
-| F-031 sanitization | Raw first-contact probe output carries the real MT5 account number and must never reach git; a `--sanitized-json` flag redacts it | `scripts/mt5_probe.py::sanitize_report`; `tests/unit/test_mt5_probe.py::TestSanitizeReport`; `.gitignore`; `HANDOVER.md` §0.4/§4.3 |
-| F-026/F-027/F-029 corrections | `status.md` current-state sections rewritten to match reality (account exists, M2 passed on own evidence, campaign header populated) | `status.md` §1, §2, §3, §6, §12 |
-| **First MT5 contact** | One successful connection against the real Pepperstone terminal: account read, symbol resolved (`EURUSD`, unsuffixed), instrument spec read, account guard passed. Q2 answered (`RETAIL_HEDGING`). D-037 confirmed from observation and fixed | `status.md` §13 sixth 2026-08-24 entry (sanitized report inline); `var/first-contact.sanitized.json` locally; `review/DEVIATIONS.md` D-035, D-037 |
-| Entity evidence, still unresolved | `company: "Pepperstone Limited"` reads as the UK entity, contradicting O-001's "Pepperstone EU" — recorded as evidence, deliberately not resolved by this session | `review/DEVIATIONS.md` D-034; `status.md` §10 decision log 2026-08-24 |
-| APP-016 (new) | Terminal-level `trade_allowed: false` against account-level `trade_allowed: true` — likely the MT5 "AlgoTrading" toggle. No impact yet; would silently block M5 execution if unaddressed | `status.md` §3 APP table, §13 sixth entry |
-
-Two things worth the reviewer's particular attention, in the same spirit as
-review 1.8 §3.1's "Windows is already finding bugs macOS could not":
-
-1. **This session made engineering decisions from real evidence without
-   waiting for a review cycle** — fixing D-037 and recording the Q2 answer.
-   Both were pre-authorized by standing rules (D-037: "compare against
-   official MT5 semantics... update adapter and fake terminal together",
-   review 1.8 §4; Q2: "support exactly the observed v1 mode", review 1.7 §5B)
-   rather than judgment calls invented on the spot. Worth checking that
-   reading is fair.
-2. **The entity question (D-034) was deliberately left open** despite new
-   evidence that leans one way, per review 1.8 F-028's explicit instruction
-   not to infer the legal entity from `company`/`server`. Worth checking that
-   the line between "recorded evidence" and "resolved by inference" actually
-   held.
+| Review 1.9 processing | F-033 (stale sections) fixed; O-005 recorded, scoped to demo only; APP-013/APP-016 updated to the reviewer's exact decisions | `status.md` §1–§3, §6, §10, §12; `review/DEVIATIONS.md` D-034 |
+| CI | Not yet confirmed running/green on a runner — `gh` CLI installation was completed but authentication was refused by the session's own auto-mode safety classifier (credential extraction), so this session could not check Actions status itself | Ask the owner to check `github.com/DutchBugs/Crumblr/actions`, or authenticate `gh` interactively |
+| Continuous MT5 reader (F-034 workstream A) | *Not started as of this entry* — the primary engineering priority per review 1.9 §5 | — |
+| Dashboard v0 (F-035 workstream B) | *Not started as of this entry* | — |
 
 `feedback.2.0.md` remains mandatory before the first `order_send`, demo
-included, and is separate from 1.9.
+included, and is separate from 1.10.
 
 ---
 
@@ -194,12 +180,14 @@ that the code can cite them the way it cites a finding.
 | O-002 | The decision timeframe is **M5** | Fixes the cadence the supervisor's frequency threshold must be calibrated against — see D-015 and EV-002. Higher-resolution data may still be collected; M5 is the *decision* cadence |
 | O-003 | **No overnight positions** in v1 | Needs an explicit entry cut-off and a mandatory flatten before the session boundary, both specified and tested before M5. "Intraday" must not be quietly read as "midnight UTC" |
 | O-004 | **One EUR/USD exposure at a time** | A business rule independent of whether the account is hedging or netting. `max_open_positions` is already 1 in `config/paper.yaml`, but that is a coincidence of a placeholder value and not yet this rule |
+| O-005 | Review 1.9 §2 F-028: for the **demo/development environment only**, the Pepperstone entity is **Pepperstone Limited (UK)**, refining O-001's "Pepperstone EU" shorthand after first contact | Closes D-034/APP-013 for M1 demo integration. Does **not** decide the entity for a future live account — that needs its own review against the owner's residence and live-account documentation before any live decision. O-001 is not rewritten; O-005 is recorded as amending it |
 
-Still undecided and deliberately so: hedging vs netting (Q2 — inspect the real
-account, then support exactly one mode), paper risk per trade (Q7), maximum
-drawdown (Q8), and production halt-reset authority (Q12). The values presently
-in `config/paper.yaml` are placeholders and must not be promoted to policy by
-having sat there — see D-013.
+Still undecided and deliberately so: paper risk per trade (Q7), maximum
+drawdown (Q8), and production halt-reset authority (Q12). Q2 (hedging vs
+netting) is no longer undecided — answered 2026-08-24 by `account_info()` on
+the real demo account: `RETAIL_HEDGING`. The values presently in
+`config/paper.yaml` for Q7/Q8 are placeholders and must not be promoted to
+policy by having sat there — see D-013.
 
 ---
 
