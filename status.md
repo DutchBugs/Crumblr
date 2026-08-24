@@ -744,6 +744,7 @@ Use this for architectural or risk decisions.
 | 2026-08-24 | The Pepperstone entity question (D-034) stays open despite new evidence | First contact returned `company: "Pepperstone Limited"`, which reads as the UK entity rather than the "Pepperstone EU" of O-001 — but a company-name string is evidence, not a legal determination (review 1.8 F-028). Inferring the entity from it would repeat the mistake `APP-014` exists to prevent | Treating the company field as settling the question | Reviewer (F-028); owner decision still pending |
 | 2026-08-24 | **O-005**, superseding the row above: for the demo/development environment only, the Pepperstone entity is **Pepperstone Limited (UK)** | Review 1.9 §2 F-028: `Pepperstone Limited` (UK) and `Pepperstone EU Limited` (Cyprus) are officially distinct entities, and the observed `company`/`server` match the UK one. Scoped deliberately — refines O-001's demo shorthand without pre-deciding a future live account, which needs its own review against the owner's residence and live documentation | Treating this as a live-account entity decision; leaving D-034/APP-013 open indefinitely with no way to close a demo-only question | Reviewer + owner (O-005) |
 | 2026-08-24 | APP-016 (terminal `trade_allowed: false`) recorded as known and deliberately not changed | Review 1.9 §4: keeping the MT5 "AlgoTrading" toggle off is an additional safety layer while no execution path is approved. M5 readiness must require account permission, terminal permission, a verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO — all together, so the toggle alone can never be sufficient | Enabling AlgoTrading now "to be ready"; treating the toggle as the execution gate | Reviewer + owner |
+| 2026-08-24 | A real MT5 soak/live run must use its own database (`crumblr_soak`), never the shared dev/test database (`crumblr`, `DEFAULT_TEST_URL`) | The twelfth update-log entry's own "worth a dedicated soak-only database... noted here rather than acted on" line — raised again independently by the reviewer/supervisors before it was acted on. `tests/integration`'s `engine` fixture drops the schema at teardown by design; the third Phase A attempt crashed on it the moment the two shared one database. `scripts/mt5_live_reader.py` now refuses to start at all unless `CRUMBLR_DATABASE_URL` is explicitly set, rather than silently falling back to the test default — "remember to set it" is not a control, same reasoning as F-031. `crumblr_soak` created on the same local PostgreSQL instance, migrated with the same Alembic baseline, `.env`/`.env.example` updated | Re-migrating the shared database before every soak attempt indefinitely; changing `create_db_engine`'s global default (would affect `run_replay.py` and other legitimate dev-default callers) | Reviewer/owner |
 
 ---
 
@@ -2827,6 +2828,76 @@ separate one — accepted as a known operational cost for now, not hidden.
 - Commit and push.
 - Restart Phase A a fourth time.
 - Everything else unchanged from the tenth entry's Next section.
+
+---
+
+## Update 2026-08-24 (thirteenth entry) — a dedicated soak database, while Phase A's fourth attempt runs
+
+**What happened**
+
+The Phase A fourth attempt (started at the end of the twelfth entry) was
+left running — real-terminal soaks are not something to interrupt over
+tooling — while the shared-database problem it had already hit twice was
+fixed properly. The reviewer/supervisors raised the same point
+independently: the twelfth entry's own "worth a dedicated soak-only
+database... noted here rather than acted on" line should be acted on, not
+left as a recurring manual step.
+
+**What changed**
+
+- A new database, `crumblr_soak`, created on the same local PostgreSQL
+  instance (`localhost:55432`, same `crumblr` role) and migrated with the
+  same Alembic baseline (`ce70efeb9fe9`).
+- `scripts/mt5_live_reader.py` now **refuses to start** unless
+  `CRUMBLR_DATABASE_URL` is explicitly set — it no longer falls back to
+  `create_db_engine()`'s convenience default, which is the same physical
+  database `tests/integration`'s `engine` fixture tears down. Same
+  reasoning as F-031's fix: a control that depends on a person remembering
+  is not a control.
+- `.env` (local, gitignored) repointed at `crumblr_soak` for real-terminal
+  runs — done with a find/replace that never printed the file's contents,
+  consistent with this session's credential-handling discipline. Does
+  **not** affect the fourth Phase A attempt already running; that process
+  captured its environment at launch and keeps using the database it
+  started against.
+- `.env.example` documents the split with the D-042 story inline, so a
+  future developer copying it sees why the soak needs its own database
+  rather than discovering it the same way this session did.
+- `status.md` §10 decision log row added.
+
+**Evidence**
+
+```text
+ruff, mypy — clean, 98 source files (only scripts/mt5_live_reader.py and
+  .env.example changed; no test file exists for this script's CLI wiring,
+  consistent with mt5_probe.py's existing testing boundary)
+```
+
+**Problems found**
+
+None — this is the fix for a problem already fully diagnosed and recorded
+in the twelfth entry.
+
+**Risk impact**
+
+None. Tooling/operational change only; no code on the order or read path
+changed. Reduces the chance of repeating the exact mistake that cost the
+third Phase A attempt its first ten minutes.
+
+**Decision**
+
+Recorded in §10: real MT5 runs use `crumblr_soak`; the shared `crumblr`
+database stays test-only. `scripts/mt5_live_reader.py` enforces this at
+startup rather than relying on documentation alone.
+
+**Next**
+
+- Once the fourth Phase A attempt concludes (pass or fail), record its
+  outcome as its own entry.
+- If it produced a clean 30-60 minute run: proceed to timestamp
+  verification (F-037/D-039) and Phase B scheduling, per review 1.11 §6-8.
+- If it failed again: diagnose before a fifth attempt, same discipline as
+  D-040/D-041/D-042.
 
 ---
 

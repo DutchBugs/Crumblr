@@ -42,7 +42,7 @@ from crumblr.mt5_gateway.client import (
     Mt5Client,
     read_credentials,
 )
-from crumblr.persistence.engine import create_db_engine
+from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, DEFAULT_TEST_URL, create_db_engine
 from crumblr.persistence.market_data import MarketDataStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -102,11 +102,23 @@ def main() -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    database_url = os.environ.get(DATABASE_URL_ENV_VAR)
+    if not database_url:
+        print(
+            f"error: {DATABASE_URL_ENV_VAR} is not set. This script writes real broker data and "
+            f"must not silently fall back to the shared development/test database "
+            f"({DEFAULT_TEST_URL!r}) — tests/integration drops that schema at teardown (D-042). "
+            f"Point {DATABASE_URL_ENV_VAR} at a database dedicated to real-terminal runs, e.g. "
+            f"...:55432/crumblr_soak (same server, separate database, own migrations).",
+            file=sys.stderr,
+        )
+        return 2
+
     max_iterations = args.max_iterations
     if args.duration is not None and max_iterations is None:
         max_iterations = max(1, int(args.duration / max(args.poll_interval, 0.1)))
 
-    engine = create_db_engine()
+    engine = create_db_engine(database_url)
     store = MarketDataStore(engine)
     reader = LiveReader(
         Mt5Client(),
