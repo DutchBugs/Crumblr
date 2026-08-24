@@ -2,10 +2,11 @@
 
 Autonomous EUR/USD trading platform on MetaTrader 5.
 
-**Current gate: M0/M3 — a working end-to-end prototype against simulated
-market data. Nothing connects to a broker, and no live trading is permitted.**
-See [status.md](status.md) for the live picture and [build.md](build.md) for
-the architecture and risk specification.
+**Current gate: M1 PASSED (MT5-INTEGRATED, read-only) · M2 PASSED · M0/M3
+otherwise a working end-to-end prototype against simulated market data. No
+order-submission path exists anywhere in the code, and no live trading is
+permitted.** See [status.md](status.md) for the live picture and
+[build.md](build.md) for the architecture and risk specification.
 
 ## See it run
 
@@ -206,6 +207,40 @@ execution methods raise, and a test fails if it reaches for a mutating call.
 The step-by-step runbook, including what to do with each field it reports, is
 [HANDOVER.md](HANDOVER.md) §4.
 
+`scripts/mt5_live_reader.py` is the continuous version: it keeps reading real
+EUR/USD ticks and M5 bars, reconnecting and fully revalidating the account,
+symbol, instrument spec and broker-clock offset on every reconnect, and
+persists everything to PostgreSQL. Real-terminal-validated 2026-08-24 (M1
+PASSED, `review/feedback.1.12.md`) — a clean 30-minute run and two deliberate
+terminal interruptions, both recovered automatically.
+
+```powershell
+$env:CRUMBLR_DATABASE_URL = "postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_soak"
+uv run python scripts/mt5_live_reader.py --duration 1800 --json var/live_reader_health.json
+```
+
+Point it at a database dedicated to real-terminal runs (`crumblr_soak`,
+never the shared test database) — see `.env.example` for why, and
+`scripts/reset_soak_database.py` for how to reset that database without
+drifting `alembic_version` out of sync with it (F-041).
+
+## Dashboard v0 — read only
+
+```bash
+uv run python scripts/run_dashboard.py
+```
+
+Serves a single status page at `http://127.0.0.1:8050/` (`/api/state` for the
+JSON it polls) showing MT5 connectivity, the latest tick/bar, HALT state and
+the latest Signal/RiskDecision/SupervisorDecision — reading only PostgreSQL
+and the `LiveReader` health snapshot file `mt5_live_reader.py --json` writes.
+Nothing in `src/crumblr/dashboard/` imports `MetaTrader5`, reads a credential,
+or registers a route other than `GET` — enforced by
+`tests/integration/test_dashboard.py::TestReadOnlyBoundary`, not only by
+intent. See `review/DEVIATIONS.md` D-043 for how this differs from build.md
+§22/Milestone 8's full operator-dashboard spec (manual HALT, audit search,
+order/position detail — none of it here yet).
+
 ## Safety guardrails already in force
 
 - **No permissive risk defaults.** Every limit in `config/` is a required
@@ -226,7 +261,11 @@ The step-by-step runbook, including what to do with each field it reports, is
 ```text
 config/            environment configuration (base + per-environment overlay)
 scripts/
-  run_replay.py    the runnable prototype
+  run_replay.py       the runnable prototype
+  mt5_probe.py        M1 first contact — one-shot, read-only
+  mt5_live_reader.py  M1 continuous read — real ticks/bars, reconnect+revalidate
+  run_dashboard.py    Dashboard v0 — read-only status page
+  reset_soak_database.py  deliberate, all-Alembic soak-database reset (F-041)
 src/crumblr/
   domain/          contracts, events, enums, money, hashing — no I/O, no SDKs
   market_data/     synthetic generator with fault injection; normalisation (M2)
@@ -241,7 +280,9 @@ src/crumblr/
   backtest/        cost and fill models                   (M3, remaining)
   application/     orchestration of the §3 transaction flow, the recorder that
                    journals it, and reconstruction of a run from the journal
-  api/             control API                            (M8)
+  dashboard/       Dashboard v0 — read-only FastAPI app, outside the broker
+                   execution boundary (review 1.9 F-035)
+  api/             control API — authenticated operator functions (M8, not built)
   observability/   logging, metrics, tracing
 tests/             unit, property, replay, integration, chaos
 ```
@@ -256,14 +297,15 @@ tests/             unit, property, replay, integration, chaos
 | Risk engine, sizing, kill switch | Working against simulated data |
 | Supervisor pre-trade policy | Layer 1 (deterministic) only |
 | Simulated broker, replay orchestrator | Working, documented approximations |
-| Real MT5 gateway | Read-only adapter and a first-contact probe, tested against a fake terminal. Never connected — needs the demo account |
+| Real MT5 gateway | **M1 PASSED, MT5-INTEGRATED** (`review/feedback.1.12.md`, 2026-08-24). Read-only adapter, first contact, a clean 30-minute continuous-read soak, and two deliberate terminal interruptions — both auto-recovered with full account/symbol/spec/clock revalidation. `order_send` remains structurally unreachable |
 | PostgreSQL journal, capsules, safety and risk-session state | Working, and written by the running orchestrator; a run rebuilds from the journal and survives a restart |
-| Raw tick/bar storage and the bar pipeline | Working; the pipeline has never seen a real quote |
-| Schema migrations, backup and restore | Working; no backup *schedule* yet |
+| Raw tick/bar storage and the bar pipeline | Working, and real-terminal-validated: 30 clean minutes produced 2,920 real ticks and 17 real M5 bars, all `GOOD` quality, zero gaps |
+| Schema migrations, backup and restore | Working; no backup *schedule* yet. A dedicated, all-Alembic soak-database reset exists (`scripts/reset_soak_database.py`, F-041) |
 | One EUR/USD exposure, intraday entry cut-off | Enforced by the risk engine |
 | Automatic flatten at the session boundary | Not started — detection halts instead (M5, ADR-004) |
 | Feature *values* in storage | Not started — only their hash and version (D-031) |
 | Post-trade evaluation, drift monitor | Not started |
-| Dashboard, control API | Not started |
+| Dashboard v0 | Working — read-only status page (`scripts/run_dashboard.py`), see above. Not the full build.md §22/M8 dashboard (D-043) |
+| Control API, manual HALT/FLATTEN from a UI, reconciliation | Not started |
 
 `notebooks/` is research only. Production strategy logic lives in tested modules.

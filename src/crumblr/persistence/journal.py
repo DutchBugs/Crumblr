@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -140,6 +140,25 @@ class EventJournal:
         with self._engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
         return tuple(_decode_row(row) for row in rows)
+
+    def latest(self, event_type: EventType) -> Event[Contract] | None:
+        """The most recent event of one type, or `None` if none was ever recorded.
+
+        `read_all(event_type=..., limit=1)` would give the *oldest* matching
+        event — that method orders by market time ascending for replay, which
+        is the wrong direction for "what happened most recently". A dashboard
+        wants the latter, so this orders descending instead of asking every
+        caller of `read_all` to remember to reverse a result.
+        """
+        statement = (
+            select(events)
+            .where(events.c.event_type == event_type.value)
+            .order_by(desc(events.c.occurred_at_utc), desc(events.c.sequence))
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _decode_row(row) if row is not None else None
 
     def stream(self, *, batch_size: int = 1000) -> Iterator[Event[Contract]]:
         """Read the whole journal without holding it all in memory."""

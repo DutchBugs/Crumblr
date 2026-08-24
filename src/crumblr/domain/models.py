@@ -139,11 +139,22 @@ class InstrumentSpec(Contract):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def spec_version(self) -> str:
-        """Content hash of the specification.
+        """Content hash of the specification's *semantic* (broker-policy) fields.
 
         build.md §7 requires detecting when a broker changes a symbol's specs.
         Comparing this hash against the stored one turns that into an equality
         check instead of a field-by-field diff.
+
+        `captured_at_utc` and `tick_value` are deliberately excluded (review
+        F-039). `captured_at_utc` is observation metadata, not a spec field.
+        `tick_value` is excluded because MT5 recomputes it live from the
+        current cross-currency rate whenever the account currency differs
+        from the quote currency (confirmed 2026-08-24 first contact,
+        `status.md`: a EUR account against EURUSD produced a non-round
+        `tick_value` for exactly this reason) — it drifts tick-to-tick with
+        the market, not with broker policy, so hashing it produced a false
+        `spec_changed` on every reconnect. `tick_value` is still recorded on
+        every `InstrumentSpec`; it just is not part of what "changed" means.
         """
         return fingerprint(
             {
@@ -154,7 +165,6 @@ class InstrumentSpec(Contract):
                 "digits": self.digits,
                 "point": self.point,
                 "tick_size": self.tick_size,
-                "tick_value": self.tick_value,
                 "volume_min": self.volume_min,
                 "volume_max": self.volume_max,
                 "volume_step": self.volume_step,

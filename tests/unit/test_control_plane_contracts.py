@@ -171,6 +171,12 @@ class TestInstrumentSpecVersioning:
             == make_instrument_spec(filling_modes=("IOC", "FOK")).spec_version
         )
 
+    def test_a_tick_value_fluctuation_alone_does_not_change_the_version(self) -> None:
+        """F-039: tick_value drifts live with the cross-currency rate, not broker policy."""
+        first = make_instrument_spec(tick_value=Decimal("0.8568539749455898"))
+        second = make_instrument_spec(tick_value=Decimal("0.8571002210000000"))
+        assert first.spec_version == second.spec_version
+
     def test_inverted_volume_bounds_are_refused(self) -> None:
         with pytest.raises(ValidationError, match=r"volume_min .* exceeds volume_max"):
             make_instrument_spec(volume_min=Decimal("10"), volume_max=Decimal("1"))

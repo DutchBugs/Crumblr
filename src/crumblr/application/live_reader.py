@@ -54,6 +54,7 @@ from crumblr.mt5_gateway.client import (
 )
 from crumblr.mt5_gateway.readonly import (
     AccountGuardError,
+    ClockOffsetUnavailableError,
     ReadOnlyMt5Gateway,
     SymbolNotFoundError,
 )
@@ -259,6 +260,22 @@ class LiveReader:
                 connected=False,
                 consecutive_failures=self._health.consecutive_failures + 1,
                 last_error=str(error),
+            )
+            return self._health
+        except ClockOffsetUnavailableError as error:
+            # F-040: a stale/ambiguous reference tick means every timestamp
+            # this poll would have produced is untrustworthy. Not a socket
+            # failure — the terminal is still connected — so the gateway is
+            # kept and retried on the next poll rather than torn down; a
+            # fresh tick clears this on its own, the same way STALE does.
+            _log.warning("live_reader.clock_offset_unavailable", error=str(error))
+            self._health = replace(
+                self._health,
+                status=ReaderStatus.DISCONNECTED,
+                connected=False,
+                consecutive_failures=self._health.consecutive_failures + 1,
+                last_error=str(error),
+                detail="broker clock offset unknown: reference tick untrustworthy",
             )
             return self._health
         except JournalIntegrityError as error:

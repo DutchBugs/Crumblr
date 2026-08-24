@@ -66,6 +66,24 @@ single observed revision, not tuned tight against it. Widen this from
 further soak evidence if a revision is ever seen this far past close;
 narrowing it needs the same kind of evidence, not a hunch."""
 
+_CLOCK_OFFSET_TOLERANCE = timedelta(minutes=3)
+"""How far a measured offset may sit from a clean half-hour multiple.
+
+Review F-040: a fresh reference tick's timestamp, compared against this
+platform's own clock, lands within call latency of a whole/half-hour GMT
+offset (measured ~2:59:39-2:59:40 for a 180-minute offset in the real
+2026-08-24 soak — a few seconds of slack, not minutes). A tick that is
+stale — the terminal returning the last quote it ever saw, e.g. market
+closed or feed frozen — no longer tracks wall-clock time at all, so the
+elapsed time since it was captured shows up here as extra drift away from
+that clean multiple. 3 minutes is generous over the observed latency while
+still catching a tick that is materially old rather than merely delayed
+by a network round trip."""
+
+_MAX_PLAUSIBLE_CLOCK_OFFSET = timedelta(hours=15)
+"""No real GMT offset exceeds UTC-12:00/UTC+14:00. A measurement outside
+this band is not a broker in an unusual timezone; it is bad input."""
+
 
 class ReadOnlyViolationError(RuntimeError):
     """Something asked the M1 gateway to change broker state."""
@@ -77,6 +95,10 @@ class AccountGuardError(RuntimeError):
 
 class SymbolNotFoundError(RuntimeError):
     """No broker symbol could be resolved for a canonical symbol."""
+
+
+class ClockOffsetUnavailableError(RuntimeError):
+    """The broker-clock offset could not be established from a trustworthy tick."""
 
 
 def _to_decimal(value: object, field: str) -> Decimal:
@@ -294,7 +316,24 @@ class ReadOnlyMt5Gateway:
             broker_now = datetime.fromtimestamp(int(_field(tick, "time")), tz=UTC)
             raw_offset = broker_now - self._clock()
             half_hours = round(raw_offset / timedelta(minutes=30))
-            self._broker_clock_offset = timedelta(minutes=30 * half_hours)
+            candidate = timedelta(minutes=30 * half_hours)
+            residual = raw_offset - candidate
+
+            implausible = abs(candidate) > _MAX_PLAUSIBLE_CLOCK_OFFSET
+            if abs(residual) > _CLOCK_OFFSET_TOLERANCE or implausible:
+                _log.warning(
+                    "mt5.broker_clock_offset_unreliable",
+                    raw_offset_seconds=raw_offset.total_seconds(),
+                    nearest_half_hour_minutes=int(candidate.total_seconds() // 60),
+                    residual_seconds=residual.total_seconds(),
+                )
+                raise ClockOffsetUnavailableError(
+                    "reference tick does not support a stable broker-clock offset "
+                    f"(raw={raw_offset}, nearest clean offset={candidate}, "
+                    f"residual={residual}) — the tick may be stale"
+                )
+
+            self._broker_clock_offset = candidate
             _log.info(
                 "mt5.broker_clock_offset_detected",
                 offset_minutes=int(self._broker_clock_offset.total_seconds() // 60),

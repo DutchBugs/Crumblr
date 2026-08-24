@@ -33,6 +33,7 @@ from crumblr.mt5_gateway.client import (
 )
 from crumblr.mt5_gateway.readonly import (
     AccountGuardError,
+    ClockOffsetUnavailableError,
     ReadOnlyMt5Gateway,
     ReadOnlyViolationError,
     SymbolNotFoundError,
@@ -887,6 +888,57 @@ class TestClockOffset:
         """The ordinary case, exercised everywhere else in this file — named
         once, explicitly, so the zero case is not only ever implicit."""
         assert gateway(FakeMt5())._clock_offset() == timedelta(0)
+
+    def test_a_stale_reference_tick_is_rejected_rather_than_mis_measured(self) -> None:
+        """F-040: a tick whose timestamp has drifted away from a clean
+
+        half-hour multiple — e.g. the terminal handing back the last quote
+        it ever saw, from well before now — must not be silently accepted
+        as this session's broker-clock offset.
+        """
+        stale = FAKE_NOW + timedelta(hours=3) - timedelta(minutes=10)
+
+        class StaleClock(FakeMt5):
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                return SimpleNamespace(bid=1.16700, ask=1.16706, time=int(stale.timestamp()))
+
+        with pytest.raises(ClockOffsetUnavailableError):
+            gateway(StaleClock())._clock_offset()
+
+    def test_a_wildly_implausible_offset_is_rejected(self) -> None:
+        """No real GMT offset is 20 hours; that is bad input, not a timezone."""
+        implausible = FAKE_NOW + timedelta(hours=20)
+
+        class ImplausibleClock(FakeMt5):
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                return SimpleNamespace(bid=1.16700, ask=1.16706, time=int(implausible.timestamp()))
+
+        with pytest.raises(ClockOffsetUnavailableError):
+            gateway(ImplausibleClock())._clock_offset()
+
+    def test_a_rejected_measurement_is_retried_fresh_not_cached(self) -> None:
+        """A stale reading must not poison every later call on this gateway
+
+        instance — the next attempt, with a fresh tick, should succeed
+        normally once the feed recovers.
+        """
+        stale = FAKE_NOW + timedelta(hours=3) - timedelta(minutes=10)
+        fresh = FAKE_NOW + timedelta(hours=3)
+
+        class RecoveringClock(FakeMt5):
+            def __init__(self) -> None:
+                super().__init__()
+                self._calls = 0
+
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                self._calls += 1
+                when = stale if self._calls == 1 else fresh
+                return SimpleNamespace(bid=1.16700, ask=1.16706, time=int(when.timestamp()))
+
+        gw = gateway(RecoveringClock())
+        with pytest.raises(ClockOffsetUnavailableError):
+            gw._clock_offset()
+        assert gw._clock_offset() == timedelta(hours=3)
 
 
 # --------------------------------------------------------------------------- #

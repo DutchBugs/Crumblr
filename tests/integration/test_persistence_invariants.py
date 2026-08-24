@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy import Engine, text
 
 from crumblr.domain.enums import Environment, KillSwitchState, ReasonCode
-from crumblr.domain.events import Event, build_event
+from crumblr.domain.events import Event, EventType, build_event
 from crumblr.domain.models import DecisionCapsule
 from crumblr.domain.timeutils import utc_now
 from crumblr.persistence.journal import CapsuleStore, EventJournal, JournalIntegrityError
@@ -85,6 +85,32 @@ class TestIdempotentWrites:
             journal.append(event)
 
         assert journal.count() == 1
+
+
+class TestJournalLatest:
+    """Dashboard v0 (review 1.12 §8) wants the newest event of a type, not the
+
+    oldest — `read_all(event_type=..., limit=1)` orders ascending for replay,
+    so `latest` exists rather than asking a caller to remember to reverse.
+    """
+
+    def test_latest_returns_the_most_recently_occurred_event(self, engine: Engine) -> None:
+        journal = EventJournal(engine)
+        base = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)
+        oldest = an_event(occurred_at=base)
+        newest = an_event(occurred_at=base + timedelta(minutes=10))
+        journal.append_many([oldest, an_event(occurred_at=base + timedelta(minutes=5)), newest])
+
+        found = journal.latest(EventType.TRADE_INTENT_CREATED)
+
+        assert found is not None
+        assert found.event_id == newest.event_id
+
+    def test_latest_is_none_for_a_type_never_recorded(self, engine: Engine) -> None:
+        journal = EventJournal(engine)
+        journal.append(an_event())
+
+        assert journal.latest(EventType.SUPERVISOR_DECISION_MADE) is None
 
 
 # --------------------------------------------------------------------------- #

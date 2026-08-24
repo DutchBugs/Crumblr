@@ -167,6 +167,44 @@ class TestTicksRoundTrip:
         assert len(store.read_ticks()) == len(many)
 
 
+class TestLatestReads:
+    """Dashboard v0 (review 1.12 §8) wants the newest row, not the oldest —
+
+    `read_ticks`/`read_bars` order ascending for replay, so `latest_tick`/
+    `latest_bar` exist rather than asking a caller to remember to reverse.
+    """
+
+    def test_latest_tick_is_the_most_recently_observed_one(self, engine: Engine) -> None:
+        store = MarketDataStore(engine)
+        store.record_ticks([a_tick(0), a_tick(10), a_tick(5)])
+
+        latest = store.latest_tick(canonical_symbol=SPEC.canonical_symbol)
+
+        assert latest is not None
+        assert latest.event_time_utc == a_tick(10).event_time_utc
+
+    def test_latest_tick_is_none_for_an_unseen_symbol(self, engine: Engine) -> None:
+        store = MarketDataStore(engine)
+        store.record_ticks([a_tick(0)])
+
+        assert store.latest_tick(canonical_symbol="GBP/USD") is None
+
+    def test_latest_bar_is_the_most_recently_opened_one(self, engine: Engine) -> None:
+        store = MarketDataStore(engine)
+        store.record_bars([a_bar(0), a_bar(10), a_bar(5)])
+
+        latest = store.latest_bar(canonical_symbol=SPEC.canonical_symbol, timeframe="M5")
+
+        assert latest is not None
+        assert latest.bar.open_time_utc == a_bar(10).bar.open_time_utc
+
+    def test_latest_bar_is_none_for_an_unseen_timeframe(self, engine: Engine) -> None:
+        store = MarketDataStore(engine)
+        store.record_bars([a_bar(0)])
+
+        assert store.latest_bar(canonical_symbol=SPEC.canonical_symbol, timeframe="M15") is None
+
+
 class TestChunkedInsertFailureSemantics:
     """F-038 (review 1.11): the D-041 chunking must have a proven, not assumed,
     failure contract.

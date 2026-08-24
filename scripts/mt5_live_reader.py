@@ -48,6 +48,16 @@ from crumblr.persistence.market_data import MarketDataStore
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _write_health_snapshot(path: Path, health: ReaderHealth) -> None:
+    """Write the snapshot atomically, so a concurrent reader never sees a
+
+    half-written file — `os.replace` is atomic on both POSIX and Windows.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(health.to_payload(), indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _print_status(iteration: int, health: ReaderHealth) -> None:
     print(
         f"  [{iteration:>4}] {health.status.value:<12} "
@@ -90,7 +100,12 @@ def main() -> int:
         "--json",
         type=Path,
         default=None,
-        help="write the final health snapshot as JSON — no account number in it (F-031)",
+        help=(
+            "write the health snapshot as JSON after every poll, not only at exit — "
+            "no account number in it (F-031). Dashboard v0 (review 1.12 §8) reads this "
+            "file to show LiveReader health from a separate process, without importing "
+            "MetaTrader5 or touching credentials itself"
+        ),
     )
     args = parser.parse_args()
 
@@ -151,6 +166,8 @@ def main() -> int:
         while max_iterations is None or iteration < max_iterations:
             health = reader.poll_once()
             _print_status(iteration, health)
+            if args.json is not None:
+                _write_health_snapshot(args.json, health)
             if health.status is ReaderStatus.UNHEALTHY:
                 print(
                     "\n  UNHEALTHY — this does not clear itself. Investigate, then call "
@@ -177,7 +194,7 @@ def main() -> int:
     print()
 
     if args.json is not None:
-        args.json.write_text(json.dumps(final.to_payload(), indent=2), encoding="utf-8")
+        _write_health_snapshot(args.json, final)
         print(f"  Health snapshot written to {args.json}\n")
 
     engine.dispose()

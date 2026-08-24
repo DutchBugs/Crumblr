@@ -78,18 +78,20 @@ Safety-state health:  AMBER   (fail-closed, durable, and now recovered on the
 Trading health:       GREY    (ict_v1 runs on synthetic data only — no evidence)
 Risk health:          AMBER   (engine works in replay; the daily budget now
                                 survives a restart; never met a real broker)
-Data health:          AMBER   (decisions journalled, ticks and bars stored,
-                                schema versioned; no real feed has been seen)
-MT5 connectivity:     AMBER   (first contact made 2026-08-24 — one successful
-                                connection: account, symbol, instrument and
-                                position reads all against a real Pepperstone
-                                terminal, account guard passed, D-037 fixed
-                                from observation. Continuous read and
-                                reconnect-with-revalidation are now built and
-                                unit-tested (`LiveReader`) but have not yet run
-                                against the real terminal — review 1.10's soak
-                                gate — so still not MT5-INTEGRATED at the
-                                milestone level, only at the connection level)
+Data health:          GREEN   (decisions journalled, ticks and bars stored,
+                                schema versioned; real Pepperstone feed
+                                evidence exists — Phase A, 2026-08-24: 2,920
+                                real ticks + 17 real M5 bars, GOOD quality,
+                                zero gaps)
+MT5 connectivity:     GREEN   (M1 = MT5-INTEGRATED, PASSED — review
+                                feedback.1.12, 2026-08-24. Account, symbol,
+                                instrument and position reads, continuous
+                                ticks/bars, and reconnect-with-full-
+                                revalidation have all run against the real
+                                Pepperstone terminal: Phase A (30 clean
+                                minutes) and Phase B (two deliberate terminal
+                                closures, both recovered) — F-034/F-037
+                                closed)
 Paper campaign:       NOT STARTED
 Production readiness: 0%
 ```
@@ -216,14 +218,14 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
 | M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
-| M1 MT5 read-only gateway | MT5-INTEGRATED, Phase A and Phase B both complete | **Evidence complete — qualification pending reviewer/owner decision** | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. **Phase B satisfied 2026-08-24**, owner present: two deliberate MT5 terminal closures, both detected, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset) and fresh data resuming within seconds — F-034 closed. Four real defects found and fixed across both phases (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth/seventeenth entries. This document does not declare M1 "PASSED" — that is the reviewer's/owner's call per review 1.11 §11, which named exactly this evidence as the condition |
+| M1 MT5 read-only gateway | MT5-INTEGRATED | **PASSED — review feedback.1.12, 2026-08-24** | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. **Phase B satisfied 2026-08-24**, owner present: two deliberate MT5 terminal closures, both detected, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset) and fresh data resuming within seconds — F-034 closed. Four real defects found and fixed across both phases (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth/seventeenth entries. **Reviewer decision, review 1.12 §7: M1 PASSED.** Recorded in §16 Promotion history. Does not authorize execution — `order_send` remains prohibited |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
 | M4 Risk engine | REPLAY-TESTED | NOT PASSED | Full §8.1 checklist and sizing; never met a real broker |
 | M5 Paper execution | SPECIFIED | **NO-GO** | Twelve prerequisites open — see `review/feedback.1.0.md` §6 |
 | M6 Trading Agent | REPLAY-TESTED | FEATURE FREEZE | `ict_v1` + `baseline_v1`; next step is evidence, not concepts |
 | M7 Evaluator / Supervisor | UNIT-TESTED | SAFETY WORK ONLY | Layer 1. Two of its seven checks now report themselves as **not in force** rather than passing (F-024); post-trade and drift not started |
-| M8 Dashboard | SPECIFIED | NOT PASSED | Operator controls exist in code; no interface |
+| M8 Dashboard | IMPLEMENTED (v0, read-only) | NOT PASSED | Dashboard v0 built 2026-08-24 — read-only status page + JSON endpoint (`scripts/run_dashboard.py`, `src/crumblr/dashboard/`), deliberately scoped to review 1.12 §8's minimum screen, not the full build.md §22/M8 spec (D-043). No manual HALT/CANCEL/FLATTEN control surface exists — M8 itself requires that and is not attempted |
 | M9 Paper campaign support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 | M10 Shadow support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 
@@ -236,10 +238,11 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
 - [x] strict typing — mypy `strict`, clean over 97 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 689 total (564 unit, 86 integration needing a real PostgreSQL —
-      they skip loudly without one — plus property/replay/chaos suites);
-      686 passed, 3 skipped (platform-dependent, explained) on the Windows
-      host with PostgreSQL up, 2026-08-24
+- [x] tests — 721 total (property/replay/chaos suites plus unit and
+      integration, the latter needing a real PostgreSQL and skipping loudly
+      without one); 718 passed, 3 skipped (platform-dependent, explained) on
+      the Windows host with PostgreSQL up, 2026-08-24 (review 1.12 pass:
+      F-039/F-040/F-041 fixed and tested)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
@@ -265,8 +268,8 @@ F-033's own rule: current sections state present truth).
 | terminal health | x | x | build/version read from the real terminal |
 | `symbol_info` | x | x | real EURUSD spec read |
 | `symbol_info_tick` | x | x | real bid/ask read |
-| bars/ticks collection | x | | `LiveReader` + `ticks()`/`bars()`, 20 tests against a fake — **not yet run against the real terminal**, review 1.10 Phase A |
-| reconnect behaviour | x | | `LiveReader`, all 5 review 1.9 F-034 scenarios pass against a fake — **not yet run against the real terminal**, review 1.10 Phase B |
+| bars/ticks collection | x | x | `LiveReader` + `ticks()`/`bars()`, unit-tested against a fake plus **Phase A, 2026-08-24**: 30 real minutes, 2,920 real ticks + 17 real M5 bars, GOOD quality, zero gaps |
+| reconnect behaviour | x | x | `LiveReader`, all 5 review 1.9 F-034 scenarios pass against a fake plus **Phase B, 2026-08-24**: two real deliberate terminal closures, both recovered with full revalidation |
 | positions | x | x | 0 open positions read from the real account |
 | `order_check` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
 | `order_send` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
@@ -746,6 +749,11 @@ Use this for architectural or risk decisions.
 | 2026-08-24 | APP-016 (terminal `trade_allowed: false`) recorded as known and deliberately not changed | Review 1.9 §4: keeping the MT5 "AlgoTrading" toggle off is an additional safety layer while no execution path is approved. M5 readiness must require account permission, terminal permission, a verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO — all together, so the toggle alone can never be sufficient | Enabling AlgoTrading now "to be ready"; treating the toggle as the execution gate | Reviewer + owner |
 | 2026-08-24 | A real MT5 soak/live run must use its own database (`crumblr_soak`), never the shared dev/test database (`crumblr`, `DEFAULT_TEST_URL`) | The twelfth update-log entry's own "worth a dedicated soak-only database... noted here rather than acted on" line — raised again independently by the reviewer/supervisors before it was acted on. `tests/integration`'s `engine` fixture drops the schema at teardown by design; the third Phase A attempt crashed on it the moment the two shared one database. `scripts/mt5_live_reader.py` now refuses to start at all unless `CRUMBLR_DATABASE_URL` is explicitly set, rather than silently falling back to the test default — "remember to set it" is not a control, same reasoning as F-031. `crumblr_soak` created on the same local PostgreSQL instance, migrated with the same Alembic baseline, `.env`/`.env.example` updated | Re-migrating the shared database before every soak attempt indefinitely; changing `create_db_engine`'s global default (would affect `run_replay.py` and other legitimate dev-default callers) | Reviewer/owner |
 | 2026-08-24 | The MT5 broker-clock offset (D-039) is detected dynamically once per gateway connection, never hard-coded | The fourth Phase A attempt proved Pepperstone's server clock runs a stable ~2:59:39-2:59:40 ahead of true UTC — real, measured, not a documentation gap. Review 1.11 §7 explicitly forbids inventing a correction without observation; observation now existed, but a fixed `+3` would have been a second silent assumption exactly where the first one used to be, wrong the moment DST shifts the real offset or a different account/server is used. `ReadOnlyMt5Gateway._clock_offset()` instead measures the gap from `symbol_info_tick` against the platform's own clock every time a gateway is constructed — which is every `LiveReader` reconnect — rounded to the nearest 30 minutes (GMT offsets are always whole/half-hour). User confirmed this direction over a hard-coded offset or leaving it undocumented, when asked directly | Hard-coding `+3`; documenting the gap without correcting it and leaving M1 blocked | User (relaying reviewer framing) |
+| 2026-08-24 | **M1 MT5 read-only gateway: PASSED, MT5-INTEGRATED** | Review `feedback.1.12.md` §7: Phase A and Phase B evidence together exceed the minimum M1 acceptance requirement build.md set. Recorded in §16 Promotion history. Does not authorize `order_send` | Reviewer (`feedback.1.12.md`) |
+| 2026-08-24 | `InstrumentSpec.spec_version`'s semantic-identity hash excludes `tick_value` as well as `captured_at_utc` | Review F-039: Phase B logged `live_reader.spec_changed` on every reconnect even though the broker's actual contract terms never changed. First-contact evidence (§13 sixth entry) already recorded why: `tick_value` is non-round for this account because MT5 recomputes it live from the EUR/USD cross-currency rate whenever the account currency differs from the quote currency — a live market readout, not broker policy, so hashing it manufactured a false "specification changed" alert on every reconnect. `tick_value` is still recorded on every `InstrumentSpec`; it is simply excluded from what "changed" means | Leaving `tick_value` in the hash and treating every reconnect's alert as expected noise; comparing specs field-by-field with an ad hoc tolerance instead of a stable hash | Reviewer (F-039) |
+| 2026-08-24 | Broker-clock offset detection (D-039) fails closed on a stale/implausible reference tick, rather than caching whatever it measures | Review F-040: the offset is derived from the gap between `symbol_info_tick`'s timestamp and the platform's own clock; if that tick is stale (e.g. the terminal handing back the last quote it ever saw), the derived "offset" is not a timezone at all, and D-039's fix would then mis-correct every timestamp for the life of that gateway connection with no way to notice. `_clock_offset()` now rejects a measurement whose residual from a clean half-hour multiple exceeds 3 minutes (real offsets round cleanly; a stale tick does not), or whose magnitude exceeds ±15h (no real GMT offset does), raising rather than caching — the next call re-measures fresh. `LiveReader` treats this the same as a stale feed: `DISCONNECTED`, not sticky, clears on its own once a fresh tick arrives | A fixed staleness cutoff on tick age alone (the tick's own clock is exactly what is in question, so its age cannot be measured independently of the offset it is meant to establish); trusting the first measurement for the life of the connection, as before | Reviewer (F-040) |
+| 2026-08-24 | The soak database is reset only via `alembic downgrade base` -> `upgrade head`, never `bootstrap_schema()`/`create_all` against a hand-dropped database | Review F-041: the third Phase A attempt's own recovery mixed the two paths — tables dropped by hand, then rebuilt with `create_all` while `alembic_version` still claimed head, so a later `alembic upgrade head` believed the database already current and did nothing. `tests/integration/test_migrations.py` already proves the downgrade/upgrade round trip leaves nothing behind; `scripts/reset_soak_database.py` is that same proven pair, run deliberately, refusing to run against a URL without "soak" in it and requiring `--yes` | Leaving the reset as an unrepeatable manual recovery; a script that wraps `drop_schema()`+`bootstrap_schema()` for speed, reintroducing the same drift | Reviewer (F-041) |
+| 2026-08-24 | Dashboard v0 built as FastAPI + server-rendered Jinja2 HTML, its own `src/crumblr/dashboard/` package rather than inside `api/` | Asked the user directly (AskUserQuestion) rather than picking a stack silently, since a new dependency and a long-lived architectural surface are the kind of decision worth pausing for. FastAPI chosen over Streamlit (heavier dependency, framework-owned process model, less natural to keep strictly read-only) and over stdlib `http.server` (zero dependencies but hand-rolled HTML across several panels grows awkward). Kept out of `api/` because build.md §21 already earmarks that package for "authenticated operator functions" — the opposite of what v0 must be — so the read-only boundary is a physically separate package, not a convention inside one meant to eventually hold mutation | Streamlit; stdlib `http.server`; building inside `api/` | User |
 
 ---
 
@@ -835,11 +843,46 @@ Next engineering steps once unblocked:
       automatically with full revalidation (symbol, account, instrument
       spec, broker clock offset) and fresh data resuming within seconds.
       F-034 closed. Full detail: `status.md` §13 seventeenth entry.
-- [ ] Build Dashboard v0 — read-only, no MT5 import, no credentials, no
-      control surface (review 1.9 F-035, 1.10 §7). Phase A and Phase B are
-      both now complete, so this may start; should display the real rows
-      this session's soak produced (review 1.11 §9).
-- [ ] Implement the reconciliation loop (M5 prerequisite).
+- [x] ~~M1 qualification~~ — **PASSED, review feedback.1.12, 2026-08-24.**
+      Recorded in §16 Promotion history.
+- [x] ~~F-039: instrument-spec fingerprint must not change on re-observation
+      alone~~ — `tick_value` (drifts live with the account/quote
+      cross-currency rate, confirmed 2026-08-24 first contact) removed from
+      `InstrumentSpec.spec_version`'s hash; `captured_at_utc` was already
+      excluded. `domain/models.py`, `tests/unit/test_control_plane_contracts.py
+      ::TestInstrumentSpecVersioning`.
+- [x] ~~F-040: broker-clock detection must fail closed on a stale reference
+      tick~~ — `ReadOnlyMt5Gateway._clock_offset()` now rejects a measurement
+      whose residual from a clean half-hour multiple exceeds 3 minutes, or
+      whose offset exceeds ±15h, raising `ClockOffsetUnavailableError`
+      rather than caching a bad value; `LiveReader` maps that to
+      `DISCONNECTED` (not sticky — clears once a fresh tick is available,
+      same as `STALE`). `mt5_gateway/readonly.py`,
+      `tests/unit/test_mt5_readonly_gateway.py::TestClockOffset`,
+      `tests/unit/test_live_reader.py::TestClockOffsetStaleReference`.
+- [x] ~~F-041: soak database reset must stay on the migration path~~ —
+      `scripts/reset_soak_database.py` (Alembic `downgrade base` ->
+      `upgrade head` only, refuses a URL without "soak" in it, requires
+      `--yes`), documented in `.env.example`.
+- [x] ~~Build Dashboard v0~~ — **shipped 2026-08-24.** Read-only status page +
+      `/api/state` JSON, `scripts/run_dashboard.py` / `src/crumblr/dashboard/`,
+      FastAPI + server-rendered HTML (user's choice, over Streamlit or stdlib
+      `http.server`). Reads PostgreSQL (`MarketDataStore`, `EventJournal`,
+      `PostgresSafetyStateStore`) and the `LiveReader` health JSON snapshot —
+      never MT5 directly. Smoke-tested against the real `crumblr_soak` data
+      from Phase A/B (13,108 ticks, 37 bars at check time). Boundary enforced
+      structurally: `tests/integration/test_dashboard.py::TestReadOnlyBoundary`
+      asserts no route accepts a mutating method and the package never
+      imports `MetaTrader5`/`crumblr.mt5_gateway`. Deliberate scope reduction
+      against build.md §22/M8's full spec recorded as D-043 — no manual
+      HALT/CANCEL/FLATTEN control surface exists yet, by design.
+- [ ] Run CI on a runner and record the result (review 1.12 §9).
+- [ ] Provide the domain-contract package for reviewer/human approval; close M0
+      (review 1.12 §9).
+- [ ] Implement the reconciliation loop (M5 prerequisite, read-only first —
+      review 1.12 §10).
+- [ ] Decide remaining owner risk/intraday/HALT-reset policies before M5
+      (review 1.12 §11).
 - [ ] Store feature values, not only their hash — D-031.
 
 ---
@@ -3328,6 +3371,237 @@ reviewer's/owner's decision, not this document's to declare.
 
 ---
 
+## Update 2026-08-24 (eighteenth entry) — review 1.12 processed: M1 PASSED, F-039/F-040/F-041 fixed
+
+**Verdict: `feedback.1.12.md` processed per its required action order (§13
+steps 1-6). M1 recorded PASSED. Three new findings closed same-day.**
+
+Review 1.12 confirmed M1 PASSED (`feedback.1.12.md` §7), reconfirmed
+F-034/F-037/F-038 CLOSED, reopened F-033 again (stale current-state
+sections still describing the project as if the real soak never happened —
+addressed below), and opened three new findings, all fixed before any other
+work per `CLAUDE.md`'s session-start protocol.
+
+**F-039 — semantic instrument identity must not change merely because it was
+re-observed.** The seventeenth entry's own text attributed Phase B's
+per-reconnect `spec_changed` alerts to "fresh `captured_at_utc`" — but
+`InstrumentSpec.spec_version` already excluded `captured_at_utc` from its
+hash before this session (`tests/unit/test_control_plane_contracts.py
+::test_identical_specs_share_a_version` already asserted this). That
+explanation was wrong; checked against the code rather than repeated. The
+real cause is `tick_value`: the sixth-entry first-contact evidence already
+recorded it as non-round (`0.8568539749455898`) "because the account
+currency (EUR) differs from the quote currency (USD)" — MT5 recomputes it
+live from the current cross-currency rate, so it drifts tick-to-tick with
+the market, not with broker policy. Hashing it manufactured a false
+"specification changed" on every reconnect. Fixed by excluding `tick_value`
+from `spec_version`'s hash alongside `captured_at_utc`; it is still recorded
+on every `InstrumentSpec`, just not part of what "changed" means. New test:
+`test_a_tick_value_fluctuation_alone_does_not_change_the_version`.
+
+**F-040 — broker-clock detection must fail closed when its reference tick is
+stale.** D-039's `_clock_offset()` trusted whatever `symbol_info_tick`
+returned and cached it for the life of the gateway connection. A stale
+reference (e.g. the terminal handing back the last quote it ever saw) would
+have produced a wrong "offset" with no way to notice, silently
+mis-correcting every subsequent timestamp. Fixed: a measurement is now only
+accepted if its residual from a clean half-hour multiple is within 3
+minutes (real offsets round cleanly — Phase A/B measured ~2:59:39-2:59:40
+for a 180-minute offset, a few seconds of call latency, not minutes) and its
+magnitude is within ±15h (no real GMT offset exceeds that). A rejected
+measurement raises `ClockOffsetUnavailableError` rather than being cached,
+so the next attempt re-measures fresh. `LiveReader` treats this like a
+stale feed — `DISCONNECTED`, not sticky, clears on its own — rather than
+like a wrong-account mismatch, since a stale tick is not evidence anything
+was ever wrong. New tests: `TestClockOffset` (+3, gateway level),
+`TestClockOffsetStaleReference` (+2, reader level).
+
+**F-041 — operational soak/database reset must remain on the migration
+path.** The twelfth entry's real recovery from a dirty `crumblr_soak` mixed
+`bootstrap_schema()`/`create_all` with Alembic's `alembic_version` table,
+which is exactly the two-paths-disagreeing failure `persistence/migrations.py`
+already warns against. `scripts/reset_soak_database.py` now provides the
+coherent alternative: `alembic downgrade base` -> `upgrade head` only — the
+same round trip `tests/integration/test_migrations.py
+::test_the_baseline_can_be_unwound` already proves leaves nothing behind —
+run deliberately, refusing a URL without "soak" in it and requiring `--yes`.
+Documented in `.env.example`.
+
+**F-033, fixed a fourth time.** §1 "Overall health" (Data health, MT5
+connectivity) and §3's MT5 checklist (`bars/ticks collection`, `reconnect
+behaviour` rows) still read as though Phase A/B had not happened, even
+though the milestone tracker and update log already described them
+correctly — the same class of drift as the first three times this finding
+was raised. Rewritten in place; historical entries above are untouched.
+
+**Full quality gate, after all three fixes:**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — 125 files already formatted
+mypy                  — no issues, 99 source files
+pytest                — 718 passed, 3 skipped, 0 failed
+                         (721 collected: up from 705 at review 1.11 —
+                         12 new tests for F-039/F-040/F-041 plus 2 test-
+                         fixture corrections, see Problems found)
+```
+
+**Problems found**
+
+Running the full suite (not a targeted subset — the lesson recorded at the
+fifteenth entry) surfaced two pre-existing fixture failures once F-040's
+tolerance was in place: `TestScenario4NoTickData`'s two tests build a
+`FakeClock` starting 300 seconds before `test_live_reader.py`'s module-level
+`NOW`, while `ScriptedMt5`'s default `symbol_info_tick` always returns a
+timestamp fixed to `NOW`. Previously this 300-second mismatch was silently
+absorbed by rounding to the nearest 30 minutes (residual 300s rounds to a
+0-minute offset with no plausibility check); F-040's new 3-minute residual
+tolerance correctly rejected it as an implausible measurement, which is the
+guard working as intended, not a regression — the fixture's reference tick
+never actually agreed with that test's own clock. Fixed by pinning both
+tests' `symbol_info_tick` override to the test's own `FakeClock` instead of
+the module constant.
+
+**Decision**
+
+M1 recorded PASSED in §16 Promotion history, reviewer `feedback.1.12.md`.
+Does not authorize `order_send`. F-039/F-040/F-041 closed same-day, ahead of
+starting Dashboard v0, per this review's own required action order and
+`CLAUDE.md`'s session-start protocol (open findings resolved before new
+work).
+
+**Next**
+
+- Build Dashboard v0 (review 1.12 §8) — read-only, no `MetaTrader5` import,
+  no credentials, no control surface, per the hard boundary and minimum
+  screen the review specifies.
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (review 1.12 §9).
+- Read-only reconciliation against real MT5 state (review 1.12 §10), after
+  the dashboard.
+- Update `review/FEEDBACK.md`'s finding register and "Unreviewed work"
+  table with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-24 (nineteenth entry) — Dashboard v0 built and smoke-tested
+
+**Verdict: Dashboard v0 shipped, read-only, boundary enforced structurally.**
+
+With M1 PASSED and F-039/F-040/F-041 closed, review 1.12 §8's Dashboard v0 —
+next in its required action order — was built. Asked the user to choose a
+stack before adding a new dependency (AskUserQuestion, not a silent pick):
+**FastAPI + server-rendered Jinja2 HTML**, over Streamlit or a stdlib
+`http.server` build. Recorded in §10 decision log.
+
+**What was built.**
+
+```text
+src/crumblr/dashboard/
+  __init__.py       the boundary, stated as a docstring contract
+  reader_health.py  reads LiveReader's JSON snapshot file — never MT5 itself
+  state.py          DashboardState — one read-only snapshot, assembled from
+                     MarketDataStore, EventJournal, PostgresSafetyStateStore
+  app.py            FastAPI app: GET / (HTML), GET /api/state (JSON) — no
+                     other routes, docs_url/redoc_url/openapi_url disabled
+  templates/dashboard.html
+scripts/run_dashboard.py   CLI entrypoint (uvicorn)
+```
+
+`scripts/mt5_live_reader.py --json` now writes its health snapshot after
+every poll (atomically, via `os.replace`), not only at exit, so the
+dashboard — a separate process — can read current `LiveReader` health
+without ever touching MT5 itself. Two small, generically useful reads were
+added alongside existing stores rather than duplicated ad hoc:
+`MarketDataStore.latest_tick`/`latest_bar` and `EventJournal.latest(event_type)`
+— `read_ticks`/`read_bars`/`read_all` all order ascending for replay, which
+is the wrong direction for "what just happened".
+
+**The screen** matches review 1.12 §8's minimum: MT5 connectivity/`LiveReader`
+health (status, connected, reconnect count, last gateway error, spec
+changes), broker/server config (no login), latest tick (bid/ask/spread/age)
+and closed M5 bar (OHLC/quality/anomalies), HALT state/reason, and the
+latest Signal/RiskDecision/SupervisorDecision including uncalibrated
+supervisor checks (F-024). "Account mode" is shown as explicitly not
+displayed rather than fabricated — margin mode is not currently persisted
+anywhere a separate read-only process can query, and inventing a value
+would be worse than naming the gap.
+
+**Boundary, enforced structurally, not by intent** (review 1.9 F-035, review
+1.12 §8's hard boundary list):
+
+```text
+tests/integration/test_dashboard.py::TestReadOnlyBoundary
+  test_no_route_accepts_a_mutation
+    — walks app.routes, asserts none accepts POST/PUT/PATCH/DELETE
+  test_the_dashboard_package_never_imports_metatrader5
+    — walks the AST of every file in src/crumblr/dashboard/, asserts no
+      import of MetaTrader5 or crumblr.mt5_gateway
+  test_a_post_to_the_index_route_is_refused
+    — an actual POST / returns 405
+```
+
+Kept as its own package rather than folded into the existing (empty) `api/`
+stub, because build.md §21 already earmarks `api/` for "authenticated
+operator functions" — the opposite claim. Recorded as **D-043**: this is a
+deliberate, scoped subset of build.md §22's full observability dashboard and
+Milestone 8's full operator dashboard (no regime/drift/signal-frequency
+panels, no orders/positions/audit-search, and — the one that matters —
+**no manual HALT/CANCEL/FLATTEN control surface at all**). Not an oversight;
+neither review 1.9 F-035 nor review 1.12 §8 authorizes building the control
+surface yet.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 106 source files
+pytest                — 737 passed, 3 skipped, 0 failed
+                         (up from 718 — 19 new tests: 10 dashboard
+                         integration, 3 reader-health unit, 4 latest-read
+                         store/journal integration, 2 boundary tests
+                         counted above)
+```
+
+**Manually verified in a browser-equivalent check** (`curl`, per `CLAUDE.md`'s
+own UI-testing requirement — no interactive browser available in this
+session): started `scripts/run_dashboard.py` against the real `crumblr_soak`
+database (Phase A/B's actual data, 13,108 ticks / 37 bars at the time of the
+check, still growing from later reader runs). `GET /` rendered the full page
+with real values (`PepperstoneUK-Demo`, real bid/ask, real tick/bar counts);
+`GET /api/state` returned the same data as JSON; `POST /` returned `405`;
+`GET /docs` and `GET /openapi.json` both `404` (disabled). Server stopped
+afterward.
+
+**Problems found.** None in the dashboard itself. `uv add --group dev
+httpx2` (needed for FastAPI's `TestClient`) and the earlier `uv sync` for
+`fastapi`/`jinja2`/`uvicorn` both reset this Windows host's environment to
+the base dependency set, silently dropping the `mt5` optional extra
+(`MetaTrader5`, `numpy`) each time — `uv sync --extra mt5` had to be re-run
+after each. Worth remembering for any future dependency change on this host;
+`HANDOVER.md`/`README.md` already document `--extra mt5` for the initial
+sync but not this re-sync trap.
+
+**Decision.** Dashboard v0 (review 1.12 §8, review 1.9 F-035) is built,
+tested, and boundary-verified. D-043 records the scope gap against build.md
+§22/M8 honestly rather than silently. Review 1.12's required action order
+items 2-7 (M1 PASS recorded, F-039/F-040/F-041 fixed, Dashboard v0 built)
+are now all complete.
+
+**Next**
+
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (review 1.12 §9).
+- Build read-only reconciliation against real MT5 state (review 1.12 §10).
+- `feedback.1.13.md`'s suggested trigger (review 1.12 §14) — Dashboard v0
+  available, F-039/F-040/F-041 addressed, CI and/or M0 contract review, and
+  initial reconciliation evidence — is now partly met; CI, the contract
+  review and reconciliation remain.
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
@@ -3376,7 +3650,7 @@ Next:
 
 | Date | Component | From | To | Decision | Evidence | Reviewer |
 |---|---|---|---|---|---|---|
-| | | | | | | |
+| 2026-08-24 | M1 MT5 read-only gateway | REPLAY-TESTED | MT5-INTEGRATED | **PASS** | Real Pepperstone demo: first contact, Phase A (30 clean minutes, 2,920 ticks + 17 bars, GOOD quality, zero gaps), Phase B (two deliberate terminal closures, both recovered with full revalidation). Detail: §13 sixth/sixteenth/seventeenth entries; milestone tracker §3 | `feedback.1.12.md` |
 
 No automatic process may add a promotion from `SHADOW` to `LIVE-CANARY` or from `LIVE-CANARY` to broader live scope without a recorded human approval.
 

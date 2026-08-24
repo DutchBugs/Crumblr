@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -196,6 +196,21 @@ class MarketDataStore:
             rows = connection.execute(statement).mappings().all()
         return tuple(MarketTick.model_validate(row["payload"]) for row in rows)
 
+    def latest_tick(self, *, canonical_symbol: str) -> MarketTick | None:
+        """The most recent tick, or `None` — for a dashboard, not replay.
+
+        `read_ticks(limit=1)` gives the *oldest* tick (it orders ascending
+        for replay); this orders descending instead."""
+        statement = (
+            select(market_ticks.c.payload)
+            .where(market_ticks.c.canonical_symbol == canonical_symbol)
+            .order_by(desc(market_ticks.c.event_time_utc), desc(market_ticks.c.sequence))
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).scalar_one_or_none()
+        return MarketTick.model_validate(row) if row is not None else None
+
     # ------------------------------------------------------------------ #
     # Bars
     # ------------------------------------------------------------------ #
@@ -290,6 +305,23 @@ class MarketDataStore:
         with self._engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
         return tuple(MarketBar.model_validate(row["payload"]) for row in rows)
+
+    def latest_bar(self, *, canonical_symbol: str, timeframe: str) -> MarketBar | None:
+        """The most recent bar, or `None` — see `latest_tick` for why this
+
+        does not simply reverse `read_bars`."""
+        statement = (
+            select(market_bars.c.payload)
+            .where(
+                market_bars.c.canonical_symbol == canonical_symbol,
+                market_bars.c.timeframe == timeframe,
+            )
+            .order_by(desc(market_bars.c.open_time_utc), desc(market_bars.c.sequence))
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).scalar_one_or_none()
+        return MarketBar.model_validate(row) if row is not None else None
 
     def counts(self) -> dict[str, int]:
         from sqlalchemy import func

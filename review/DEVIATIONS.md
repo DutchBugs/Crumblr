@@ -744,6 +744,45 @@ mean anything should start here.
   interval end but still inside the buffer is withheld; one comfortably past
   the buffer is returned.
 
+### D-043 — Dashboard v0 is a deliberate subset of build.md §22 / Milestone 8's full dashboard spec
+- **Status:** RESOLVED (as a recorded, scoped decision) 2026-08-24 — built and
+  shipped the same session
+- **Spec:** build.md §22 lists a much larger observability dashboard (platform,
+  Trading Agent, Evaluator and Risk panels — regime, signal frequency, feature
+  drift, approve/veto rate, distance to halt thresholds, and more) and
+  Milestone 8 additionally requires orders/positions, veto explanations, audit
+  search and a manual `HALT NEW ORDERS` / `CANCEL PENDING` / `FLATTEN
+  POSITIONS` control surface with confirmation and logging
+- **Original gap:** none of that existed; `src/crumblr/api/__init__.py` was an
+  empty stub
+- **Current state:** `src/crumblr/dashboard/` — a single read-only status page
+  (`scripts/run_dashboard.py`, FastAPI + server-rendered HTML) plus a
+  `/api/state` JSON endpoint, scoped exactly to review 1.12 §8's "minimum
+  useful screen": MT5 connectivity / `LiveReader` health (via a JSON snapshot
+  file, not a live MT5 connection of the dashboard's own), last tick/bar,
+  broker/server config, HALT state/reason, and the latest Signal/RiskDecision/
+  SupervisorDecision including which supervisor checks are uncalibrated
+  (F-024). Deliberately built as its own package rather than inside `api/`
+  ("control API — authenticated operator functions" per build.md §21) so the
+  read-only boundary is a physical one, not a convention inside a package
+  meant to eventually hold the opposite
+- **Remaining gap against build.md §22/M8:** no regime/signal-frequency/drift
+  panels, no orders/positions/audit-search view, and — the one that matters
+  most — **no manual HALT/CANCEL/FLATTEN control surface at all**. This is not
+  an oversight: review 1.9 F-035 and review 1.12 §8 both specify v0 as
+  strictly read-only, "outside the broker execution boundary", and neither
+  authorizes building the control surface yet. `tests/integration
+  /test_dashboard.py::TestReadOnlyBoundary` asserts no route accepts a
+  mutating HTTP method and that nothing in the package imports `MetaTrader5`
+  or `crumblr.mt5_gateway` — checked structurally so this stays true as the
+  dashboard grows, not only today
+- **Watch for:** the day a manual HALT control is actually authorized, it
+  belongs in `api/` (or a clearly separate, explicitly-authenticated surface)
+  — not added to `dashboard/` by extending what already exists there, which
+  would quietly erase the boundary this deviation exists to keep visible
+- **Gate affected:** M8 (not attempted — this is v0, not the milestone).
+  Does not affect M1/M2, which this dashboard reads from but does not gate
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

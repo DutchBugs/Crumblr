@@ -286,6 +286,66 @@ class TestScenario1NormalReconnect:
         assert recovered.reconnect_count == 2
 
 
+class TestClockOffsetStaleReference:
+    """F-040: a stale/ambiguous reference tick must not silently produce a
+
+    broker-clock offset that is then trusted for every timestamp on this
+    poll. The offset is measured once per gateway instance (i.e. once per
+    reconnect), so these tests force a reconnect to get a fresh measurement
+    rather than a cached one from an earlier, healthy poll.
+    """
+
+    def test_a_stale_reference_tick_on_reconnect_marks_the_reader_disconnected(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        assert live.poll_once().status is ReaderStatus.HEALTHY
+
+        # Drop the connection so the next successful poll builds a fresh
+        # gateway, which measures the offset anew.
+        fake.tick_rows = None
+        assert live.poll_once().status is ReaderStatus.DISCONNECTED
+
+        fake.tick_rows = (tick_row(),)
+        stale = NOW + timedelta(hours=3) - timedelta(minutes=10)
+        fake.symbol_info_tick = lambda _symbol: SimpleNamespace(  # type: ignore[method-assign]
+            bid=1.16700, ask=1.16706, time=int(stale.timestamp())
+        )
+        result = live.poll_once()
+
+        assert result.status is ReaderStatus.DISCONNECTED
+        assert result.detail is not None and "clock" in result.detail
+
+    def test_recovers_once_a_fresh_tick_is_available(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        live.poll_once()
+
+        fake.tick_rows = None
+        live.poll_once()
+
+        fake.tick_rows = (tick_row(),)
+        stale = NOW + timedelta(hours=3) - timedelta(minutes=10)
+        fake.symbol_info_tick = lambda _symbol: SimpleNamespace(  # type: ignore[method-assign]
+            bid=1.16700, ask=1.16706, time=int(stale.timestamp())
+        )
+        assert live.poll_once().status is ReaderStatus.DISCONNECTED
+
+        # The gateway from the failed attempt is still in place (no
+        # AccountGuardError was raised) — the very next poll retries the
+        # same gateway's offset measurement, now with a fresh tick.
+        fake.symbol_info_tick = lambda _symbol: SimpleNamespace(  # type: ignore[method-assign]
+            bid=1.16700, ask=1.16706, time=int(NOW.timestamp())
+        )
+        recovered = live.poll_once()
+        assert recovered.status is ReaderStatus.HEALTHY
+
+
 class TestScenario2WrongAccountFailsClosed:
     """review 1.9 F-034: reconnect -> wrong server/account -> fail closed."""
 
@@ -490,6 +550,13 @@ class TestScenario4NoTickData:
         fake.bar_rows = ()
         sink = RecordingSink()
         clock = FakeClock(datetime.fromtimestamp(1_767_000_000, tz=UTC))
+        # This test's clock starts 300s before the module-level NOW that
+        # ScriptedMt5's default symbol_info_tick assumes; pin the reference
+        # tick to this test's own clock so the broker-clock offset measures
+        # a genuine zero rather than tripping F-040's staleness guard.
+        fake.symbol_info_tick = lambda _symbol: SimpleNamespace(  # type: ignore[method-assign]
+            bid=1.16700, ask=1.16706, time=int(clock().timestamp())
+        )
         live = reader(fake, sink, clock, stale_after=timedelta(seconds=30))
 
         assert live.poll_once().status is ReaderStatus.HEALTHY
@@ -509,6 +576,9 @@ class TestScenario4NoTickData:
         fake.tick_rows = (tick_row(time=1_767_000_000, time_msc=1_767_000_000_000),)
         sink = RecordingSink()
         clock = FakeClock(datetime.fromtimestamp(1_767_000_000, tz=UTC))
+        fake.symbol_info_tick = lambda _symbol: SimpleNamespace(  # type: ignore[method-assign]
+            bid=1.16700, ask=1.16706, time=int(clock().timestamp())
+        )
         live = reader(fake, sink, clock, stale_after=timedelta(seconds=30))
         live.poll_once()
 
