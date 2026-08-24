@@ -20,15 +20,16 @@ from typing import Any
 import pytest
 from scripts.mt5_probe import (
     MissingCredentialsError,
-    decode_filling_modes,
     probe,
     raw_account_facts,
     raw_symbol_facts,
     read_credentials,
+    sanitize_report,
 )
 
 from crumblr.config import AccountGuardConfig
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
+from crumblr.mt5_gateway.enums import decode_filling_modes
 
 GUARD = AccountGuardConfig.model_validate(
     {
@@ -271,3 +272,28 @@ class TestProbe:
 
         report = probe(connected_client(TripwireMt5()), GUARD, "EUR/USD")
         assert report["open_positions"] == 0
+
+
+class TestSanitizeReport:
+    """F-031 (review 1.8): the account number must not reach git or chat."""
+
+    def test_the_account_number_is_redacted(self) -> None:
+        report = probe(connected_client(FakeMt5()), GUARD, "EUR/USD")
+        sanitized = sanitize_report(report)
+        assert sanitized["account"]["login"] == "<redacted>"
+
+    def test_the_original_report_is_not_mutated(self) -> None:
+        report = probe(connected_client(FakeMt5()), GUARD, "EUR/USD")
+        sanitize_report(report)
+        assert report["account"]["login"] == 5_000_123
+
+    def test_technical_broker_facts_survive_unchanged(self) -> None:
+        """Server, currency, leverage and the decoded modes are the whole point."""
+        report = probe(connected_client(FakeMt5()), GUARD, "EUR/USD")
+        sanitized = sanitize_report(report)
+        assert sanitized["account"]["server"] == "PepperstoneUK-Demo"
+        assert sanitized["account"]["currency"] == "EUR"
+        assert sanitized["account"]["leverage"] == 30
+        assert sanitized["account"]["margin_mode"] == "RETAIL_HEDGING (2)"
+        assert sanitized["instrument"] == report["instrument"]
+        assert sanitized["resolved_symbol"] == report["resolved_symbol"]

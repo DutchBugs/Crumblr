@@ -34,6 +34,11 @@ from crumblr.domain.models import (
 )
 from crumblr.domain.timeutils import utc_now
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client
+from crumblr.mt5_gateway.enums import (
+    SYMBOL_TRADE_MODES,
+    decode_enum,
+    decode_filling_modes,
+)
 from crumblr.observability.logging import get_logger
 
 _log = get_logger("mt5_gateway")
@@ -221,8 +226,10 @@ class ReadOnlyMt5Gateway:
             volume_step=_to_decimal(info.volume_step, "volume_step"),
             stops_level=int(info.trade_stops_level),
             freeze_level=int(info.trade_freeze_level),
-            filling_modes=(str(info.filling_mode),),
-            trade_mode=str(info.trade_mode),
+            # D-037, resolved: these were `str(int)` — the digit, not the name.
+            # Confirmed against a real terminal 2026-08-24 (status.md §13).
+            filling_modes=decode_filling_modes(int(info.filling_mode)),
+            trade_mode=decode_enum(int(info.trade_mode), SYMBOL_TRADE_MODES),
             captured_at_utc=utc_now(),
         )
 

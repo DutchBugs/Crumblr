@@ -27,11 +27,18 @@ Three properties are deliberate:
 
 The password is read from the environment and never printed, logged or
 serialised. `Mt5Credentials.__repr__` redacts it as well.
+
+**The report itself still carries the MT5 account number** in
+`account.login`, which identifies a real broker account. `--json` writes the
+raw report; use `--sanitized-json` for a copy with that field redacted before
+attaching anything to a status entry, a review document or any other file
+that might reach git (review 1.8 F-031).
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -41,31 +48,15 @@ from typing import Any
 from crumblr.config import AccountGuardConfig, load_config
 from crumblr.domain.enums import Environment
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials, Mt5UnavailableError
+from crumblr.mt5_gateway.enums import (
+    ACCOUNT_MARGIN_MODES,
+    ACCOUNT_TRADE_MODES,
+    SYMBOL_TRADE_MODES,
+    decode_filling_modes,
+)
 from crumblr.mt5_gateway.readonly import AccountGuardError, ReadOnlyMt5Gateway
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-ACCOUNT_TRADE_MODES = {0: "DEMO", 1: "CONTEST", 2: "REAL"}
-"""`ACCOUNT_TRADE_MODE_*`. Paper mode requires DEMO."""
-
-ACCOUNT_MARGIN_MODES = {0: "RETAIL_NETTING", 1: "EXCHANGE", 2: "RETAIL_HEDGING"}
-"""`ACCOUNT_MARGIN_MODE_*` — owner question Q2, deliberately never guessed.
-
-Netting and hedging differ in what a second order does to an existing
-position, which is why the one-exposure rule is written to hold under both.
-"""
-
-SYMBOL_TRADE_MODES = {
-    0: "DISABLED",
-    1: "LONGONLY",
-    2: "SHORTONLY",
-    3: "CLOSEONLY",
-    4: "FULL",
-}
-"""`SYMBOL_TRADE_MODE_*`."""
-
-SYMBOL_FILLING_FLAGS = ((1, "FOK"), (2, "IOC"), (4, "BOC"))
-"""`SYMBOL_FILLING_*` — a bitmask, not a value. A symbol may allow several."""
 
 
 class MissingCredentialsError(RuntimeError):
@@ -95,16 +86,6 @@ def read_credentials(environ: dict[str, str] | None = None) -> Mt5Credentials:
         password=env["CRUMBLR_MT5_PASSWORD"],
         server=env["CRUMBLR_MT5_SERVER"],
     )
-
-
-def decode_filling_modes(mask: int) -> tuple[str, ...]:
-    """Decode `symbol_info.filling_mode`, which is a bitmask of allowed modes.
-
-    The gateway currently stores the mask verbatim (see D-037). Decoding here
-    first means the mapping is confirmed against a terminal before anything
-    starts depending on it.
-    """
-    return tuple(name for bit, name in SYMBOL_FILLING_FLAGS if mask & bit)
 
 
 def _named(value: object, table: dict[int, str]) -> str:
@@ -213,6 +194,23 @@ def probe(client: Mt5Client, guard: AccountGuardConfig, canonical_symbol: str) -
     return report
 
 
+def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the report safe to commit, review or paste into chat.
+
+    Review 1.8 F-031: the MT5 account number in `account.login` identifies a
+    real broker account and must never reach git, a review document or a
+    shared log — only the server, currency, leverage and decoded modes are
+    needed to settle the open questions (APP-013, Q2). Everything else in the
+    report is a technical broker fact, not an account identifier, and is kept
+    unchanged.
+    """
+    sanitized = copy.deepcopy(report)
+    account = sanitized.get("account")
+    if isinstance(account, dict) and "login" in account:
+        account["login"] = "<redacted>"
+    return sanitized
+
+
 def render(report: dict[str, Any], guard: AccountGuardConfig) -> None:
     """Print the report, then say plainly what a human still has to decide."""
     print("\n" + "=" * 78)
@@ -288,7 +286,21 @@ def main() -> int:
         "--json",
         type=Path,
         default=None,
-        help="also write the report as JSON, for attaching to a status entry",
+        help=(
+            "also write the raw report as JSON. Carries the real account "
+            "number (account.login) — keep this file local and gitignored, "
+            "never attach it directly. Use --sanitized-json for that"
+        ),
+    )
+    parser.add_argument(
+        "--sanitized-json",
+        type=Path,
+        default=None,
+        help=(
+            "write a redacted copy of the report (account.login stripped), "
+            "safe to attach to a status entry, a review document or a test "
+            "fixture (review 1.8 F-031)"
+        ),
     )
     parser.add_argument(
         "--environment",
@@ -321,7 +333,15 @@ def main() -> int:
 
     if args.json is not None:
         args.json.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-        print(f"  Report written to {args.json}\n")
+        print(f"  Raw report (carries the account number) written to {args.json}")
+        print("  Keep this file local — do not commit it or paste it into chat/review.\n")
+
+    if args.sanitized_json is not None:
+        sanitized = sanitize_report(report)
+        args.sanitized_json.write_text(
+            json.dumps(sanitized, indent=2, default=str), encoding="utf-8"
+        )
+        print(f"  Sanitized report (account number redacted) written to {args.sanitized_json}\n")
 
     return 0 if report["account_guard"]["passed"] else 1
 

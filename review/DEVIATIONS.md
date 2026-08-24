@@ -417,7 +417,11 @@ mean anything should start here.
 - **Gate affected:** M5.
 
 ### D-035 — The MT5 gateway is written but has never met a terminal
-- **Status:** provisional — closes when M1 runs on the Windows host
+- **Status:** PARTIALLY RESOLVED 2026-08-24 — one real connection made (account
+  read, symbol resolution, instrument spec, position read all succeeded
+  against a real Pepperstone terminal; status.md §13). **Still open:**
+  continuous bar/tick read and observed reconnect behaviour (HANDOVER.md
+  §4.5) — one successful connection is not M1 in full
 - **Code:** `mt5_gateway/client.py`, `mt5_gateway/readonly.py`; 41 tests in
   `tests/unit/test_mt5_readonly_gateway.py`
 - **Original gap:** no MT5 adapter existed at all; `BrokerPort` had only a
@@ -453,33 +457,48 @@ mean anything should start here.
   without submitting is the entire point.
 
 ### D-037 — MT5 integer enums are stored as strings without being decoded
-- **Status:** provisional — must close at M1 first contact
-- **Code:** `ReadOnlyMt5Gateway.instrument` sets
-  `filling_modes=(str(info.filling_mode),)` and `trade_mode=str(info.trade_mode)`
-- **Gap:** MetaTrader 5 reports both as integers. `filling_mode` is a *bitmask*
-  (`SYMBOL_FILLING_FOK=1`, `IOC=2`, `BOC=4`), so a symbol allowing FOK and IOC
-  reports `3`. Stringifying it yields `"3"`, which reads like a filling mode
-  and is not one. `trade_mode` is likewise an enum where `4` means FULL.
-- **Why it is shaped this way:** the decode is documented but unobserved, and
-  D-035 already says every broker fact here is a claim. Writing a mapping into
-  the gateway would give an unverified assumption the appearance of a fact in
-  the one place — the instrument spec — that sizing and order building read.
-- **What is in place:** `scripts/mt5_probe.py` decodes both and prints the raw
-  value beside the decoded one, so the first connection settles the mapping.
-  `decode_filling_modes` is unit-tested against the documented bit values.
-- **Watch for:** the fake in `tests/unit/test_mt5_readonly_gateway.py` supplies
-  `"IOC"` and `"FULL"` as strings, which is what the adapter expects and not
-  what a terminal sends. That fake is wrong on this point and should be
-  corrected once the real values are observed — it is a worked example of why
-  D-035 calls a documentation-written fake weak evidence.
-- **Gate affected:** M1, and M5 harder — a filling mode the broker does not
-  allow is rejected at `order_send`.
+- **Status:** RESOLVED 2026-08-24 — confirmed against a real terminal, then fixed
+- **Original gap:** `ReadOnlyMt5Gateway.instrument` set
+  `filling_modes=(str(info.filling_mode),)` and `trade_mode=str(info.trade_mode)`.
+  MetaTrader 5 reports both as integers. `filling_mode` is a *bitmask*
+  (`SYMBOL_FILLING_FOK=1`, `IOC=2`, `BOC=4`), so stringifying it yields the
+  digit, not a name. `trade_mode` is likewise an enum where `4` means FULL.
+- **What first contact showed:** the real EURUSD instrument on
+  `PepperstoneUK-Demo` reported `filling_mode=2`, `trade_mode=4`. Decoded per
+  the documented mapping: `filling_mode=2` → `IOC`; `trade_mode=4` → `FULL`.
+  Both match what the documentation predicted — the mapping itself was never
+  the problem, only the fact that the gateway skipped it.
+- **Current state:** the decode tables and functions moved to
+  `src/crumblr/mt5_gateway/enums.py`, a single module imported by both the
+  gateway and `scripts/mt5_probe.py` — the two no longer carry copies that can
+  drift apart, which is how this shipped wrong the first time. `instrument()`
+  now stores `decode_filling_modes(...)` and `decode_enum(...)` output
+  instead of `str(int)`. The fake terminal in
+  `tests/unit/test_mt5_readonly_gateway.py` now supplies real integers
+  (`filling_mode=3`, `trade_mode=4`) instead of the pre-decoded strings that
+  let the old bug pass its own tests; three new tests assert the decode,
+  including an unrecognised-value case (`UNKNOWN(n)`, never a guess).
+- **Remaining gap:** none for this specific mapping. The broader D-035 gap —
+  everything else about this terminal's behaviour beyond one connection —
+  still stands.
+- **Gate affected:** M1. Closed as a blocker for M5 as well: a filling mode
+  the broker does not allow would otherwise have been rejected at
+  `order_send` on the strength of a digit that only accidentally looked
+  plausible.
 
 ### D-034 — The Pepperstone entity is unresolved
-- **Status:** provisional — must close before M1 is called complete
+- **Status:** OPEN — owner decision required. Evidence gathered 2026-08-24;
+  not resolved, because that resolution is a legal/business call, not an
+  engineering one
 - **Spec:** owner decision O-001
 - **Gap:** O-001 names **Pepperstone EU**. The MT5 server supplied by the owner
   on 2026-08-18 is **`PepperstoneUK-Demo`**. Those are different entities.
+- **What first contact showed:** the real account's `company` field reads
+  **`Pepperstone Limited`** (review 1.7/1.8 F-028's required evidence). That
+  name, alongside the `PepperstoneUK-Demo` server, is consistent with the UK
+  entity and does not read as an EU one — but company-name-to-legal-entity
+  mapping is exactly the kind of inference review 1.8 §7 warned against making
+  unilaterally. Recorded as evidence, not as a resolution.
 - **Why it matters:** the regulator differs, and with it the retail leverage
   cap and the swap treatment. The configured guard expects 1:30, which is the
   ESMA/FCA retail cap in both cases today — so the discrepancy does not
@@ -488,9 +507,11 @@ mean anything should start here.
 - **Code:** `config/paper.yaml` records the supplied server and flags the
   question in a comment. `account_guard.expected_currency` and
   `expected_leverage` are checked against `account_info()` at M1, so a wrong
-  account halts rather than trades.
-- **Watch for:** nothing here has met a terminal. Every value in that block is
-  a claim to be verified, not a fact — including the ones that look obvious.
+  account halts rather than trades — and did not, on this run.
+- **Watch for:** still nothing here beyond `company` and `server` has been
+  independently verified (no account statement, no contract note). Keep
+  `UNVERIFIED` in status/config language until the owner closes this, not
+  `RESOLVED`.
 - **Gate affected:** M1.
 
 ### D-011 — Kill switch and equity ledger were in-memory

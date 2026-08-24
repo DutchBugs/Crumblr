@@ -80,9 +80,14 @@ Risk health:          AMBER   (engine works in replay; the daily budget now
                                 survives a restart; never met a real broker)
 Data health:          AMBER   (decisions journalled, ticks and bars stored,
                                 schema versioned; no real feed has been seen)
-MT5 connectivity:     GREY    (read-only gateway and first-contact probe
-                                written; Windows host available 2026-08-24;
-                                no demo account, so still never connected)
+MT5 connectivity:     AMBER   (first contact made 2026-08-24 — one successful
+                                connection: account, symbol, instrument and
+                                position reads all against a real Pepperstone
+                                terminal, account guard passed, D-037 fixed
+                                from observation. Continuous read and
+                                reconnect behaviour, HANDOVER.md §4.5, are
+                                still unbuilt — not yet MT5-INTEGRATED at the
+                                milestone level, only at the connection level)
 Paper campaign:       NOT STARTED
 Production readiness: 0%
 ```
@@ -137,10 +142,15 @@ These block M1 and are tracked there. They are not engineering failures at M0.
 - [x] exact MT5 server documented — `PepperstoneUK-Demo`, supplied 2026-08-18
       and recorded in `config/paper.yaml` as a claim the account guard checks
 - [ ] **entity confirmed** — O-001 says "Pepperstone EU", the server says UK.
-      Different regulator, leverage cap and swap treatment. See D-034
-- [ ] MT5 demo account created — the account itself does not exist yet
+      Different regulator, leverage cap and swap treatment. Kept `UNVERIFIED`
+      rather than inferred from the server string (review 1.8 F-028) — settled
+      by `company` in the first-contact probe output, not by intent. See D-034
+- [x] MT5 demo account created — 2026-08-24. `Server: PepperstoneUK-Demo`,
+      `Currency: EUR`, `Leverage: 1:30` (review 1.7/1.8 F-026). The login itself
+      is a local secret and does not belong in this file
+- [x] logged into the MT5 terminal, once, interactively — 2026-08-24
 - [ ] hedging or netting established from `account_info()` (§29 Q2) — not guessed
-- [ ] Windows x86-64 host with the MetaTrader 5 terminal provisioned
+- [x] Windows x86-64 host with the MetaTrader 5 terminal provisioned
 
 ### Promotion decision
 
@@ -170,10 +180,13 @@ Owner:
 Current milestone: M0
 Implementation maturity: REPLAY-TESTED
 Gate qualification: NOT PASSED
-Last meaningful update: 2026-08-18 — review feedback.1.3 processed
-Next objective: M1 first contact. The adapter is written; what remains is the
-                demo account, a Windows x86-64 host and the entity question —
-                all three are human tasks
+Last meaningful update: 2026-08-24 — reviews 1.7/1.8 processed, Windows host
+                initialised and gated, demo account created and logged in
+Next objective: M1 first contact. The adapter is written; the demo account,
+                the Windows x86-64 host and the terminal login are all now
+                done. What remains is running the read-only probe — the
+                entity question resolves from its output, not from a
+                separate human task
 ```
 
 ## Scope
@@ -197,8 +210,8 @@ Next objective: M1 first contact. The adapter is written; what remains is the
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
 | M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
-| M1 MT5 read-only gateway | UNIT-TESTED | NOT PASSED | Read-only adapter and a first-contact probe (`scripts/mt5_probe.py`), 59 tests against a fake terminal; execution refused by construction (D-036). **Never run against MetaTrader 5** (D-035). The Windows host arrived 2026-08-24; what remains is the demo account and the entity question (APP-013). Continuous bar/tick read and reconnect behaviour are not implemented — HANDOVER.md §4.5 |
-| M2 Data/event journal | REPLAY-TESTED | NOT PASSED | All four deliverables now exist: journal with correlation/causation, raw tick and bar storage, a versioned normalized bar pipeline that detects gaps and out-of-order data, and Alembic migrations with a proven restore. A run reproduces from the `events` table alone and survives a real process restart. **Not passed because none of it has seen a real feed** — every row was written by a seeded generator |
+| M1 MT5 read-only gateway | REPLAY-TESTED, one connection MT5-INTEGRATED | NOT PASSED | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). **First contact made 2026-08-24** (D-035 partially resolved): account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) still open — an owner decision, not an engineering gap. Continuous bar/tick read and observed reconnect behaviour are not implemented — HANDOVER.md §4.5 — which is why the milestone itself is not yet passed on one successful connection |
+| M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
 | M4 Risk engine | REPLAY-TESTED | NOT PASSED | Full §8.1 checklist and sizing; never met a real broker |
 | M5 Paper execution | SPECIFIED | **NO-GO** | Twelve prerequisites open — see `review/feedback.1.0.md` §6 |
@@ -333,9 +346,10 @@ something was found and dealt with (F-009).
 | APP-010 | MEDIUM | `metadata.create_all` was the only way to build the schema, on a database that now holds data (D-029) | | **CLOSED 2026-08-18** | Alembic baseline; the runtime migrates rather than creates; a restored `pg_dump` is proven to reproduce the run |
 | APP-011 | MEDIUM | Two supervisor checks could not fire but reported as passed (D-015, D-028, EV-002) | | **CLOSED 2026-08-18** | Threshold set to `null` = uncalibrated; every decision carries `uncalibrated_checks` and the run report names them. The calibration itself still needs real data |
 | APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18** | One-exposure is a hard constant with the reviewer's four cases tested. Intraday entries are refused and a breach halts — **the automatic flatten is M5** (D-033, ADR-004) |
-| APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | OPEN | Treat first contact as discovery; record disagreements as deviations rather than patching silently |
-| APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | OPEN | `scripts/mt5_probe.py` decodes and prints both readings. Settle it at first contact, then correct the adapter and the fake together |
-| APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | OPEN | Different regulator, leverage cap and swap treatment. Resolve before M1 is called complete (D-034) |
+| APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **PARTLY CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). **Still open:** continuous bar/tick read and observed reconnect behaviour, HANDOVER.md §4.5 |
+| APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | **CLOSED 2026-08-24** | Confirmed against the real terminal (`filling_mode=2`→IOC, `trade_mode=4`→FULL, matching documentation) and fixed: decode logic shared between the gateway and the probe in `mt5_gateway/enums.py` |
+| APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | OPEN | Different regulator, leverage cap and swap treatment. First contact added evidence (`company: "Pepperstone Limited"`, pointing at UK) without resolving it — an owner decision (D-034) |
+| APP-016 | LOW | The terminal reports `trade_allowed: false` even though the account itself reports `trade_allowed: true` | | OPEN | Terminal-level `trade_allowed` most likely reflects the "AlgoTrading" toggle in the MT5 UI, separate from the account's own permission. Did not block any read on first contact; **will silently block every order at M5** if still off then. Confirm before execution work starts, not during it |
 | APP-009 | MEDIUM | `feedback.1.4.md` is referenced by review 1.5 but is not in the repository; findings F-016 and F-017 are unaccounted for | | **CLOSED 2026-08-18** | Restored unchanged by the owner. F-016 and F-017 were already resolved by the tracker and deviation rewrites; F-020 was new and is now closed |
 
 ---
@@ -572,8 +586,8 @@ Incidents closed:
 ```text
 Campaign: NOT STARTED
 Environment: MT5 DEMO
-Broker:
-Server:
+Broker: Pepperstone
+Server: PepperstoneUK-Demo
 Canonical symbol: EUR/USD
 Broker symbol:
 Start date:
@@ -708,6 +722,8 @@ Use this for architectural or risk decisions.
 | 2026-08-18 | Alembic is the deployment path; `create_all` is for tests only | Ordinary runs now write data. A schema built one way and migrated another is two schemas that happen to agree today | Keeping `create_all` everywhere until a deployment exists | Reviewer |
 | 2026-08-18 | The account guard checks currency and leverage as well as server and login | Both change what a risk budget means without changing anything the strategy or the risk engine can otherwise see. Review 1.5 requires broker metadata to be discovered and verified, never assumed | Trusting the configured values | Project owner |
 | 2026-08-17 | Risk values in `config/paper.yaml` are provisional placeholders | They encode risk policy, which build.md §29 reserves for a human; the platform still needs loadable values to be testable | Leave them unset and block all progress | |
+| 2026-08-24 | build.md §29 Q2 answered: the Pepperstone demo account is `RETAIL_HEDGING` | Read from `account_info()` on first contact rather than guessed, per O-001. `risk/policies.py`'s one-exposure rule was written to hold under either mode and needed no code change once the answer was known | Guessing ahead of the terminal; supporting both modes speculatively | Observed, not decided |
+| 2026-08-24 | The Pepperstone entity question (D-034) stays open despite new evidence | First contact returned `company: "Pepperstone Limited"`, which reads as the UK entity rather than the "Pepperstone EU" of O-001 — but a company-name string is evidence, not a legal determination (review 1.8 F-028). Inferring the entity from it would repeat the mistake `APP-014` exists to prevent | Treating the company field as settling the question | Reviewer (F-028); owner decision still pending |
 
 ---
 
@@ -753,9 +769,11 @@ Blocked on a human decision — see build.md §29 and `review/feedback.1.6.md` �
 
 - [x] ~~§29 Q1 — broker~~ — Pepperstone (O-001).
 - [ ] **Resolve the Pepperstone entity**: EU per O-001, UK per the server name
-      supplied. D-034.
-- [ ] Create the Pepperstone MT5 demo account; login and password to the secret
-      store, never to Git, logs, status or review documents.
+      supplied. Resolves from the probe's `company`/`server` output, not by
+      inference — review 1.8 F-028. D-034.
+- [x] ~~Create the Pepperstone MT5 demo account~~ — 2026-08-24, and logged into
+      the Windows MT5 terminal once, interactively. Login stays a local
+      secret, never Git, logs, status or review documents (F-026, F-031).
 - [ ] §29 Q2 — hedging or netting, read from `account_info()` on that account.
       Do not guess; v1 supports exactly one mode.
 - [ ] Confirm or replace the provisional risk budget in `config/paper.yaml`
@@ -766,9 +784,15 @@ Blocked on a human decision — see build.md §29 and `review/feedback.1.6.md` �
 
 Next engineering steps once unblocked:
 
-- [ ] Provision a Windows x86-64 host with the MetaTrader 5 terminal.
-- [ ] Implement the Windows MT5 read-only connection (M1). No `order_send`.
-- [ ] Discover the real EUR/USD broker symbol and its full specification.
+- [x] ~~Provision a Windows x86-64 host with the MetaTrader 5 terminal.~~ — done
+      2026-08-24.
+- [ ] Run `scripts/mt5_probe.py` against the now-logged-in terminal — nothing
+      external blocks this. Record the sanitized output in `status.md` §13
+      per F-031.
+- [ ] Discover the real EUR/USD broker symbol and its full specification —
+      settled by the probe run above.
+- [ ] Implement continuous bar/tick read and observed reconnect behaviour
+      (HANDOVER.md §4.5) — the probe proves one connection, not M1 in full.
 - [ ] Persist real Pepperstone ticks and bars immediately — the store and the
       tick→bar pipeline exist and have never seen a real quote.
 - [ ] Implement the reconciliation loop (M5 prerequisite).
@@ -1856,6 +1880,325 @@ Not yet committed — holding for the user's go-ahead per `CLAUDE.md` §4.
   once, interactively, in the terminal — unchanged by this session.
 - `feedback.1.7.md` remains due and is not something this session can write —
   it is the independent reviewer's document, not the implementer's.
+
+## Update 2026-08-24 (fourth entry) — reviews 1.7 and 1.8 processed; demo account created and logged in
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: two reviews arrived unprocessed; status.md said the demo
+               account did not exist; the owner had, in fact, already
+               created it and logged the terminal into it on this host
+Status after:  F-026…F-032 resolved or explicitly deferred; current-state
+               documentation corrected; a real security gap (F-031) closed
+               before any credentialed run; nothing external now blocks the
+               first-contact probe
+```
+
+**What changed**
+
+`review/feedback.1.7.md` and `review/feedback.1.8.md` arrived as untracked
+files (not via a git pull — placed directly in the working tree) and were
+processed per `CLAUDE.md` §1.
+
+- **F-026** (demo account shown as nonexistent) — corrected throughout
+  `status.md`: the health line, the M1-dependency checklist, Component 1's
+  current status, the M1 milestone-tracker row, and the next-actions list.
+  Recorded facts: server `PepperstoneUK-Demo`, currency `EUR`, leverage
+  `1:30`. The account login itself is not written anywhere in this
+  repository, in line with the reviewer's rule.
+- **F-027** (M2 possibly held open by an unwritten M1 condition) — checked
+  against `build.md`'s actual Milestone 2 acceptance text: replay order,
+  gap/out-of-order detection, raw-data immutability. No real-feed clause
+  exists there; `build.md`'s Milestone 1 acceptance ("reads EUR/USD
+  ticks/bars") is where that requirement actually lives. `status.md` §6 now
+  reads M2 as **PASSED on its own acceptance evidence**, with real-feed
+  validation reassigned to M1 rather than silently added to M2 — the same
+  class of error F-010 named a year of one milestone-numbering scheme ago.
+- **F-028** (Pepperstone EU vs UK) — `review/DEVIATIONS.md` D-034 already
+  carried this as provisional/unresolved; cross-referenced from `status.md`
+  and confirmed it does not gate the read-only probe.
+- **F-029** (stale paper-campaign header) — `Broker: Pepperstone` and
+  `Server: PepperstoneUK-Demo` filled in; campaign status stayed `NOT
+  STARTED`; no credential added.
+- **F-031** (raw probe output must not reach git) — this is the one finding
+  that had to be fixed *before* the probe could be run with real credentials,
+  not just documented. `scripts/mt5_probe.py` gained `sanitize_report()` and
+  a `--sanitized-json` CLI flag that redacts `account.login`; `.gitignore`
+  gained `first-contact*.json`, `*.mt5probe.json` and `var/`; `HANDOVER.md`
+  §0.4 and §4.3 now demonstrate the sanitized flag and a gitignored `var/`
+  output path instead of a bare repo-root filename. Three new tests in
+  `tests/unit/test_mt5_probe.py::TestSanitizeReport` assert the account number
+  is redacted, the original report object is not mutated, and every technical
+  broker fact (server, currency, leverage, margin mode, instrument spec)
+  survives unchanged.
+- **F-030** (full Windows gate never run with PostgreSQL) — left `OPEN`.
+  Genuinely not done yet; see Next.
+- **F-032** (MT5 enum decoding must be settled from observation) — left `IN
+  PROGRESS`. It cannot be closed from documentation; it closes when the probe
+  runs and `filling_mask`/`trade_mode` are compared against what the terminal
+  actually reports.
+
+**A process note, not a finding**
+
+`.env` was created locally from `.env.example` (git-ignored, unmodified
+otherwise). The three MT5 credential fields are intentionally still blank —
+they must be filled in by the owner, on this machine, never dictated over
+chat or written by this session. That is the one remaining action before the
+probe can run.
+
+**Evidence**
+
+- ruff check / format, mypy — all clean after the F-031 changes (93 source
+  files)
+- `tests/unit/test_mt5_probe.py` — 21 passed (18 existing + 3 new)
+- `review/FEEDBACK.md` — 1.7 and 1.8 added to the reviews table; F-026…F-032
+  added to the finding register; the stale "Pepperstone demo account"/entity
+  rows in "Still open" corrected; the "Unreviewed work" section rewritten
+  around 1.9 rather than the now-processed 1.7
+
+**Risk impact**
+
+None to the running system. F-031 is the only change with real stakes, and it
+closes a gap rather than opening one: without it, following HANDOVER.md's own
+prior example command would have written the real account number into a
+repo-root JSON file with no gitignore rule protecting it.
+
+**Decision**
+
+Not yet committed — holding for the user's go-ahead, consistent with the
+mypy-fix entry above.
+
+**Next**
+
+- Owner fills in `CRUMBLR_MT5_LOGIN`, `CRUMBLR_MT5_PASSWORD`,
+  `CRUMBLR_MT5_SERVER` in `.env` directly (not through this session).
+- Run `uv run python scripts/mt5_probe.py --json var/first-contact.json
+  --sanitized-json var/first-contact.sanitized.json`. Expect the account
+  guard to plausibly fail on the first run (D-034/APP-013 still open) — that
+  is a finding, not an error, and the report still prints.
+- Record the **sanitized** output here, and open a deviation for every
+  disagreement between the terminal and the code (APP-014) rather than
+  patching code to match first.
+- Start Docker Desktop + PostgreSQL on this host and run the full 663 to
+  close F-030.
+
+## Update 2026-08-24 (fifth entry) — F-030 closed: full Windows gate, with PostgreSQL
+
+```text
+Component: 1 — Platform / Application
+Milestone: M0/M2 — engineering baseline, persistence
+Status before: Windows gate only ever run without PostgreSQL (587/76)
+Status after:  Windows gate run in full, with a real PostgreSQL — 663 passed,
+               3 skipped, all three predicted and explained in advance
+```
+
+**What changed**
+
+Docker Desktop started, `postgres:17-alpine` run locally
+(`crumblr-pg`, port 55432, matching `.env.example`), `uv run alembic upgrade
+head` applied the baseline migration, then the full suite run against it.
+
+**Evidence**
+
+```text
+663 passed, 3 skipped in 152.36s
+SKIPPED tests\integration\test_halt_survives_restart.py:212 — filesystem or user ignores directory permissions
+SKIPPED tests\integration\test_halt_survives_restart.py:233 — filesystem or user ignores directory permissions
+SKIPPED tests\unit\test_mt5_readonly_gateway.py:484 — MetaTrader5 may genuinely be importable on Windows
+```
+
+All three are exactly the skips predicted in the third 2026-08-24 entry when
+comparing 590/73 (HANDOVER.md's macOS-derived expectation) against the
+587/76 actually observed without a database: one is the platform-guard test
+fixed for the mypy defect in that same entry (it now also *runs* differently
+on Windows, not just type-checks differently), and two are
+`test_halt_survives_restart.py` cases whose own skip message already
+anticipated that Windows does not enforce POSIX permission bits the way the
+test's assumptions were written against. None is a regression; none is new.
+
+**Risk impact**
+
+None. Confirms rather than changes anything about the running system.
+
+**Decision**
+
+Closes review 1.8 F-030.
+
+**Next**
+
+- Postgres container left running locally (`crumblr-pg`) for continued
+  development; not part of any deployment.
+- The one remaining action before M1 first contact is unchanged: the owner
+  fills in `.env` with the real MT5 credentials, then the probe runs.
+
+## Update 2026-08-24 (sixth entry) — first contact: the platform has now met a real MT5 terminal
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: nothing had ever connected to MetaTrader 5; every broker fact
+               in the codebase was a claim written from documentation
+Status after:  one successful connection made against the real Pepperstone
+               demo terminal; account guard passed; D-037 confirmed and
+               fixed from observation; Q2 (hedging/netting) answered
+```
+
+**What happened**
+
+The owner filled in `.env` locally (never seen by this session) and logged
+the MT5 terminal into the existing demo account. `scripts/mt5_probe.py` was
+run with both `--json` (raw, local-only) and `--sanitized-json` (account
+number redacted). Only the sanitized output is reproduced below, per F-031 —
+this is deliberately the first time this file, or any file in this
+repository, has ever carried real broker data.
+
+**Sanitized first-contact report**
+
+```json
+{
+  "terminal": {
+    "connected": true,
+    "trade_allowed": false,
+    "build": 6140,
+    "ping_last_ms": 15094,
+    "observed_at_utc": "2026-08-24T12:26:20.247353+00:00"
+  },
+  "account": {
+    "login": "<redacted>",
+    "server": "PepperstoneUK-Demo",
+    "name_present": true,
+    "company": "Pepperstone Limited",
+    "currency": "EUR",
+    "leverage": 30,
+    "trade_mode": "DEMO (0)",
+    "margin_mode": "RETAIL_HEDGING (2)",
+    "trade_allowed": true,
+    "trade_expert": true,
+    "limit_orders": 500,
+    "margin_so_call": 90.0,
+    "margin_so_so": 50.0
+  },
+  "symbol_candidates": ["EURUSD"],
+  "symbols_total": 1722,
+  "resolved_symbol": "EURUSD",
+  "instrument": {
+    "name": "EURUSD",
+    "description": "Euro vs US Dollar",
+    "path": "Retail\\Forex\\Majors\\EURUSD",
+    "digits": 5,
+    "point": "1e-05",
+    "tick_size": "1e-05",
+    "tick_value": "0.8568539749455898",
+    "contract_size": "100000.0",
+    "volume_min": "0.01",
+    "volume_max": "100.0",
+    "volume_step": "0.01",
+    "stops_level": 0,
+    "freeze_level": 0,
+    "symbol_trade_mode": "FULL (4)",
+    "filling_mask": 2,
+    "filling_modes": ["IOC"],
+    "spread_points": 0,
+    "spread_float": true,
+    "swap_long": "-7.1",
+    "swap_short": "1.67",
+    "swap_rollover_3days": 3,
+    "current_bid": "1.16706",
+    "current_ask": "1.16706"
+  },
+  "open_positions": 0,
+  "position_symbols": [],
+  "account_guard": { "passed": true, "mismatches": null }
+}
+```
+
+**Findings, one by one (HANDOVER.md §4.4)**
+
+1. **`resolved_symbol` is `EURUSD` — no suffix.** The suffix-discovery logic
+   in `resolve_symbol()` handled this correctly, but the specific case it hit
+   is the simple one: an exact match among 1,722 symbols, nothing to
+   disambiguate. The suffixed case the code was written to handle remains
+   unexercised by this account.
+2. **`margin_mode` is `RETAIL_HEDGING` — Q2 answered.** Recorded in the
+   decision log above. `risk/policies.py`'s one-exposure rule was written to
+   hold under either mode and needed no change.
+3. **`company` is `"Pepperstone Limited"`; entity (APP-013/D-034) still
+   open.** That name reads as the UK entity, not "Pepperstone EU" — but see
+   `review/DEVIATIONS.md` D-034: this is evidence for the owner, not a
+   resolution this session is entitled to make.
+4. **Instrument facts recorded, none contradicted a hard assumption** — there
+   were none to contradict; digits, tick size/value, contract size and
+   volume steps were always discovered, never hard-coded. `tick_value` is a
+   non-round `0.8568539749455898` because the account currency (EUR) differs
+   from the quote currency (USD) — expected, not a defect.
+5. **`filling_modes`/`trade_mode` — D-037, now closed.** See
+   `review/DEVIATIONS.md`. `filling_mask=2` decoded to `IOC`; `trade_mode=4`
+   decoded to `FULL`; both match the documented mapping the gateway now uses.
+6. **`swap_long`/`swap_short`** — `-7.1` / `1.67`. First real numbers towards
+   the cost model D-010 still doesn't have. Not wired into anything yet.
+7. **A discrepancy not anticipated by HANDOVER.md's checklist: terminal-level
+   `trade_allowed` is `false` while the account's own `trade_allowed` is
+   `true`.** Opened as `APP-016` — most likely the MT5 terminal's own
+   "AlgoTrading" toggle, separate from account permission. Did not block any
+   read. Will silently block every order at M5 if still off then.
+8. **`ping_last_ms` reads `15094`** (~15 seconds) on this first call, which is
+   implausible as a real round-trip time and far more likely a first-call
+   artifact (an uninitialised or cold-start value) than a genuine latency
+   figure. Recorded rather than interpreted — worth comparing against a
+   second, later reading before drawing any conclusion.
+9. **The account guard passed on the first run** — `expected_server`,
+   `expected_currency` and `expected_leverage` in `config/paper.yaml` all
+   matched. HANDOVER.md §4.3 expected a first-run failure while APP-013 was
+   open; that expectation did not hold, because the guard does not check the
+   entity, only server/currency/leverage, and none of those three disagreed.
+
+**What this does and does not prove**
+
+Proves: the gateway's connection handling, checked-call wrapping,
+Decimal-from-`repr` conversion, symbol resolution and account-guard logic all
+work against a real terminal, not just a fake. Does not prove: continuous
+read, reconnect behaviour, or anything about order execution — M1 is not
+complete, and M5 remains untouched.
+
+**Evidence**
+
+- raw JSON kept local at `var/first-contact.json` (git-ignored, never
+  committed); sanitized copy at `var/first-contact.sanitized.json` and
+  reproduced above
+- code changes made in response, all covered by the existing quality gate:
+  `src/crumblr/mt5_gateway/enums.py` (new, shared decode tables),
+  `readonly.py::instrument` (decodes instead of stringifying),
+  `risk/policies.py` and `config/paper.yaml` (Q2 answer recorded),
+  `tests/unit/test_mt5_readonly_gateway.py` (fake now supplies real integers,
+  three new regression tests)
+- ruff, mypy — clean, 94 source files
+- full suite with PostgreSQL, rerun after the D-037 fix — **666 passed, 3
+  skipped** in 284s (up from 663/3 before this entry's code changes; the
+  three new tests are the D-037 regression cases, all passing, same three
+  platform-dependent skips as before, no failures, no regressions)
+
+**Risk impact**
+
+None to the running system — read-only throughout, no order path touched.
+The one new operational fact (`APP-016`) has zero impact now and a real one
+at M5 if not addressed by then.
+
+**Decision**
+
+Advances D-035 (partial), closes D-037, answers build.md §29 Q2. D-034
+remains open — owner decision, not engineering.
+
+**Next**
+
+- Owner: resolve the Pepperstone entity (D-034/APP-013) and the AlgoTrading
+  toggle (APP-016) — both human actions.
+- Engineering: continuous bar/tick read and observed reconnect behaviour
+  (HANDOVER.md §4.5) is what completes M1; one connection is not the
+  milestone.
+- Commit and push this session's full body of work (review 1.7/1.8
+  processing, F-031 sanitization, F-030 closure, and this first-contact
+  entry) — held pending the owner's go-ahead.
 
 ---
 

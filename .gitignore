@@ -43,6 +43,13 @@ logs/
 *.sqlite
 *.db
 
+# Raw MT5 first-contact probe output — carries a real account number
+# (review 1.8 F-031). Only scripts/mt5_probe.py --sanitized-json output may
+# be committed, and even that should be reviewed before it is.
+first-contact*.json
+*.mt5probe.json
+var/
+
 # Research notebooks keep their outputs out of version control.
 notebooks/**/*.ipynb_checkpoints/
 

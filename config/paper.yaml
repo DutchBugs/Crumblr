@@ -40,16 +40,22 @@ intraday:
 # confirmed until `account_info()` has been read from the real account. Review
 # 1.5 is explicit that broker metadata is discovered, not assumed.
 #
-# TO VERIFY when the Windows host and the demo account exist:
-#   - the account entity. Owner decision O-001 named "Pepperstone EU"; the
-#     server supplied is `PepperstoneUK-Demo`. Those are different entities and
-#     the difference is not cosmetic — it changes the regulator, the leverage
-#     cap and the swap treatment. Resolve before M1 is called complete.
-#   - hedging or netting, from `account_info()`. Deliberately NOT guessed
-#     (build.md §29 Q2); v1 supports exactly one mode, chosen after inspection.
-#   - the actual EUR/USD broker symbol, digits, point, tick size and value,
-#     contract size, volume min/max/step, stops and freeze levels, filling
-#     modes and swap fields.
+# First contact 2026-08-24 (status.md §13) verified the account guard fields
+# above against the real terminal — server, currency and leverage all matched.
+# Still to resolve:
+#   - the account entity (D-034). Owner decision O-001 named "Pepperstone EU";
+#     the server is `PepperstoneUK-Demo` and the account's `company` field
+#     reads "Pepperstone Limited" — evidence pointing at the UK entity, not a
+#     resolution. The difference is not cosmetic — it changes the regulator,
+#     the leverage cap and the swap treatment. Owner decision, not a code fix.
+#
+# Resolved by first contact, no longer TO VERIFY:
+#   - hedging or netting (build.md §29 Q2): RETAIL_HEDGING. Deliberately not
+#     guessed beforehand; v1 supports exactly this one mode.
+#   - the broker symbol: `EURUSD`, no suffix on this account.
+#   - digits, point, tick size/value, contract size, volume min/max/step,
+#     stops/freeze levels, filling modes, swap fields — all read and recorded
+#     in status.md §13; none were hard-coded assumptions to begin with.
 #
 # The login number and password are NOT here. An account number is an
 # identifier rather than a secret, but the pair is a credential, so both live

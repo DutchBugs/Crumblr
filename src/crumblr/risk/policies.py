@@ -50,10 +50,12 @@ invite someone to raise it without the decision that should accompany doing so.
 Raising it is a code change, a review and a status.md decision row.
 
 It holds regardless of whether the account turns out to be hedging or netting
-(Q2, still unanswered until the Pepperstone demo exists). A netting account
-would net a second order into the first position and a hedging account would
-open a parallel one; neither is what v1 is permitted to do, so the rule sits
-above the account model rather than depending on it.
+(Q2 — answered 2026-08-24 by `account_info()` on the real demo account:
+`RETAIL_HEDGING`, status.md §13). A netting account would net a second order
+into the first position and a hedging account would open a parallel one;
+neither is what v1 is permitted to do, so the rule sits above the account
+model rather than depending on it — deliberately, so it did not need to change
+once the answer was known.
 """
 
 HALT_REASONS: frozenset[ReasonCode] = frozenset(

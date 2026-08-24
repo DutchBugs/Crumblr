@@ -98,7 +98,9 @@ uv run python scripts/run_replay.py --bars 4000
 1. **Create the Pepperstone demo account** and log into it once, interactively,
    in the MetaTrader 5 terminal. §4.1 explains why that step cannot be
    scripted.
-2. **Run the probe** — `uv run python scripts/mt5_probe.py --json first-contact.json`.
+2. **Run the probe** — `uv run python scripts/mt5_probe.py --json var/first-contact.json
+   --sanitized-json var/first-contact.sanitized.json` (§4.3 — the raw file carries the
+   real account number and must stay local; only the sanitized copy is safe to attach anywhere).
    Expect the account guard to fail on the first run while `APP-013` is open;
    that is a finding, and the report still prints.
 3. **Record what it says** in `status.md` §13, and open a deviation for every
@@ -310,13 +312,19 @@ redacts it, so it cannot reach a log line, a traceback or a debugger frame.
 ### 4.3 Run the probe
 
 ```powershell
-uv run python scripts/mt5_probe.py --json first-contact.json
+uv run python scripts/mt5_probe.py --json var/first-contact.json --sanitized-json var/first-contact.sanitized.json
 ```
 
 `scripts/mt5_probe.py` connects, reads and prints. It cannot trade: it holds a
 `ReadOnlyMt5Gateway`, whose execution methods raise (`D-036`), and there is no
 order interface reachable from the file. A test asserts it touches no mutating
 call.
+
+**The raw `--json` file carries the real MT5 account number** in
+`account.login` and must stay local — `var/` is git-ignored for exactly this.
+Only the `--sanitized-json` copy (account number redacted, everything else
+kept) may be attached to a status entry, a review document, or pasted into
+chat — review 1.8 F-031.
 
 Its exit code is `1` when the account guard disagrees with `config/paper.yaml`.
 That is the expected first result while `APP-013` is open, and the report still

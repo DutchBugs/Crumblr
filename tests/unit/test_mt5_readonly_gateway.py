@@ -82,8 +82,8 @@ def symbol_info(**overrides: Any) -> SimpleNamespace:
         "volume_step": 0.01,
         "trade_stops_level": 10,
         "trade_freeze_level": 0,
-        "filling_mode": "IOC",
-        "trade_mode": "FULL",
+        "filling_mode": 3,  # SYMBOL_FILLING_FOK | SYMBOL_FILLING_IOC — D-037
+        "trade_mode": 4,  # SYMBOL_TRADE_MODE_FULL — D-037
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -392,6 +392,29 @@ class TestInstrumentSpec:
     def test_another_symbol_is_refused(self) -> None:
         with pytest.raises(SymbolNotFoundError, match="GBP/USD"):
             gateway(FakeMt5()).instrument("GBP/USD")
+
+    def test_filling_mode_is_decoded_from_the_bitmask_not_stringified(self) -> None:
+        """D-037: MT5 hands back an int bitmask, not a name. `str(3)` is `"3"`.
+
+        Confirmed against a real Pepperstone terminal 2026-08-24: a raw
+        `filling_mode` of 2 decoded to `IOC` (status.md §13). This fixture
+        uses 3 (`FOK | IOC`) to exercise more than one bit at once.
+        """
+        spec = gateway(FakeMt5()).instrument("EUR/USD")
+        assert spec.filling_modes == ("FOK", "IOC")
+
+    def test_trade_mode_is_decoded_from_the_enum_not_stringified(self) -> None:
+        """D-037, the other half: `trade_mode` is an int enum, not a name."""
+        spec = gateway(FakeMt5()).instrument("EUR/USD")
+        assert spec.trade_mode == "FULL"
+
+    def test_an_unrecognised_trade_mode_says_so_rather_than_guessing(self) -> None:
+        class OddTradeMode(FakeMt5):
+            def symbol_info(self, _symbol: str) -> SimpleNamespace:
+                return symbol_info(trade_mode=99)
+
+        spec = gateway(OddTradeMode()).instrument("EUR/USD")
+        assert spec.trade_mode == "UNKNOWN(99)"
 
 
 # --------------------------------------------------------------------------- #
