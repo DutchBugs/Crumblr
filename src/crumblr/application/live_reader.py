@@ -52,7 +52,11 @@ from crumblr.mt5_gateway.client import (
     Mt5Credentials,
     Mt5UnavailableError,
 )
-from crumblr.mt5_gateway.readonly import AccountGuardError, ReadOnlyMt5Gateway
+from crumblr.mt5_gateway.readonly import (
+    AccountGuardError,
+    ReadOnlyMt5Gateway,
+    SymbolNotFoundError,
+)
 from crumblr.observability.logging import get_logger
 from crumblr.persistence.journal import JournalIntegrityError
 
@@ -310,6 +314,23 @@ class LiveReader:
                 last_reconnect_at_utc=now,
                 last_error=str(error),
                 detail=f"account guard failed on reconnect: {error}",
+            )
+            return self._health
+        except SymbolNotFoundError as error:
+            # review 1.10 F-036: the instrument could not be established at
+            # all — not a transient call failure, and not merely a changed
+            # spec. This account cannot even see the expected symbol, which
+            # is a safety-relevant fact that could not be confirmed, and
+            # review 1.9's own rule for that is UNKNOWN -> HALT, not retry.
+            _log.error("live_reader.symbol_unresolved", error=str(error))
+            self._gateway = None
+            self._health = replace(
+                self._health,
+                status=ReaderStatus.UNHEALTHY,
+                connected=False,
+                last_reconnect_at_utc=now,
+                last_error=str(error),
+                detail=f"instrument could not be established on reconnect: {error}",
             )
             return self._health
 

@@ -33,6 +33,7 @@ is only moved to `CLOSED` with evidence — a commit, a file, a test.
 | [feedback.1.7.md](feedback.1.7.md) | 2026-08-23 | GO WITH CONDITIONS · M1 **READY FOR FIRST CONTACT ONCE WINDOWS HOST EXISTS** · M5/P2 **NO-GO** | F-026 … F-029 |
 | [feedback.1.8.md](feedback.1.8.md) | 2026-08-24 | **GO — PROCEED TO READ-ONLY MT5 FIRST CONTACT** · M5/P2 **NO-GO** | F-030 … F-032, plus 1.7 reprocessed |
 | [feedback.1.9.md](feedback.1.9.md) | 2026-08-24 | **GO — CONTINUE FORWARD** · M1 first contact passed, complete continuous read+reconnect now · Dashboard v0 approved · M5/P2 **NO-GO** | F-033 … F-035, O-005, plus 1.7/1.8 reconfirmed |
+| [feedback.1.10.md](feedback.1.10.md) | 2026-08-24 | **GO — EXECUTE THE REAL READ-ONLY SOAK NOW** · M1 implementation ready, real evidence still required · M2 **PASSED** · M5/P2 **NO-GO** | F-033 reopened/reclosed, F-036, F-037 |
 
 > **`feedback.1.4.md` was missing and has been restored** (2026-08-18, review
 > 1.6 §2 asked for it). It was added unchanged and not renumbered. While it was
@@ -88,9 +89,11 @@ different questions and conflating them is how "CLOSED" comes to be misread as
 | F-030 | MEDIUM | Full Windows gate (with PostgreSQL) had not run | CLOSED | SHIPPED | Docker + PostgreSQL 17 started on the Windows host, Alembic migrations applied, full suite run: **663 passed, 3 skipped** — the 3 are exactly the platform-dependent skips predicted in the earlier (no-database) run: the Windows-only mypy/`sys.platform` test (F-031 area) and two `test_halt_survives_restart.py` cases where Windows does not enforce POSIX permission bits. `status.md` §13 fifth 2026-08-24 entry |
 | F-031 | MEDIUM / SECURITY | First-contact evidence must be sanitized before it enters Git/review artifacts | CLOSED | SHIPPED | `scripts/mt5_probe.py::sanitize_report` redacts `account.login`; new `--sanitized-json` CLI flag; `.gitignore` now excludes raw probe output (`first-contact*.json`, `*.mt5probe.json`, `var/`); `HANDOVER.md` §0.4/§4.3 rewritten to use the sanitized flag and a gitignored `var/` path. Three new tests in `tests/unit/test_mt5_probe.py::TestSanitizeReport` |
 | F-032 | MEDIUM | MT5 enum decoding (D-037) must be settled from real observation before instrument specs become authoritative | CLOSED | SHIPPED | First contact 2026-08-24: real terminal reported `filling_mode=2` (→ IOC) and `trade_mode=4` (→ FULL), both matching the documented mapping. Gateway fixed to decode instead of stringify; decode tables shared with the probe in the new `src/crumblr/mt5_gateway/enums.py` so the two cannot drift apart again. `status.md` §13 sixth 2026-08-24 entry; `review/DEVIATIONS.md` D-037 |
-| F-033 | MEDIUM | `status.md` current-state sections still lagged behind the first-contact update | CLOSED | N/A — documentation | M1-dependency checklist, Component 1 objective, milestone tracker, risk table and next-actions all rewritten to current state; historical §13 entries left untouched |
-| F-034 | HIGH | Reconnect must revalidate broker/account truth before data flow resumes | IN PROGRESS | SHIPPED, unit-tested only | `src/crumblr/application/live_reader.py::LiveReader`. All five required scenarios pass against a scripted fake terminal (`tests/unit/test_live_reader.py`, 13 tests): normal reconnect recovers, wrong account fails closed and stays closed until `acknowledge()`, a changed symbol spec is detected and recorded without silent continuation, silence past threshold becomes STALE and self-clears, every reconnect re-runs the full account guard. **Not yet run against a real terminal** — `scripts/mt5_live_reader.py` exists for that; the soak test (review 1.9 §5) is the remaining step before this closes |
-| F-035 | HIGH DESIGN | UI v0 must remain read-only and outside the broker execution boundary | OPEN UNTIL BUILT | PENDING | Hard boundary specified: reads PostgreSQL/app state only, no `MetaTrader5` import, no credentials, no `order_send`, no HALT reset, no risk-config write, no `TradeIntent` creation, no buttons. Not yet built |
+| F-033 | MEDIUM | `status.md` current-state sections still lagged behind the first-contact update | **REOPENED 2026-08-24 by review 1.10, then CLOSED again the same day** | N/A — documentation | 1.9's fix was itself incomplete — the MT5 checklist, the M1 milestone row, "Overall health" and the repo/build checklist (stale `(no remote)`, stale test/file counts) all still described the reader as unbuilt after it had shipped. Rewritten to distinguish impl+unit-tested from real-terminal-validated per capability |
+| F-034 | HIGH | Reconnect must revalidate broker/account truth before data flow resumes | IN PROGRESS | SHIPPED, unit-tested only | `src/crumblr/application/live_reader.py::LiveReader`. All five required scenarios pass against a scripted fake terminal (`tests/unit/test_live_reader.py`, 16 tests): normal reconnect recovers, wrong account fails closed and stays closed until `acknowledge()`, a changed symbol spec is detected and recorded without silent continuation, silence past threshold becomes STALE and self-clears, every reconnect re-runs the full account guard. **Not yet run against a real terminal** — `scripts/mt5_live_reader.py` exists for that; the soak test (review 1.10 Phase A/B) is the remaining step before this closes |
+| F-035 | HIGH DESIGN | UI v0 must remain read-only and outside the broker execution boundary | OPEN UNTIL BUILT | PENDING | Hard boundary specified: reads PostgreSQL/app state only, no `MetaTrader5` import, no credentials, no `order_send`, no HALT reset, no risk-config write, no `TradeIntent` creation, no buttons. Not yet built. Review 1.10 §7 confirms it may start after Phase A produces real rows — not before, not instead |
+| F-036 | HIGH DESIGN | Reader acknowledgement must never equal automatic restoration of health | CLOSED | SHIPPED | `LiveReader.acknowledge()` only clears the sticky latch to `DISCONNECTED`; the next `poll_once()` performs a full fresh reconnect + revalidation (account guard, margin mode, symbol resolution, instrument spec) before status can become `HEALTHY` again. A real gap found while verifying this: `SymbolNotFoundError` from a missing/unresolvable symbol was not caught in `_reconnect()` and would have crashed the reader rather than failing closed — fixed, now `UNHEALTHY` like an account mismatch. Three new tests assert acknowledging a still-broken account/symbol does not restore `HEALTHY`, and that a genuinely fixed one does |
+| F-037 | HIGH | MT5 timestamp semantics must be verified against the real feed before M1 is qualified | OPEN | PENDING REAL SOAK | Same open question as D-039. Cannot close from code — needs the soak test's comparison of stored `event_time_utc`/`received_time_utc` against wall-clock reality |
 
 **Nothing is `SHIPPED` that has met a real broker.** Every entry above was
 exercised against simulated data only. F-018 and F-019 are shipped against a
@@ -147,22 +150,22 @@ reviewer set for the next gates. Tracked here so they are not lost.
 
 ---
 
-## Unreviewed work — `feedback.1.10.md` not yet triggered
+## Unreviewed work — `feedback.1.11.md` not yet triggered
 
-`feedback.1.7.md` through `feedback.1.9.md` have all been processed (F-026…
-F-035, O-005, above). Review 1.9 §15 names the trigger for `feedback.1.10.md`:
-continuous read/reconnect evidence, first real ticks/bars persisted, Dashboard
-v0 existing, and/or a CI result or M0 contract package.
+`feedback.1.7.md` through `feedback.1.10.md` have all been processed (F-026…
+F-037, O-005, above). Review 1.10 §13 names the trigger for
+`feedback.1.11.md`: M1 qualification / dashboard review, once the real soak
+(Phase A normal run, Phase B deliberate interruption) has produced recorded
+evidence.
 
-**Nothing below has been seen by a reviewer yet** — it is this session's
-response to review 1.9's required next-action order (§13):
+**Nothing below has been seen by a reviewer yet:**
 
 | Artifact | What it claims | Where to check it |
 |---|---|---|
-| Review 1.9 processing | F-033 (stale sections) fixed; O-005 recorded, scoped to demo only; APP-013/APP-016 updated to the reviewer's exact decisions | `status.md` §1–§3, §6, §10, §12; `review/DEVIATIONS.md` D-034 |
-| CI | Not yet confirmed running/green on a runner — `gh` CLI installation was completed but authentication was refused by the session's own auto-mode safety classifier (credential extraction), so this session could not check Actions status itself | Ask the owner to check `github.com/DutchBugs/Crumblr/actions`, or authenticate `gh` interactively |
-| Continuous MT5 reader (F-034 workstream A) | Built and unit-tested against all five required reconnect scenarios (scripted fake terminal); **not yet run against the real terminal** — the soak test is the remaining step | `src/crumblr/application/live_reader.py`; `tests/unit/test_live_reader.py` (13 tests); `scripts/mt5_live_reader.py`; `status.md` §13 seventh 2026-08-24 entry |
-| Dashboard v0 (F-035 workstream B) | *Not started as of this entry* — correctly sequenced after workstream A per review 1.9 §9's own rule | — |
+| F-036 fix | `LiveReader.acknowledge()` cannot itself restore HEALTHY; a `SymbolNotFoundError` during reconnect (missing/unresolvable symbol) was uncaught and would have crashed the reader — now `UNHEALTHY`, fail-closed, like an account mismatch | `src/crumblr/application/live_reader.py::_reconnect`; `tests/unit/test_live_reader.py::TestScenario6AcknowledgeIsNotRestoration` (3 tests) |
+| F-033, fixed again | The MT5 checklist (was all-unchecked), the M1 milestone row, "Overall health", and the repo/build checklist (stale `(no remote)`, stale counts) rewritten to distinguish impl+unit-tested from real-terminal-validated, per capability | `status.md` Platform checklist, §1, §3, §6 |
+| CI | Still not confirmed running — unchanged from the 1.10 entry below | same as below |
+| The real soak (Phase A/B) | **Not yet run** as of this entry — the reviewer's stated top priority. Everything above is preparation for it, not a substitute | — |
 
 `feedback.2.0.md` remains mandatory before the first `order_send`, demo
 included, and is separate from 1.10.

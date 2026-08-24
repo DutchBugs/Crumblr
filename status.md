@@ -85,8 +85,10 @@ MT5 connectivity:     AMBER   (first contact made 2026-08-24 — one successful
                                 position reads all against a real Pepperstone
                                 terminal, account guard passed, D-037 fixed
                                 from observation. Continuous read and
-                                reconnect behaviour, HANDOVER.md §4.5, are
-                                still unbuilt — not yet MT5-INTEGRATED at the
+                                reconnect-with-revalidation are now built and
+                                unit-tested (`LiveReader`) but have not yet run
+                                against the real terminal — review 1.10's soak
+                                gate — so still not MT5-INTEGRATED at the
                                 milestone level, only at the connection level)
 Paper campaign:       NOT STARTED
 Production readiness: 0%
@@ -184,13 +186,13 @@ Owner:
 Current milestone: M0
 Implementation maturity: REPLAY-TESTED
 Gate qualification: NOT PASSED
-Last meaningful update: 2026-08-24 — review 1.9 processed; first MT5 contact
-                made and verified; O-005 recorded (entity, scoped to demo)
-Next objective: Complete M1 — continuous EUR/USD tick and M5-bar read,
-                persisted immediately, plus reconnect with full
-                post-reconnect revalidation (review 1.9 F-034, HIGH, blocks
-                M1). One successful connection is proven; a long-running,
-                self-healing read is not yet built
+Last meaningful update: 2026-08-24 — review 1.10 processed; the continuous
+                reader and reconnect revalidation are built and unit-tested
+Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
+                reader against the actual Pepperstone terminal, proving real
+                ticks/bars land in PostgreSQL, then one deliberate
+                interruption with the owner present, proving reconnect and
+                full revalidation against reality rather than a fake
 ```
 
 ## Scope
@@ -214,7 +216,7 @@ Next objective: Complete M1 — continuous EUR/USD tick and M5-bar read,
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
 | M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
-| M1 MT5 read-only gateway | REPLAY-TESTED, one connection MT5-INTEGRATED | NOT PASSED | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). **First contact made 2026-08-24** (D-035 partially resolved): account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) still open — an owner decision, not an engineering gap. Continuous bar/tick read and observed reconnect behaviour are not implemented — HANDOVER.md §4.5 — which is why the milestone itself is not yet passed on one successful connection |
+| M1 MT5 read-only gateway | REPLAY-TESTED, one connection MT5-INTEGRATED | NOT PASSED | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). **First contact made 2026-08-24** (D-035 partially resolved): account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. Continuous bar/tick read and reconnect-with-revalidation (`LiveReader`) are **built and unit-tested** against all five review 1.9 F-034 scenarios, but **not yet run against the real terminal** — review 1.10's real-soak gate is the remaining step before this milestone passes |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
 | M4 Risk engine | REPLAY-TESTED | NOT PASSED | Full §8.1 checklist and sizing; never met a real broker |
@@ -232,33 +234,45 @@ Next objective: Complete M1 — continuous EUR/USD tick and M5-bar read,
 - [x] `pyproject.toml`
 - [x] dependency lockfile — `uv.lock`, CI installs with `--locked`
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
-- [x] strict typing — mypy `strict`, clean over 88 source files
+- [x] strict typing — mypy `strict`, clean over 97 source files
 - [x] linting — ruff check + format, clean
-- [x] unit tests — 479
-- [x] property tests — 11 Hypothesis-driven; 28 end-to-end replay tests;
-      86 integration tests needing a real PostgreSQL (they skip loudly without one)
+- [x] tests — 689 total (564 unit, 86 integration needing a real PostgreSQL —
+      they skip loudly without one — plus property/replay/chaos suites);
+      686 passed, 3 skipped (platform-dependent, explained) on the Windows
+      host with PostgreSQL up, 2026-08-24
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
-- [ ] Windows integration tests — no MT5 code to integrate yet (M1)
-- [ ] CI pipeline — workflow committed, never run (no remote)
+- [x] MT5-touching tests exist and pass on the Windows host — `test_mt5_probe.py`,
+      `test_mt5_readonly_gateway.py`, `test_live_reader.py` — all against a
+      fake terminal; **no test in the repository has run against the real
+      terminal**, only the manual first-contact probe has (status.md §13)
+- [ ] CI pipeline — workflow committed; the repository has had a remote since
+      2026-08-24, so nothing external blocks running it, but it has not been
+      confirmed to run yet (review 1.9 §8, 1.10 §8)
 
 ### MT5
 
-- [ ] `initialize`
-- [ ] account validation
-- [ ] environment validation
-- [ ] terminal health
-- [ ] `symbol_info`
-- [ ] `symbol_info_tick`
-- [ ] bars/ticks collection
-- [ ] `order_check`
-- [ ] `order_send`
-- [ ] positions
-- [ ] orders
-- [ ] history
-- [ ] reconciliation
-- [ ] reconnect behavior
+Three columns, because "code exists", "unit-tested against a fake" and
+"validated against the real terminal" are different claims (review 1.10
+F-033's own rule: current sections state present truth).
+
+| Capability | impl+unit | real terminal | Note |
+|---|:--:|:--:|---|
+| `initialize` / connect | x | x | first contact, 2026-08-24 |
+| account validation | x | x | guard passed against the real account |
+| environment (demo) validation | x | x | confirmed `DEMO` |
+| terminal health | x | x | build/version read from the real terminal |
+| `symbol_info` | x | x | real EURUSD spec read |
+| `symbol_info_tick` | x | x | real bid/ask read |
+| bars/ticks collection | x | | `LiveReader` + `ticks()`/`bars()`, 20 tests against a fake — **not yet run against the real terminal**, review 1.10 Phase A |
+| reconnect behaviour | x | | `LiveReader`, all 5 review 1.9 F-034 scenarios pass against a fake — **not yet run against the real terminal**, review 1.10 Phase B |
+| positions | x | x | 0 open positions read from the real account |
+| `order_check` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
+| `order_send` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
+| orders (pending) | | | not built; not required for M1's own acceptance |
+| history (backfill beyond one poll) | | | not built; not required for M1's own acceptance |
+| reconciliation | | | M5 prerequisite, not M1 — HANDOVER.md §6 |
 
 ### Risk
 
@@ -753,7 +767,7 @@ Use this for architectural or risk decisions.
 | A schema change loses data nobody can regenerate | Medium | Alembic baseline, migrated deployment path, proven restore | CLOSED 2026-08-18 — no backup *schedule* exists yet, only a proven restore |
 | A position is carried through the 17:00 rollover | High | entries refused inside the window; a surviving exposure halts | MITIGATED — detection only. The flatten itself is M5 (D-033) |
 | A second EUR/USD exposure is opened | High | hard constant in the risk engine, above the account model | CLOSED 2026-08-18 |
-| The connected account is not the one that was configured | High | server, login, currency and leverage all checked; mismatch halts | MITIGATED — verified once against a real terminal 2026-08-24, guard passed. **Not yet re-verified on reconnect** — review 1.9 F-034 requires full revalidation after every reconnect, not implemented yet |
+| The connected account is not the one that was configured | High | server, login, currency, leverage and margin mode all re-checked on every reconnect (`LiveReader`) | MITIGATED — verified once against a real terminal 2026-08-24, guard passed; the reconnect revalidation logic itself is built and passes all five review 1.9 F-034 scenarios against a fake. **Not yet exercised against a real reconnect** — review 1.10 Phase B |
 
 ---
 
@@ -796,16 +810,20 @@ Next engineering steps once unblocked:
       2026-08-24. Sanitized output recorded in `status.md` §13 (F-031).
 - [x] ~~Discover the real EUR/USD broker symbol and its full specification.~~ —
       `EURUSD`, no suffix. Recorded 2026-08-24.
-- [ ] **Implement continuous bar/tick read and reconnect with full
-      revalidation** (HANDOVER.md §4.5, review 1.9 F-034 — HIGH, blocks M1).
-      One connection is not M1; reconnect must not resume without re-checking
-      account, server, currency, leverage, mode and symbol spec.
-- [ ] Run a controlled read-only soak with at least one deliberate
-      interruption, and record the evidence (review 1.9 §5).
-- [ ] Persist real Pepperstone ticks and bars immediately — the store and the
-      tick→bar pipeline exist and have never seen a real quote.
+- [x] ~~Implement continuous bar/tick read and reconnect with full
+      revalidation~~ — `application/live_reader.py::LiveReader`, built and
+      unit-tested 2026-08-24 (HANDOVER.md §4.5, review 1.9 F-034). All five
+      required reconnect scenarios pass against a scripted fake terminal.
+- [ ] **Run the real soak, Phase A**: `scripts/mt5_live_reader.py` against
+      the actual Pepperstone terminal, normal operation, 30-60 minutes during
+      an active FX session. Prove real ticks/M5 bars land in PostgreSQL and
+      settle D-039/F-037 (timestamp semantics) from what it shows.
+- [ ] **Run the real soak, Phase B**: one deliberate terminal interruption,
+      owner present, proving reconnect + full revalidation against reality
+      (review 1.10 §5). Do not combine failure modes in the first test.
 - [ ] Build Dashboard v0 — read-only, no MT5 import, no credentials, no
-      control surface (review 1.9 F-035).
+      control surface (review 1.9 F-035, 1.10 §7). May start after Phase A
+      produces real rows; must not delay Phase A/B.
 - [ ] Implement the reconciliation loop (M5 prerequisite).
 - [ ] Store feature values, not only their hash — D-031.
 
@@ -2354,6 +2372,95 @@ not have. Left `IN PROGRESS` in `review/FEEDBACK.md`.
   what it shows.
 - Only after that: Dashboard v0 (F-035) and reconciliation, per review 1.9's
   own ordering.
+
+## Update 2026-08-24 (eighth entry) — review 1.10 processed: F-033 reopened and fixed properly, F-036 found and fixed
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: the seventh entry's own current-state fixes were incomplete;
+               a real crash-on-missing-symbol gap existed in the reconnect
+               path, unfound because no test exercised it
+Status after:  current-state sections actually consistent with the update
+               log; the reconnect engine fails closed on an unresolvable
+               symbol instead of crashing; ready for the real soak with
+               nothing else known to fix first
+```
+
+**Review 1.10 arrived and was processed**
+
+`review/feedback.1.10.md` (untracked file, same mechanism as prior reviews).
+Verdict: **GO — EXECUTE THE REAL READ-ONLY SOAK NOW**. Two findings required
+code or documentation changes before that soak should run.
+
+**F-033, reopened.** The seventh entry's "current-state fix" turned out to
+still contain stale claims: the MT5 checklist (14 items, every single one
+unchecked, including things proven against the real terminal that same day),
+the M1 milestone row's prose ("not implemented" after it had shipped),
+"Overall health"'s MT5 connectivity line, the repository/build checklist's
+`(no remote)` note (the remote has existed since the third 2026-08-24 entry),
+and stale test/file counts (479 unit tests, 88 source files — both long out
+of date). All rewritten. The MT5 checklist is now a table with two columns —
+impl+unit-tested vs. validated against the real terminal — because that is
+exactly the distinction that kept going stale when collapsed into one
+checkbox.
+
+**F-036: acknowledgement must never itself mean "safe again".** The reviewer
+asked for the invariant to be checked explicitly, and checking it surfaced a
+real bug: `LiveReader._reconnect()` caught `Mt5CallFailedError` and
+`Mt5UnavailableError`, but not `SymbolNotFoundError` — the exception
+`resolve_symbol()` raises when the account genuinely does not have the
+expected symbol at all (as opposed to a *changed* spec, which is the
+non-fatal case F-034 already handled correctly). An account missing EURUSD
+entirely would have crashed the reader outright instead of failing closed.
+Fixed: `SymbolNotFoundError` is now caught alongside `AccountGuardError` and
+produces the same sticky `UNHEALTHY` outcome. Three new tests confirm
+`acknowledge()` never restores `HEALTHY` by itself — only a subsequent,
+fully successful revalidation does, whether the underlying problem was a
+wrong account, a missing symbol, or (the positive case) something that was
+actually fixed.
+
+**Evidence**
+
+- `tests/unit/test_live_reader.py` — 16 passed (13 + 3 new for F-036)
+- ruff, mypy — clean, 97 source files
+- full suite with PostgreSQL, rerun after the F-036 fix — **689 passed, 3
+  skipped** in 269s (up from 686/3; the three new F-036 tests, same three
+  platform-dependent skips, no failures)
+
+**What this does not prove**
+
+Same limit as the seventh entry: still nothing here has run against the real
+terminal. This entry closes out the reviewer's pre-soak requirements; it does
+not substitute for the soak itself.
+
+**Risk impact**
+
+The `SymbolNotFoundError` fix has real risk impact for the read path — an
+uncaught crash on a legitimate account state (missing symbol) is exactly the
+kind of failure that looks like "the reader stopped" rather than "the reader
+correctly refused," which is worse for an operator trying to trust its
+health reporting. No execution path exists to affect either way.
+
+**Decision**
+
+F-033 closed again, with the specific rule ("current sections = present
+truth, update log = historical truth") applied more completely this time.
+F-036 closed. F-034 and F-037 remain open pending the real soak — nothing
+here substitutes for that evidence.
+
+**Next**
+
+- The real soak, Phase A: run `scripts/mt5_live_reader.py` against the actual
+  Pepperstone terminal, normal operation, no owner intervention needed for
+  this phase, 30–60 minutes during an active FX session. Prove real ticks and
+  M5 bars land in PostgreSQL. Settle D-039/F-037 from what the timestamps show.
+- The real soak, Phase B: with the owner present, one deliberate terminal
+  interruption (not combined with other failure modes), proving reconnect and
+  full revalidation against reality.
+- Record sanitized evidence from both phases here.
+- Only then: Dashboard v0, CI, domain-contract package, reconciliation — in
+  review 1.10's own stated order.
 
 ---
 

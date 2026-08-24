@@ -356,6 +356,97 @@ class TestScenario2WrongAccountFailsClosed:
         assert recovered.status is ReaderStatus.HEALTHY
 
 
+class TestScenario6AcknowledgeIsNotRestoration:
+    """review 1.10 F-036: acknowledging is "I saw it", never "it is safe again".
+
+    A human acknowledgement clears the sticky latch and permits a fresh
+    attempt; it must never itself flip the status to HEALTHY. Only a
+    subsequent, fully successful revalidation may do that.
+    """
+
+    def test_acknowledging_without_fixing_the_account_does_not_become_healthy(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        live.poll_once()
+        fake.tick_rows = None
+        live.poll_once()
+        fake.account = account_info(server="PepperstoneEU-Demo")
+        before_ack = live.poll_once()
+        assert before_ack.status is ReaderStatus.UNHEALTHY
+
+        # Acknowledge, but the account is still wrong.
+        live.acknowledge(operator="levi", note="looking into it")
+        after_ack = live.health
+        assert after_ack.status is ReaderStatus.DISCONNECTED  # not HEALTHY
+
+        still_wrong = live.poll_once()
+        assert still_wrong.status is ReaderStatus.UNHEALTHY, (
+            "acknowledging must not itself restore HEALTHY without a fresh successful revalidation"
+        )
+
+    def test_an_unresolvable_symbol_fails_closed_the_same_way_a_wrong_account_does(
+        self,
+    ) -> None:
+        """review 1.10 F-036: a symbol that cannot be established at all —
+
+        not merely a changed spec — is exactly the "cannot be established"
+        case review 1.9's own rule assigns to UNKNOWN -> HALT.
+        """
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        live.poll_once()
+
+        fake.tick_rows = None
+        live.poll_once()
+
+        # The account no longer has EURUSD at all — not a spec change, an
+        # absence.
+        fake.symbols = ("GBPUSD",)
+        unresolved = live.poll_once()
+        assert unresolved.status is ReaderStatus.UNHEALTHY
+        assert unresolved.detail is not None and "instrument" in unresolved.detail
+
+        # Acknowledging without restoring the symbol changes nothing.
+        live.acknowledge(operator="levi", note="checking the account")
+        still_broken = live.poll_once()
+        assert still_broken.status is ReaderStatus.UNHEALTHY
+
+        # Only a full, successful revalidation — symbol back, guard passing,
+        # margin mode matching — restores HEALTHY.
+        fake.symbols = ("EURUSD",)
+        fake.tick_rows = (tick_row(),)
+        live.acknowledge(operator="levi", note="EURUSD restored on the account")
+        recovered = live.poll_once()
+        assert recovered.status is ReaderStatus.HEALTHY
+
+    def test_valid_state_restored_then_acknowledge_lets_healthy_resume(self) -> None:
+        """The positive case: acknowledging a *fixed* problem does let it recover."""
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        live.poll_once()
+
+        fake.tick_rows = None
+        live.poll_once()
+        fake.account = account_info(margin_mode=0)
+        live.poll_once()
+        assert live.health.status is ReaderStatus.UNHEALTHY
+
+        fake.account = account_info()  # back to RETAIL_HEDGING
+        fake.tick_rows = (tick_row(),)
+        live.acknowledge(operator="levi", note="account mode confirmed restored")
+        recovered = live.poll_once()
+        assert recovered.status is ReaderStatus.HEALTHY
+
+
 class TestScenario3SymbolSpecChanged:
     """review 1.9 F-034: spec changed -> detect + record, no silent continuation."""
 
