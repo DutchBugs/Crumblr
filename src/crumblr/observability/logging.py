@@ -39,7 +39,13 @@ _SECRET_KEY_MARKERS: Final = (
     "credential",
     "passwd",
     "private_key",
+    "login",
 )
+"""review 1.11 F-031: `login` is not a password, but review 1.8/1.11 both
+ruled it must never sit whole in a shared log. Call sites now log a masked
+`account_ref` instead, but this processor is the actual control - it catches
+any future `login=<raw value>` the way `_is_secret_key` already catches
+passwords, so the guarantee does not rest on every call site remembering."""
 
 _configured = False
 

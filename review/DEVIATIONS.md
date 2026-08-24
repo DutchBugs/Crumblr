@@ -601,6 +601,48 @@ mean anything should start here.
   cannot regress silently again.
 - **Gate affected:** M1. Blocked the first soak-test attempt outright.
 
+### D-041 — A large tick batch could exceed PostgreSQL's bound-parameter limit
+- **Status:** RESOLVED 2026-08-24 — found on the second real soak attempt
+  (immediately after D-040), fixed the same session
+- **Spec:** build.md §26 M2 — raw tick storage, with no documented ceiling on
+  batch size implied or intended
+- **Original gap:** `MarketDataStore._record_ticks` built one `INSERT`
+  statement for the entire batch via `pg_insert(market_ticks).values(rows)`.
+  `market_ticks` binds 14 parameters per row; PostgreSQL refuses any
+  statement bound to more than 65535 parameters total — a hard ceiling of
+  4681 rows per statement. `LiveReader`'s default tick lookback (5 minutes)
+  on its first read, against a real, actively-quoting EUR/USD feed, returned
+  enough ticks to cross it: `psycopg.OperationalError: sending query and
+  params failed: number of parameters must be between 0 and 65535`.
+- **Why it wasn't caught first:** every existing test inserted a handful of
+  ticks — nothing exercised a batch anywhere near the thousands a live feed
+  can return in one read. Pre-existing code, written and tested against
+  synthetic replay ticks (one bar's worth of ticks at a time) and never
+  exercised against continuous real-market volume until this session's first
+  two soak attempts.
+- **Fix:** `_record_ticks` now chunks the batch into `INSERT`s of at most
+  2000 rows (`_TICK_INSERT_CHUNK_SIZE`, comfortably under the 4681-row hard
+  ceiling), looping within the same connection/transaction. A new
+  integration test inserts 4001 ticks — deliberately more than two chunk's
+  worth — in one `record_ticks` call and asserts all of them land.
+- **F-038 (review 1.11):** the reviewer correctly pointed out that "runs
+  inside the same connection" was an assumption, not a proven contract —
+  a shared connection does not by itself prove a failure partway through
+  rolls back everything already sent. Now proven: **contract A, batch
+  atomic**. `test_a_failure_partway_through_a_multi_chunk_batch_rolls_back_the_whole_batch`
+  (`tests/integration/test_market_data_store.py`) injects a failure into the
+  second of two chunks against a real PostgreSQL connection and asserts zero
+  rows from the batch survive — chunk 1's already-sent rows are rolled back
+  with it, because `record_ticks` never commits a caller-supplied connection
+  and the whole call runs in one transaction. Documented at the point of
+  implementation in `MarketDataStore._record_ticks`'s docstring.
+- **Watch for:** `record_bars` was not affected — it already inserts one row
+  at a time, well under any parameter ceiling — but the same class of gap
+  could exist anywhere else a `Sequence[...]` is bulk-inserted in one
+  statement without a stated size assumption. Worth a grep if another bulk
+  insert path is added.
+- **Gate affected:** M1. Blocked the second soak-test attempt outright.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

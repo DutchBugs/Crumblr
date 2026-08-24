@@ -96,6 +96,19 @@ def bar_identity(
     )
 
 
+_TICK_INSERT_CHUNK_SIZE = 2000
+"""Rows per `INSERT`. `market_ticks` binds 14 parameters per row, and
+PostgreSQL refuses a statement with more than 65535 total — so one very
+large batch in a single `.values(rows)` call can exceed that outright.
+
+Not a theoretical limit: the first real continuous-read soak, 2026-08-24,
+pulled enough EUR/USD ticks on its first read (a lookback window during an
+active session) to hit it — `psycopg.OperationalError: ... number of
+parameters must be between 0 and 65535`. 2000 rows (28000 parameters) is
+comfortably under the 4681-row hard ceiling, not tuned to sit close to it.
+"""
+
+
 class MarketDataStore:
     """Append-only storage for ticks and bars."""
 
@@ -118,32 +131,49 @@ class MarketDataStore:
             return self._record_ticks(own_connection, ticks)
 
     def _record_ticks(self, connection: Connection, ticks: Sequence[MarketTick]) -> int:
-        rows = [
-            {
-                "tick_id": tick.tick_id,
-                "source": tick.source,
-                "canonical_symbol": tick.canonical_symbol,
-                "broker_symbol": tick.broker_symbol,
-                "event_time_utc": tick.event_time_utc,
-                "received_time_utc": tick.received_time_utc,
-                "bid": tick.bid,
-                "ask": tick.ask,
-                "last": tick.last,
-                "volume": tick.volume,
-                "flags": tick.flags,
-                "data_quality": tick.data_quality.value,
-                "anomalies": [anomaly.value for anomaly in tick.anomalies],
-                "payload": tick.model_dump(mode="json"),
-            }
-            for tick in ticks
-        ]
-        statement = (
-            pg_insert(market_ticks)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["tick_id"])
-            .returning(market_ticks.c.tick_id)
-        )
-        return len(connection.execute(statement).all())
+        """Insert in chunks, but as one logical batch (review 1.11 F-038).
+
+        Contract: **batch atomic**. Every chunk runs against the same
+        `Connection`, and `record_ticks` never commits a caller-supplied one -
+        it only opens (and commits) its own transaction when the caller did
+        not hand one in. So a failure in any chunk leaves the transaction
+        uncommitted and every chunk already sent in this call is rolled back
+        with it; there is no partial-batch state to reconcile or retry into.
+        Proven, not merely asserted, by
+        `test_a_failure_partway_through_a_multi_chunk_batch_rolls_back_the_whole_batch`
+        in `tests/integration/test_market_data_store.py`, which injects a
+        failure into the second of two chunks and checks zero rows survive.
+        """
+        inserted = 0
+        for start in range(0, len(ticks), _TICK_INSERT_CHUNK_SIZE):
+            chunk = ticks[start : start + _TICK_INSERT_CHUNK_SIZE]
+            rows = [
+                {
+                    "tick_id": tick.tick_id,
+                    "source": tick.source,
+                    "canonical_symbol": tick.canonical_symbol,
+                    "broker_symbol": tick.broker_symbol,
+                    "event_time_utc": tick.event_time_utc,
+                    "received_time_utc": tick.received_time_utc,
+                    "bid": tick.bid,
+                    "ask": tick.ask,
+                    "last": tick.last,
+                    "volume": tick.volume,
+                    "flags": tick.flags,
+                    "data_quality": tick.data_quality.value,
+                    "anomalies": [anomaly.value for anomaly in tick.anomalies],
+                    "payload": tick.model_dump(mode="json"),
+                }
+                for tick in chunk
+            ]
+            statement = (
+                pg_insert(market_ticks)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["tick_id"])
+                .returning(market_ticks.c.tick_id)
+            )
+            inserted += len(connection.execute(statement).all())
+        return inserted
 
     def read_ticks(
         self,

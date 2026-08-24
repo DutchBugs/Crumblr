@@ -108,7 +108,25 @@ class Mt5Credentials:
     server: str
 
     def __repr__(self) -> str:
-        return f"Mt5Credentials(login={self.login}, server={self.server!r}, password=<redacted>)"
+        return (
+            f"Mt5Credentials(login={mask_login(self.login)}, server={self.server!r}, "
+            "password=<redacted>)"
+        )
+
+
+def mask_login(login: int) -> str:
+    """The account number as it may appear in ordinary logs (review 1.11 F-031).
+
+    Not a password, but not useful to broadcast either: review 1.10 accepted
+    that the login is "an identifier, not a secret" for `Mt5Credentials`, but
+    review 1.11 reopened F-031 because that same identifier showed up whole in
+    `mt5.connected` and `mt5.account_guard_failed` — exactly the shared/review
+    logs the project already agreed it must not enter. Keeping the last three
+    digits is enough to eyeball-match against the real number during an
+    incident without the full value sitting in a routine log line.
+    """
+    digits = str(login)
+    return f"***{digits[-3:]}" if len(digits) > 3 else "***"
 
 
 class MissingCredentialsError(RuntimeError):
@@ -190,9 +208,14 @@ class Mt5Client:
             raise Mt5CallFailedError("login", code, message)
 
         self._connected = True
-        # The login is an identifier, not a secret, and the server is needed to
-        # diagnose a wrong-account halt. The password never reaches here.
-        _log.info("mt5.connected", login=credentials.login, server=credentials.server)
+        # review 1.11 F-031: the full login does not belong in a routine log
+        # line even though it is an identifier rather than a secret - this is
+        # exactly the "shared logs" case the project already ruled out.
+        _log.info(
+            "mt5.connected",
+            account_ref=mask_login(credentials.login),
+            server=credentials.server,
+        )
 
     def disconnect(self) -> None:
         """Shut the terminal connection down. Safe to call when not connected.

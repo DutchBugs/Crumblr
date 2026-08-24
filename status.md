@@ -788,14 +788,17 @@ Done in this pass:
 Blocked on a human decision — see build.md §29 and `review/feedback.1.6.md` §6:
 
 - [x] ~~§29 Q1 — broker~~ — Pepperstone (O-001).
-- [ ] **Resolve the Pepperstone entity**: EU per O-001, UK per the server name
-      supplied. Resolves from the probe's `company`/`server` output, not by
-      inference — review 1.8 F-028. D-034.
+- [x] ~~Resolve the Pepperstone entity~~ — **Pepperstone Limited (UK)**, for the
+      demo/development environment only (O-005, closing APP-013/D-034 for
+      that scope). A future live account still needs its own determination
+      against the owner's residence and live-account documentation.
 - [x] ~~Create the Pepperstone MT5 demo account~~ — 2026-08-24, and logged into
       the Windows MT5 terminal once, interactively. Login stays a local
-      secret, never Git, logs, status or review documents (F-026, F-031).
-- [ ] §29 Q2 — hedging or netting, read from `account_info()` on that account.
-      Do not guess; v1 supports exactly one mode.
+      secret, never Git, logs, status or review documents (F-026, F-031 —
+      reopened and fixed again 2026-08-24 by review 1.11 after the account
+      number was found unmasked in `mt5.connected`/`mt5.account_guard_failed`).
+- [x] ~~§29 Q2 — hedging or netting~~ — **`RETAIL_HEDGING`**, read from
+      `account_info()` on the real demo account, 2026-08-24.
 - [ ] Confirm or replace the provisional risk budget in `config/paper.yaml`
       (§29 Q7-Q8) — D-013.
 - [ ] Confirm the intraday cut-off and flatten offsets — ADR-004 §3.
@@ -817,7 +820,14 @@ Next engineering steps once unblocked:
 - [ ] **Run the real soak, Phase A**: `scripts/mt5_live_reader.py` against
       the actual Pepperstone terminal, normal operation, 30-60 minutes during
       an active FX session. Prove real ticks/M5 bars land in PostgreSQL and
-      settle D-039/F-037 (timestamp semantics) from what it shows.
+      settle D-039/F-037 (timestamp semantics) from what it shows. Two
+      attempts so far both crashed on real-market conditions synthetic tests
+      never exercised — D-040 (numpy scalar repr), then D-041 (PostgreSQL
+      parameter ceiling on a large tick batch); both fixed and regression
+      tested. Review 1.11 additionally required F-031 (login masked in
+      ordinary logs) and F-038 (chunked-insert failure semantics proven, not
+      assumed) resolved before the third attempt — both done this pass. Third
+      attempt next.
 - [ ] **Run the real soak, Phase B**: one deliberate terminal interruption,
       owner present, proving reconnect + full revalidation against reality
       (review 1.10 §5). Do not combine failure modes in the first test.
@@ -2539,6 +2549,186 @@ simulation.
 
 - Restart Phase A with the fix in place.
 - Everything else unchanged from the previous entry's Next section.
+
+## Update 2026-08-24 (tenth entry) — Phase A second attempt: a second real defect, in code that predates this session
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: D-040 fixed; Phase A restarted
+Status after:  second attempt crashed on the first persist, in
+               MarketDataStore itself; root-caused, fixed, regression-tested
+```
+
+**What happened**
+
+Phase A restarted after the D-040 fix. It connected, resolved `EURUSD`, then
+crashed on the very first `record_ticks` call with `psycopg.OperationalError:
+sending query and params failed: number of parameters must be between 0 and
+65535`.
+
+**Root cause: `MarketDataStore._record_ticks` built one `INSERT` for an
+entire batch.** `market_ticks` binds 14 parameters per row; PostgreSQL
+refuses any statement bound to more than 65535 total — a hard ceiling of
+4681 rows per statement. `LiveReader`'s default five-minute tick lookback,
+against a real, actively-quoting EUR/USD feed, returned enough ticks on its
+first read to cross that ceiling outright. Recorded as D-041.
+
+**This one predates this session.** Unlike D-040, `_record_ticks` is
+original M2 code (review 1.6 F-022), not something written this week. It
+had simply never been exercised with a batch anywhere near real-market
+volume — every existing test, and every replay run, inserts a handful of
+ticks at a time. The soak test is finding gaps across the whole persistence
+path, not only in the code written to reach it.
+
+**Fix**
+
+`_record_ticks` now chunks into `INSERT`s of at most 2000 rows
+(comfortably under the 4681-row ceiling), looping inside the same
+connection so the operation is still atomic from the caller's side. A new
+integration test in `tests/integration/test_market_data_store.py` inserts
+4001 ticks in one `record_ticks` call — more than two chunks' worth — and
+asserts every one lands. `record_bars` was checked and is not affected: it
+already inserts one row at a time.
+
+**Evidence**
+
+- `tests/integration/test_market_data_store.py` — 15 passed, including the
+  new 4001-tick chunking test (needs PostgreSQL)
+- ruff, mypy — clean, 97 source files
+- full suite with PostgreSQL — pending in this session; see the next entry
+
+**Risk impact**
+
+None to the running system — this is a storage-layer robustness fix, no
+order path involved. Real impact on the soak schedule: two attempts in, zero
+minutes of clean evidence yet.
+
+**Decision**
+
+D-041 opened and closed the same session, same pattern as D-040: found by
+the real soak, fixed immediately, regression-tested before trying again.
+
+**Next**
+
+- Restart Phase A a third time.
+- Everything else unchanged from the eighth entry's Next section.
+
+---
+
+## Update 2026-08-24 (eleventh entry) — review 1.11 processed: F-031 reopened and fixed, F-038 proven, F-033 fixed a third time
+
+**Review verdict:** GO — CONTINUE THE REAL SOAK. M1 NOT YET PASSED (two
+real-soak defects found and fixed, clean soak still required). M2 PASSED.
+Dashboard v0 GO AFTER A CLEAN PHASE A. M5/P2 NO-GO.
+
+**What the review found that this pass had missed**
+
+Two real gaps, both in existing rather than new code:
+
+- **F-031 reopened.** The tenth entry's own text records that the second
+  failed soak's raw console output showed the real MT5 login, because
+  `Mt5Client.connect()` logs `login=credentials.login` on every successful
+  connect, and `ReadOnlyMt5Gateway._verify_account` logs
+  `login=state.login` on every account-guard failure. Both are *ordinary*
+  log lines, not the opt-in probe artifacts the original 2026-08-24 F-031 fix
+  covered — the review is right that "remember not to `cat` the file" (this
+  session's own working discipline after the earlier mistake) is not a
+  control; the software has to prevent it.
+- **F-038 (new).** D-041's fix chunks a large tick batch into several
+  `INSERT`s "looping within the same connection". That sentence was an
+  assumption about transaction boundaries, not a proven one — a shared
+  connection does not by itself demonstrate that a failure in chunk 2 rolls
+  back chunk 1's already-sent rows rather than leaving them committed.
+
+**Fix — F-031**
+
+Two layers, not one:
+
+1. `mt5_gateway/client.py::mask_login(login)` returns `***` + the last three
+   digits. Both call sites (`Mt5Client.connect`'s `mt5.connected`,
+   `ReadOnlyMt5Gateway._verify_account`'s `mt5.account_guard_failed` and the
+   `AccountGuardError` message it raises) now log `account_ref=mask_login(...)`
+   instead of the raw login. `Mt5Credentials.__repr__` masks it too.
+2. `observability/logging.py`'s existing secret-redaction processor (the one
+   that already catches `password`, `token`, `api_key`, etc. by key name) now
+   also catches any key containing `login`, forcing it to `[redacted]`. This
+   is the actual control the reviewer asked for: a future call site that logs
+   a raw `login=<value>` cannot reintroduce the exposure, because the
+   processor strips it regardless of whether the call site remembered to mask
+   it. One existing test (`test_ordinary_fields_survive_untouched`) had
+   asserted the old, now-wrong behaviour and was rewritten.
+
+Because `AccountGuardError`'s message is what `LiveReader._reconnect` copies
+verbatim into `ReaderHealth.last_error`/`detail` — which `mt5_live_reader.py
+--json` writes to disk — masking it at the source also satisfies the
+review's "sanitized health/evidence" requirement, not only console logging.
+
+**Fix — F-038**
+
+No code change was needed; `_record_ticks` was already batch-atomic, because
+`record_ticks` never commits a caller-supplied `Connection` and every chunk
+in one call runs against the same connection/transaction. What was missing
+was proof. Added
+`tests/integration/test_market_data_store.py::TestChunkedInsertFailureSemantics`:
+opens a real PostgreSQL connection, monkeypatches it to raise on the second
+of two chunk-sized `execute()` calls, runs `record_ticks` inside that
+connection's own transaction, and asserts the exception propagates *and*
+zero rows from the batch survive afterward. (First version of this test put
+`pytest.raises` inside the transaction block, which swallowed the exception
+before the transaction manager ever saw it and let chunk 1 commit anyway —
+caught by the test itself failing, fixed by moving `pytest.raises` outside
+`connection.begin()`.) `_record_ticks`'s docstring and `review/DEVIATIONS.md`
+D-041 both now state the contract as proven rather than assumed.
+
+**Fix — F-033 (third time)**
+
+§12 "Next 10 actions" still listed the Pepperstone entity and Q2
+hedging/netting as open checkboxes after both had been resolved elsewhere in
+this same document (O-005; `RETAIL_HEDGING`). Checked off in place with the
+resolution restated inline, per the review's instruction that historical
+update-log text may stay unchanged — only the current-state section was
+wrong.
+
+**Evidence**
+
+- `tests/unit/test_mt5_client.py` — new file, 7 tests, all passing
+- `tests/unit/test_mt5_readonly_gateway.py::TestAccountGuard` — 2 new tests
+- `tests/unit/test_logging.py::TestSecretsAreRedacted` — 3 new tests, 1
+  existing test rewritten
+- `tests/integration/test_market_data_store.py::TestChunkedInsertFailureSemantics`
+  — 1 new test, run against real PostgreSQL, passing
+- Full suite with PostgreSQL, prior to this pass's additions: 691 passed, 3
+  skipped (the platform-dependent skips already accounted for)
+- Full suite with PostgreSQL, after this pass's additions: **705 passed, 3
+  skipped**, exit 0 (0:03:45) — the 14 new tests, zero regressions
+- ruff, mypy — both clean, 98 source files
+
+**Problems found**
+
+The chunk-failure test's first draft asserted the wrong thing about its own
+harness, not about the production code — see the F-038 fix note above. Worth
+recording because it is exactly the kind of mistake this project's own
+review process exists to catch, caught here by the test failing loudly
+rather than by a reviewer.
+
+**Risk impact**
+
+None to the running system — both fixes are observability/persistence-layer
+robustness, no order path involved. Confirms rather than changes D-041's
+resolution.
+
+**Decision**
+
+F-031 and F-038 closed this session with test evidence. F-033 closed a third
+time. F-034 and F-037 remain open exactly as review 1.10 left them — nothing
+in review 1.11 changes what closes them, only the real soak does.
+
+**Next**
+
+- Commit and push.
+- Restart Phase A a third time.
+- Everything else unchanged from the tenth entry's Next section.
 
 ---
 

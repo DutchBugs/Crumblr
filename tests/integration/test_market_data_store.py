@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from scripts.run_replay import build_instrument_spec
@@ -37,7 +38,12 @@ from crumblr.market_data.synthetic import (
 from crumblr.mt5_gateway.simulated import SimulatedBroker
 from crumblr.persistence.engine import DEFAULT_TEST_URL
 from crumblr.persistence.journal import JournalIntegrityError
-from crumblr.persistence.market_data import MarketDataStore, bar_identity, tick_identity
+from crumblr.persistence.market_data import (
+    _TICK_INSERT_CHUNK_SIZE,
+    MarketDataStore,
+    bar_identity,
+    tick_identity,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -143,6 +149,73 @@ class TestTicksRoundTrip:
         store.record_ticks([a_tick(0, bid="1.08500"), a_tick(0, bid="1.08501")])
 
         assert len(store.read_ticks()) == 2
+
+    def test_a_batch_larger_than_one_insert_chunk_does_not_exceed_postgresqls_parameter_limit(
+        self, engine: Engine
+    ) -> None:
+        """D-040 sibling, found the same soak: `market_ticks` has 14 columns, so
+        one bulk `.values(rows)` INSERT for a large-enough batch exceeds
+        PostgreSQL's 65535-bound-parameter ceiling outright — observed on the
+        first real continuous-read soak, 2026-08-24, not a hypothetical.
+        """
+        store = MarketDataStore(engine)
+        many = [a_tick(minute) for minute in range(_TICK_INSERT_CHUNK_SIZE * 2 + 1)]
+
+        inserted = store.record_ticks(many)
+
+        assert inserted == len(many)
+        assert len(store.read_ticks()) == len(many)
+
+
+class TestChunkedInsertFailureSemantics:
+    """F-038 (review 1.11): the D-041 chunking must have a proven, not assumed,
+    failure contract.
+
+    Chunking a batch into several `INSERT`s only stays safe if a failure
+    partway through cannot leave a logical batch half-persisted. `_record_ticks`
+    runs every chunk against the *same* `Connection`, and a caller-supplied
+    connection is never committed inside the store (`record_ticks` only opens
+    its own transaction when the caller did not hand one in) — so the actual
+    contract is **contract A, batch atomic**: one failing chunk must roll the
+    whole logical batch back, not merely stop after however much had already
+    been sent to the server. That is a claim about transaction boundaries, not
+    about `on_conflict_do_nothing`, so it is proven here by injecting a failure
+    straight into the connection rather than via a real constraint violation.
+    """
+
+    def test_a_failure_partway_through_a_multi_chunk_batch_rolls_back_the_whole_batch(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = MarketDataStore(engine)
+        many = [a_tick(minute) for minute in range(_TICK_INSERT_CHUNK_SIZE + 5)]
+        assert len(many) > _TICK_INSERT_CHUNK_SIZE, "must span at least two chunks to prove this"
+
+        with engine.connect() as connection:
+            real_execute = connection.execute
+            calls = {"count": 0}
+
+            def flaky_execute(*args: Any, **kwargs: Any) -> Any:
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise RuntimeError("simulated failure inside the second chunk")
+                return real_execute(*args, **kwargs)
+
+            monkeypatch.setattr(connection, "execute", flaky_execute)
+
+            # The exception must propagate out of `connection.begin()` itself,
+            # not be caught inside it - only then does the transaction context
+            # manager see a failure and issue the rollback under test. Catching
+            # it inside the `with connection.begin():` block would let the
+            # block exit "successfully" and commit chunk 1 regardless.
+            with pytest.raises(RuntimeError, match="simulated failure"), connection.begin():
+                store.record_ticks(many, connection=connection)
+
+            assert calls["count"] == 2, "the fake must have been reached mid-batch, not at the end"
+
+        assert len(store.read_ticks()) == 0, (
+            "chunk 1 must not survive when chunk 2 fails: a half-persisted "
+            "logical batch is the exact failure mode F-038 requires a proof against"
+        )
 
 
 class TestRawDataIsImmutable:

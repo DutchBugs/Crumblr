@@ -323,6 +323,57 @@ class TestAccountGuard:
         assert "currency" in message
         assert "leverage" in message
 
+    def test_a_login_mismatch_does_not_put_the_full_number_in_the_exception(self) -> None:
+        """review 1.11 F-031: exception formatting must not re-introduce the login.
+
+        `AccountGuardError`'s message is what `LiveReader` copies verbatim into
+        `ReaderHealth.last_error`/`detail`, which `mt5_live_reader.py --json`
+        writes to disk - so this is also the "sanitized health/evidence" case
+        the review names, not only console logging.
+        """
+        guard = AccountGuardConfig.model_validate(
+            {
+                "expected_server": "PepperstoneUK-Demo",
+                "expected_login": 999_999,
+                "require_demo_account": True,
+                "expected_currency": "EUR",
+                "expected_leverage": 30,
+            }
+        )
+        with pytest.raises(AccountGuardError) as raised:
+            gateway(FakeMt5(), guard=guard).account()
+        message = str(raised.value)
+        assert "login" in message
+        assert "5000123" not in message
+        assert "5_000_123" not in message
+        assert "999999" not in message
+        assert "999_999" not in message
+
+    def test_a_login_mismatch_does_not_put_the_full_number_in_the_log(self) -> None:
+        """review 1.11 F-031: the `mt5.account_guard_failed` error/reconnect log."""
+        import io
+
+        from crumblr.observability.logging import configure_logging
+
+        stream = io.StringIO()
+        configure_logging(stream=stream, level="DEBUG")
+        guard = AccountGuardConfig.model_validate(
+            {
+                "expected_server": "PepperstoneUK-Demo",
+                "expected_login": 999_999,
+                "require_demo_account": True,
+                "expected_currency": "EUR",
+                "expected_leverage": 30,
+            }
+        )
+        with pytest.raises(AccountGuardError):
+            gateway(FakeMt5(), guard=guard).account()
+
+        rendered = stream.getvalue()
+        assert "mt5.account_guard_failed" in rendered
+        assert "5000123" not in rendered
+        assert "999999" not in rendered
+
 
 # --------------------------------------------------------------------------- #
 # Symbol discovery — O-001: never hard-code the broker symbol

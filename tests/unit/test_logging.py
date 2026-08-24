@@ -141,10 +141,25 @@ class TestSecretsAreRedacted:
         assert "def" not in rendered
 
     def test_ordinary_fields_survive_untouched(self, captured: io.StringIO) -> None:
-        get_logger("gateway").info("connect", login=5001, server="DemoBroker-Demo")
+        get_logger("gateway").info("connect", account_ref="***706", server="DemoBroker-Demo")
         record = records(captured)[-1]
-        assert record["login"] == 5001
+        assert record["account_ref"] == "***706"
         assert record["server"] == "DemoBroker-Demo"
+
+    @pytest.mark.parametrize("field", ["login", "expected_login", "account_login"])
+    def test_a_login_shaped_field_is_redacted(self, captured: io.StringIO, field: str) -> None:
+        """review 1.11 F-031: not a password, but never whole in a routine log.
+
+        This is the processor-level backstop, not the primary control -
+        `Mt5Client`/`ReadOnlyMt5Gateway` mask the account number themselves
+        before logging (see test_mt5_client.py / test_mt5_readonly_gateway.py).
+        This exists so a future call site that logs a raw `login=` cannot
+        reintroduce the exposure by forgetting to.
+        """
+        get_logger("gateway").info("connect", **{field: 5001706})
+        record = records(captured)[-1]
+        assert record[field] == REDACTED
+        assert "5001706" not in json.dumps(record)
 
 
 class TestLoggingCannotBreakSafetyLogic:

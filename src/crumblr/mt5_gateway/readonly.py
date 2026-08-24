@@ -36,7 +36,7 @@ from crumblr.domain.models import (
 )
 from crumblr.domain.timeutils import utc_now
 from crumblr.market_data.pipeline import BarBuildResult, normalize_bars
-from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module
+from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module, mask_login
 from crumblr.mt5_gateway.enums import (
     SYMBOL_TRADE_MODES,
     decode_enum,
@@ -187,7 +187,10 @@ class ReadOnlyMt5Gateway:
                 f"server {state.server!r} != expected {self._guard.expected_server!r}"
             )
         if self._guard.expected_login is not None and state.login != self._guard.expected_login:
-            mismatches.append(f"login {state.login} != expected {self._guard.expected_login}")
+            mismatches.append(
+                f"login {mask_login(state.login)} != expected "
+                f"{mask_login(self._guard.expected_login)}"
+            )
 
         expected_currency = getattr(self._guard, "expected_currency", None)
         if expected_currency and state.currency != expected_currency:
@@ -200,7 +203,7 @@ class ReadOnlyMt5Gateway:
         if mismatches:
             _log.error(
                 "mt5.account_guard_failed",
-                login=state.login,
+                account_ref=mask_login(state.login),
                 server=state.server,
                 mismatches=mismatches,
             )
