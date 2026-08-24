@@ -1,0 +1,42 @@
+# Environment-independent configuration.
+#
+# Risk budgets, execution limits and the account guard are deliberately NOT set
+# here: build.md §29 Q7 requires an explicit risk budget per environment, so
+# each environment overlay must state its own. A missing limit is a load
+# failure, never a default.
+
+markets:
+  - canonical_symbol: EUR/USD
+    enabled: true
+
+# The ICT entry model is the required scheme: a trade is only proposed when a
+# liquidity sweep, a structure shift, a displacement gap, a discount/premium
+# location and an OTE retracement all line up inside a killzone. Each of those
+# conditions is individually enforceable — see src/crumblr/trading_agent/ict.py.
+#
+# `baseline_v1` stays registered as the benchmark build.md §9.2 requires: a
+# model that cannot beat a simple baseline after costs should not be promoted.
+trading_agent:
+  strategy_id: ict_v1
+  strategy_version: 1.0.0
+  model_version: null
+
+supervisor:
+  enabled: true
+  veto_on_unknown_regime: true
+  halt_on_reconciliation_mismatch: true
+  policy_version: supervisor-policy-v2
+
+  # NOT CALIBRATED, and stated rather than defaulted (review 1.6 F-024).
+  #
+  # Owner decision O-002 fixed the decision timeframe at M5, which permits at
+  # most 12 windows an hour. The previous threshold of 20 could therefore never
+  # fire: not a lenient control, an absent one wearing a number. The only
+  # defensible calibration would come from observing a real EUR/USD feed, and
+  # none has been observed — calibrating against synthetic trade frequency
+  # would be fitting a control to a random walk.
+  #
+  # `null` does not mean the check passes. Every supervisor decision records
+  # it in `uncalibrated_checks`, so an approval says which rules were not in
+  # force rather than implying all of them were.
+  max_intents_per_hour: null

@@ -1,0 +1,52 @@
+# Secrets — build.md §21. Nothing credential-bearing may ever be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# Environment-specific config that names a real account or server.
+config/live.yaml
+config/*.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local runtime state. `.crumblr/safety_state.json` is the ADR-002 latch: it
+# records whether *this machine* is halted, which is a property of the host and
+# never of the repository. Committing one would hand another machine a halt it
+# did not raise, or worse, a RUNNING record it did not earn.
+.crumblr/
+
+# Market data and run artifacts — large, regenerable, and potentially
+# broker-specific. Raw captures belong in the database, not in git.
+data/
+logs/
+*.sqlite
+*.db
+
+# Research notebooks keep their outputs out of version control.
+notebooks/**/*.ipynb_checkpoints/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/

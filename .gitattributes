@@ -1,0 +1,12 @@
+# The MT5 gateway runs on Windows while the rest of the work happens on macOS,
+# so line endings are pinned rather than left to each host's Git default.
+#
+# This matters for more than tidiness: the determinism gate hashes the replay
+# report, and `ruff format --check` reads the file as it sits on disk. A
+# CRLF checkout would change both without changing a single line of code.
+* text=auto eol=lf
+
+# Binary, and must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.pdf binary

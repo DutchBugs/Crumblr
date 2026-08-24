@@ -1,0 +1,66 @@
+# MT5 demo / paper-trading environment.
+#
+# PROVISIONAL VALUES — these encode risk policy, which build.md §29 (Q4-Q8)
+# reserves for an explicit human decision. They are set conservatively so the
+# platform is loadable and testable; they must be confirmed before gate P2
+# (the paper campaign) begins, and the confirmation recorded in status.md §10.
+#
+# Fractions are of account equity.
+
+risk:
+  max_risk_per_trade: '0.005'      # 0.5% of equity at risk per trade
+  max_open_risk: '0.02'            # 2% total open risk across positions
+  max_daily_loss: '0.02'           # halt for the day at 2% realised loss
+  max_drawdown: '0.10'             # halt outright at 10% drawdown
+  max_orders_per_hour: 6
+  max_open_positions: 1
+  min_stop_distance_points: 50     # 5.0 pips on a 5-digit EUR/USD feed
+
+execution:
+  max_spread_points: 25            # 2.5 pips; block when the book is wider
+  max_market_data_age_ms: 2000
+  order_timeout_ms: 5000
+  max_slippage_points: 20
+
+# Owner decision O-003: v1 holds nothing overnight. The session boundary is
+# 17:00 New York and is not configurable — see src/crumblr/risk/trading_window.py.
+#
+# PROVISIONAL OFFSETS. The exact cut-off times are an owner decision that
+# review 1.6 §4 requires before M5. These values are placeholders chosen to be
+# conservative, not agreed policy; confirming them is a status.md §10 row.
+intraday:
+  enabled: true
+  last_entry_minutes_before_close: 60   # no new entries inside the last hour
+  flatten_minutes_before_close: 15      # must be flat a quarter of an hour out
+
+# Pepperstone MT5 demo (owner decision O-001, server supplied 2026-08-18).
+#
+# Every value here is a claim the account guard CHECKS against the terminal at
+# M1 — none of it is relied upon before then, and none of it may be treated as
+# confirmed until `account_info()` has been read from the real account. Review
+# 1.5 is explicit that broker metadata is discovered, not assumed.
+#
+# TO VERIFY when the Windows host and the demo account exist:
+#   - the account entity. Owner decision O-001 named "Pepperstone EU"; the
+#     server supplied is `PepperstoneUK-Demo`. Those are different entities and
+#     the difference is not cosmetic — it changes the regulator, the leverage
+#     cap and the swap treatment. Resolve before M1 is called complete.
+#   - hedging or netting, from `account_info()`. Deliberately NOT guessed
+#     (build.md §29 Q2); v1 supports exactly one mode, chosen after inspection.
+#   - the actual EUR/USD broker symbol, digits, point, tick size and value,
+#     contract size, volume min/max/step, stops and freeze levels, filling
+#     modes and swap fields.
+#
+# The login number and password are NOT here. An account number is an
+# identifier rather than a secret, but the pair is a credential, so both live
+# in the secret store (build.md §21) and the loader rejects the second outright.
+#
+# Demo accounts expire — Pepperstone documents 60 days without a funded live
+# account — so replacing this identity is a normal configuration change and
+# not an incident.
+account_guard:
+  expected_server: PepperstoneUK-Demo
+  expected_login: null
+  require_demo_account: true
+  expected_currency: EUR
+  expected_leverage: 30

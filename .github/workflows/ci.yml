@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  quality:
+    name: Lint, types and tests (Linux)
+    runs-on: ubuntu-latest
+
+    # The persistence invariants — NUMERIC fidelity, TIMESTAMPTZ round-trips,
+    # ON CONFLICT idempotency — are properties of PostgreSQL specifically.
+    # Running them against anything else would be green tests proving nothing.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: crumblr
+          POSTGRES_PASSWORD: crumblr
+          POSTGRES_DB: crumblr
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U crumblr -d crumblr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CRUMBLR_DATABASE_URL: postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Mypy (strict)
+        run: uv run mypy
+
+      - name: Tests
+        run: uv run pytest --cov --cov-report=term-missing
+
+      - name: Assert the database was actually reachable
+        # The persistence tests skip when no database is reachable, which is
+        # right locally and wrong in CI: a silently skipped suite would let M2
+        # regressions through looking green. This turns that into a failure.
+        run: |
+          uv run python -c "
+          import sys
+          from crumblr.persistence.engine import database_url, is_available
+          if not is_available(database_url()):
+              sys.exit('database unreachable: the persistence suite was skipped, not passed')
+          print('database reachable; persistence suite ran')
+          "
+
+  gateway:
+    name: Tests (Windows — MT5 host platform)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The MetaTrader5 package ships Windows x86-64 wheels only, so the
+      # gateway's integration tests can only ever run on this runner. From M1
+      # this job installs the `mt5` extra; today it proves the platform code is
+      # host-independent.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run pytest -m "not integration"
+
+  secret-scan:
+    name: No secrets committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # build.md §21 makes "no secrets in the repository" a gate criterion, so
+      # it is enforced by CI rather than by reviewer attention.
+      - name: Scan history for credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
