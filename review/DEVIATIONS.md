@@ -643,6 +643,51 @@ mean anything should start here.
   insert path is added.
 - **Gate affected:** M1. Blocked the second soak-test attempt outright.
 
+### D-042 — The MT5 bar feed's current interval is still forming, not closed, and was persisted as if it were
+- **Status:** RESOLVED 2026-08-24 — found on the third real soak attempt
+  (after the schema had to be re-migrated following D-040/D-041's testing),
+  fixed the same session
+- **Spec:** build.md §26 "raw data is immutable" — implicitly written for a
+  bar whose interval has already ended. No clause anticipated a feed that
+  hands back a bar still being formed
+- **Original gap:** `ReadOnlyMt5Gateway.bars()` called
+  `copy_rates_from_pos(broker_symbol, timeframe, 0, count)`. MT5's position 0
+  is its *current* bar, not the most recent closed one — its OHLC (the close
+  in particular) keeps changing on every call until the interval actually
+  ends. `LiveReader` polls every few seconds and persists whatever `bars()`
+  returns each time; the first poll inside a not-yet-closed M5 interval
+  stored that bar's close as of that instant, and the next poll, seconds
+  later, saw a different close for the same interval. `MarketDataStore
+  .record_bars` did exactly what D-041's F-038 proof says it must: treated
+  the second value as a contradiction of the first and raised
+  `JournalIntegrityError`, which `LiveReader._read_and_persist` correctly
+  surfaced as `UNHEALTHY` — a real safety mechanism catching a real
+  precondition violation, not a false alarm.
+- **Why it wasn't caught first:** every existing test and replay run
+  supplies bars that are already closed by construction — the synthetic
+  generator has no notion of an "in-progress" bar, and the two prior soak
+  attempts (D-040, D-041) both crashed before ever reaching a second poll of
+  the same bar interval, so this shape of conflict had no chance to appear
+  until a soak actually ran two polls inside one still-open 5-minute window.
+- **Fix:** `bars()` now drops any row whose interval has not yet closed
+  relative to `received_time_utc` (`open_time_utc + interval_for(timeframe)
+  <= received_time_utc`, using the existing `market_data.pipeline
+  .interval_for` helper) before the series ever reaches `normalize_bars` or
+  the store. Two new tests in `tests/unit/test_mt5_readonly_gateway
+  ::TestBars`: a still-forming bar is excluded from the result, and a bar
+  that closed one second ago is included — nothing is lost, only correctly
+  delayed until its interval actually ends.
+- **Watch for:** the same MT5 position-0 behaviour applies to any other
+  broker-bar-feed timeframe this gateway is ever asked to read, not only M5
+  — the fix is timeframe-generic (`interval_for(timeframe)`), so this should
+  not need repeating per timeframe. Aggregated bars
+  (`market_data.pipeline.bars_from_ticks`, `BarOrigin.AGGREGATED_FROM_TICKS`)
+  are a different code path and were not affected — they only ever produce a
+  bar once a full interval's worth of ticks has been observed.
+- **Gate affected:** M1. Would have made every real Phase A attempt fail
+  within one bar interval, deterministically, regardless of how clean the
+  rest of the feed was.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

@@ -35,7 +35,7 @@ from crumblr.domain.models import (
     PositionState,
 )
 from crumblr.domain.timeutils import utc_now
-from crumblr.market_data.pipeline import BarBuildResult, normalize_bars
+from crumblr.market_data.pipeline import BarBuildResult, interval_for, normalize_bars
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module, mask_login
 from crumblr.mt5_gateway.enums import (
     SYMBOL_TRADE_MODES,
@@ -384,6 +384,17 @@ class ReadOnlyMt5Gateway:
         `market_data.pipeline.normalize_bars` for the same gap/order/duplicate
         checks a tick-built series gets: a delivered series is not more
         trustworthy than a derived one, only differently sourced.
+
+        `copy_rates_from_pos(..., 0, count)` position 0 is MT5's *current*,
+        still-forming bar, not a closed one — its OHLC keeps changing every
+        poll until the interval ends. Found on the third real soak: a live
+        `LiveReader` polling every few seconds fetched that bar, whose close
+        had moved by the next poll, and `record_bars` correctly read the
+        second value as a contradiction of the first and raised — because
+        "raw data is immutable" is true of a *closed* bar and not yet true of
+        one still being formed. Dropped here rather than downstream: a bar
+        only becomes the kind of fact this platform persists once its own
+        interval has actually ended.
         """
         broker_symbol = self.resolve_symbol()
         spec = self.instrument(canonical_symbol)
@@ -392,14 +403,23 @@ class ReadOnlyMt5Gateway:
             "copy_rates_from_pos",
             module.copy_rates_from_pos(broker_symbol, _mt5_timeframe(module, timeframe), 0, count),
         )
-        bars = sorted((self._bar_from_raw(row) for row in raw), key=lambda bar: bar.open_time_utc)
+        received_time_utc = utc_now()
+        interval = interval_for(timeframe)
+        bars = sorted(
+            (
+                bar
+                for bar in (self._bar_from_raw(row) for row in raw)
+                if bar.open_time_utc + interval <= received_time_utc
+            ),
+            key=lambda bar: bar.open_time_utc,
+        )
         return normalize_bars(
             bars,
             timeframe=timeframe,
             spec=spec,
             source=source,
             origin=BarOrigin.BROKER,
-            received_time_utc=utc_now(),
+            received_time_utc=received_time_utc,
         )
 
     def _bar_from_raw(self, row: Any) -> Bar:

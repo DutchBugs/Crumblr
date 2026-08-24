@@ -2732,6 +2732,104 @@ in review 1.11 changes what closes them, only the real soak does.
 
 ---
 
+## Update 2026-08-24 (twelfth entry) — Phase A third attempt: an operational mistake, then a third real defect, D-042
+
+**What happened**
+
+Committed and pushed the eleventh entry's fixes, then restarted Phase A.
+Two separate problems, in order:
+
+**1. Self-inflicted: the shared database's schema was gone.** The
+`tests/integration` `engine` fixture drops and recreates the schema per
+test, and drops it again at teardown — by design, for hermetic tests. It
+runs against `DEFAULT_TEST_URL`
+(`postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr`), which is
+the *same* physical database `create_db_engine()` defaults to when
+`CRUMBLR_DATABASE_URL` is not set — the one the soak script also uses. The
+full-suite run at the end of the eleventh entry left that database with no
+tables at all. Launching the soak straight after hit
+`psycopg.errors.UndefinedTable: relation "market_ticks" does not exist`
+on the very first `record_ticks` call. Not a code defect — fixed by
+`uv run alembic upgrade head` against the same database, confirmed with a
+direct `inspect(engine).get_table_names()` check before trying again.
+**Lesson, not yet enforced in tooling:** running the integration suite and
+the real soak against the same local PostgreSQL instance requires
+re-migrating between them. Worth a dedicated soak-only database (a second
+Postgres or a second database name in the same instance) if this keeps
+costing attempts — noted here rather than acted on, since it is tooling
+convenience, not a platform gap.
+
+**2. D-042 — the still-forming current bar was persisted as if closed.**
+With the schema restored, the reader connected, resolved the symbol, read
+real ticks — and went `UNHEALTHY` nine seconds later on a bar data
+conflict:
+
+```text
+bar ... for EUR/USD M5 at 2026-08-24T17:10:00+00:00 is already stored with
+different values: stored OHLC .../1.16644, incoming .../1.16647
+```
+
+Only the close differed. **Root cause:** `ReadOnlyMt5Gateway.bars()` reads
+`copy_rates_from_pos(symbol, timeframe, 0, count)` — MT5's position 0 is
+its *current*, still-forming bar, whose OHLC changes every call until the
+interval closes. `LiveReader` polls every 5 seconds and persists whatever
+`bars()` returns; the first poll inside an open M5 window stored that
+bar's close at that instant, the next poll saw a different close for the
+same interval, and `MarketDataStore.record_bars` did exactly what it is
+supposed to do — treated the second value as a contradiction of the first
+and raised. This is the F-038-proven atomicity/integrity machinery working
+correctly against a real precondition violation, not a false alarm and not
+a repeat of D-040/D-041's class of bug.
+
+**Fix:** `bars()` now drops any row whose interval has not yet closed
+relative to the read's own `received_time_utc`
+(`open_time_utc + interval_for(timeframe) <= received_time_utc`), before
+the series reaches `normalize_bars` or the store. Two new unit tests in
+`tests/unit/test_mt5_readonly_gateway.py::TestBars`: a still-forming bar is
+excluded, and a bar that closed one second ago is included — nothing is
+lost, only correctly delayed until its interval actually ends. Recorded as
+**D-042** in `review/DEVIATIONS.md`.
+
+**Evidence**
+
+```text
+ruff, mypy — clean, 98 source files
+tests/unit/test_mt5_readonly_gateway.py::TestBars — 6 passed (4 existing + 2 new)
+full suite with PostgreSQL (after re-migrating) — 707 passed, 3 skipped,
+  exit 0 (0:02:50)
+```
+
+**Problems found**
+
+Two, both described above: an operational one (shared database between
+tests and the live soak) and a real one (D-042). Neither is a repeat of a
+previously-fixed defect.
+
+**Risk impact**
+
+None to the running system — read path only, no order path involved. Real
+impact on the soak schedule: three real connection attempts in, still zero
+minutes of clean evidence, though each attempt has been getting further
+than the last (D-040: crashed on tick conversion; D-041: crashed on tick
+volume; D-042: connected, read ticks, read bars, ran nine seconds before
+the bar conflict).
+
+**Decision**
+
+D-042 opened and closed the same session, same pattern as D-040/D-041.
+Migrations re-applied to the shared database rather than provisioning a
+separate one — accepted as a known operational cost for now, not hidden.
+
+**Next**
+
+- Re-apply migrations (again) before restarting, since the full suite just
+  ran against the same database once more.
+- Commit and push.
+- Restart Phase A a fourth time.
+- Everything else unchanged from the tenth entry's Next section.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

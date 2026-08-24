@@ -13,7 +13,7 @@ MT5-INTEGRATED, and it is why this file lives in `tests/unit`.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
@@ -700,6 +700,44 @@ class TestBars:
     def test_an_unsupported_timeframe_fails_loudly(self) -> None:
         with pytest.raises(KeyError, match="M2"):
             gateway(FakeMt5()).bars("EUR/USD", timeframe="M2", count=10, source="s")
+
+    def test_the_still_forming_current_bar_is_not_returned(self) -> None:
+        """Found on the third real soak: `copy_rates_from_pos(..., 0, count)`
+
+        position 0 is MT5's current, not-yet-closed bar. Its close moves every
+        poll until the interval ends, and persisting it as though it were a
+        finished, immutable bar is exactly what made `record_bars` see a
+        contradiction and halt the live reader. A bar only belongs in what
+        this gateway returns once its own interval has actually finished.
+        """
+        now = datetime.now(UTC)
+        closed_open = now - timedelta(minutes=15)  # M5: closed 10 minutes ago
+        forming_open = now - timedelta(minutes=1)  # M5: only 1 minute in, still open
+
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (
+                    a_bar_row(time=int(closed_open.timestamp())),
+                    a_bar_row(time=int(forming_open.timestamp())),
+                )
+
+        result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+
+        assert len(result.bars) == 1
+        assert result.bars[0].bar.open_time_utc.timestamp() == int(closed_open.timestamp())
+
+    def test_a_bar_that_closes_between_two_polls_is_returned_on_the_later_one(self) -> None:
+        """The other half of the same fix: nothing is lost, only delayed."""
+        now = datetime.now(UTC)
+        just_closed = now - timedelta(minutes=5, seconds=1)  # M5: closed 1 second ago
+
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_bar_row(time=int(just_closed.timestamp())),)
+
+        result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+
+        assert len(result.bars) == 1
 
     def test_real_numpy_structured_rows_convert_without_crashing(self) -> None:
         """The bar half of the same numpy 2.x repr defect as `TestTicks`'s."""
