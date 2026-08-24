@@ -1782,6 +1782,81 @@ loader itself.
   `review/FEEDBACK.md` now carries an *Unreviewed work* section saying what to
   look at and where the evidence is.
 
+## Update 2026-08-24 (third entry) — Windows host initialised, gate run there for the first time
+
+```text
+Component: 1 — Platform / Application
+Milestone: M0/M1 — engineering baseline, Windows host
+Status before: Windows host provisioned but never used; every quality claim
+               from the macOS machine only
+Status after:  Windows host cloned, dependencies synced, full gate run and
+               green; one cross-platform mypy defect found and fixed
+```
+
+**What changed**
+
+Cloned `DutchBugs/Crumblr` onto the Windows x86-64 host per HANDOVER.md §0.2.
+The working directory already contained an empty, remote-less `git init` from
+an earlier attempt, which is why the user's own `git clone` failed with
+`destination path '.' already exists and is not an empty directory` — removed
+(nothing was committed to it) and cloned properly. Repo-local git identity set
+per §0.2 (`user.name`, `user.email`, `credential.https://github.com.username`),
+`uv` installed, `uv sync --extra mt5` run.
+
+**A real defect found by running the gate on this host, not predicted by HANDOVER.md**
+
+`uv run mypy` failed with `tests\unit\test_mt5_readonly_gateway.py:479: error:
+Statement is unreachable`, which does not reproduce on macOS. Cause: mypy
+statically evaluates `sys.platform` comparisons against the platform mypy
+itself runs on (no `--python-platform` override is configured). The test's
+`if sys.platform == "win32": pytest.skip(...)` was therefore treated as always
+taken on this host, and since `pytest.skip` is typed `NoReturn`, mypy marked
+the following `with pytest.raises(...)` block as unreachable. On macOS the
+same branch is statically dead instead, which is silent rather than an error.
+Fixed by switching the guard to `platform.system() == "Windows"`, which mypy
+does not special-case — same runtime behaviour, no static elimination. See the
+inline comment added at the test for the reasoning.
+
+**Evidence**
+
+- `platform.machine()` → `AMD64`; `MetaTrader5.__version__` → `5.0.6090`
+- ruff check / format — clean, 113 files formatted
+- mypy — clean, 93 source files (after the fix above; failed before it)
+- pytest without PostgreSQL — **587 passed, 76 skipped** (HANDOVER.md predicted
+  590/73; the difference is three tests whose skip/pass status is
+  platform-dependent, not a regression — one confirmed as the mypy fix above
+  now genuinely skipping the Windows branch at runtime too; the other two are
+  most plausibly `test_halt_survives_restart.py`'s own
+  `"filesystem or user ignores directory permissions"` skip, since Windows
+  does not enforce POSIX permission bits the way the test's assumptions were
+  written against — not independently confirmed line-by-line, the pytest
+  output was captured through a `tail` that truncated the early skip lines)
+- replay determinism — `run_replay.py --bars 2000` run twice, byte-identical
+  md5 (`6528cef1969d4d973cc085ebaebcc6a8`) both times
+- PostgreSQL not yet started on this host (Docker Desktop installed but not
+  running) — the full 663 have not been run here yet
+
+**Risk impact**
+
+None. No product code changed, only a test file. No broker, no order path
+touched.
+
+**Decision**
+
+Not yet committed — holding for the user's go-ahead per `CLAUDE.md` §4.
+
+**Next**
+
+- Start Docker Desktop + PostgreSQL on this host and run the full 663 to
+  close out that gap.
+- Commit the test fix once the user confirms (repo-local identity is already
+  correct for it).
+- The one remaining hard blocker for MT5 first contact (HANDOVER.md §4) is
+  still the owner creating the Pepperstone demo account and logging into it
+  once, interactively, in the terminal — unchanged by this session.
+- `feedback.1.7.md` remains due and is not something this session can write —
+  it is the independent reviewer's document, not the implementer's.
+
 ---
 
 # 14. Update template

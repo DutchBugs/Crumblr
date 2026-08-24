@@ -471,10 +471,16 @@ class TestTerminalHealth:
 
 class TestModuleAvailability:
     def test_importing_the_real_package_explains_itself_when_absent(self) -> None:
-        """This host is macOS; the package ships Windows wheels only."""
-        import sys
+        """This host is macOS; the package ships Windows wheels only.
 
-        if sys.platform == "win32":  # pragma: no cover - not this host
+        Deliberately checked via ``platform.system()``, not ``sys.platform``:
+        mypy statically resolves ``sys.platform`` comparisons against the
+        platform it runs on, so on a Windows run it would treat the branch
+        below as always taken and flag the `with` block as unreachable.
+        """
+        import platform
+
+        if platform.system() == "Windows":  # pragma: no cover - not this host
             pytest.skip("MetaTrader5 may genuinely be importable on Windows")
         with pytest.raises(Mt5UnavailableError, match="Windows"):
             load_mt5_module()
