@@ -54,6 +54,18 @@ MT5_POSITION_TYPE_SELL = 1
 MT5_ACCOUNT_TRADE_MODE_DEMO = 0
 """`ACCOUNT_TRADE_MODE_DEMO`. Contest is 1, real is 2."""
 
+_BAR_SETTLE_BUFFER = timedelta(seconds=30)
+"""How long past its raw boundary a bar must sit before `bars()` returns it.
+
+Fifth real soak, 2026-08-24: a bar's `tick_volume` was observed to change
+between two polls five seconds apart, both after the bar's interval had
+already closed by the raw boundary alone — MT5 kept attributing a few very
+late ticks to it for a short window past the nominal close. 30 seconds is
+six poll cycles at the default 5-second interval: generous margin over the
+single observed revision, not tuned tight against it. Widen this from
+further soak evidence if a revision is ever seen this far past close;
+narrowing it needs the same kind of evidence, not a hunch."""
+
 
 class ReadOnlyViolationError(RuntimeError):
     """Something asked the M1 gateway to change broker state."""
@@ -450,6 +462,17 @@ class ReadOnlyMt5Gateway:
         one still being formed. Dropped here rather than downstream: a bar
         only becomes the kind of fact this platform persists once its own
         interval has actually ended.
+
+        `_BAR_SETTLE_BUFFER` exists because "the interval has ended" was not
+        quite enough on its own. Fifth real soak, 2026-08-24: a bar was first
+        read and stored the moment its interval closed, then re-read one poll
+        (5 seconds) later with a different `tick_volume` for the *same*
+        interval — MT5 kept attributing a few very-late ticks to a bar for a
+        short window after its nominal close, and `record_bars` correctly
+        raised on the second, revised value. The buffer holds a bar back a
+        little past its raw boundary so the first read already carries MT5's
+        settled figures, rather than trying to tolerate or merge a revision
+        after the fact.
         """
         broker_symbol = self.resolve_symbol()
         spec = self.instrument(canonical_symbol)
@@ -464,7 +487,7 @@ class ReadOnlyMt5Gateway:
             (
                 bar
                 for bar in (self._bar_from_raw(row) for row in raw)
-                if bar.open_time_utc + interval <= received_time_utc
+                if bar.open_time_utc + interval + _BAR_SETTLE_BUFFER <= received_time_utc
             ),
             key=lambda bar: bar.open_time_utc,
         )

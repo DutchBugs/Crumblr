@@ -744,18 +744,36 @@ class TestBars:
         assert len(result.bars) == 1
         assert result.bars[0].bar.open_time_utc.timestamp() == int(closed_open.timestamp())
 
-    def test_a_bar_that_closes_between_two_polls_is_returned_on_the_later_one(self) -> None:
+    def test_a_bar_that_closes_between_two_polls_is_returned_once_settled(self) -> None:
         """The other half of the same fix: nothing is lost, only delayed."""
         now = FAKE_NOW
-        just_closed = now - timedelta(minutes=5, seconds=1)  # M5: closed 1 second ago
+        settled = now - timedelta(minutes=5) - timedelta(seconds=31)  # past the settle buffer
 
         class WithBars(FakeMt5):
             def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
-                return (a_bar_row(time=int(just_closed.timestamp())),)
+                return (a_bar_row(time=int(settled.timestamp())),)
 
         result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
 
         assert len(result.bars) == 1
+
+    def test_a_bar_still_inside_the_settle_buffer_is_not_yet_returned(self) -> None:
+        """D-042 addendum, fifth real soak: MT5 revised a bar's tick_volume a
+
+        few seconds after its raw boundary closed. A bar just past the raw
+        boundary but still inside `_BAR_SETTLE_BUFFER` must not be returned
+        yet — that revision window is exactly what it exists to absorb.
+        """
+        now = FAKE_NOW
+        just_past_boundary = now - timedelta(minutes=5, seconds=1)  # closed, but not settled
+
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_bar_row(time=int(just_past_boundary.timestamp())),)
+
+        result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+
+        assert len(result.bars) == 0
 
     def test_real_numpy_structured_rows_convert_without_crashing(self) -> None:
         """The bar half of the same numpy 2.x repr defect as `TestTicks`'s."""

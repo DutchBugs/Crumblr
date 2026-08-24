@@ -3021,6 +3021,109 @@ proven" — that needs a fifth attempt with both fixes present.
 
 ---
 
+## Update 2026-08-24 (fifteenth entry) — Phase A fifth attempt: D-039's fix confirmed working, a fourth real defect found and fixed, D-042 refined
+
+**What happened**
+
+Restarted Phase A a fifth time, this time correctly against the new
+`crumblr_soak` database. Connected cleanly; `mt5.broker_clock_offset_detected`
+logged `offset_minutes: 180` (exactly 3 hours), measured as 2:59:39.77 raw —
+matching the fourth attempt's independent measurement almost to the second.
+D-039's fix is confirmed working against the real terminal, not only against
+its own unit tests.
+
+Bars started arriving for the first time in any real soak attempt:
+`last_bar_at_utc` advanced from 15:10:00 to 15:15:00, aligned to real M5
+boundaries. Twelve bars persisted before the run went `UNHEALTHY` again —
+progress, not a regression: three real defects deep, each attempt reaches
+further than the last.
+
+**The fourth real defect.** The bar for the 15:15–15:20 UTC interval was
+first stored the instant real time crossed 15:20:00 (`received_time_utc:
+15:20:03`), then read again roughly one poll later with a **different
+`tick_volume`** for the same interval — the OHLC values printed in the
+error looked identical, which is what made this one take a direct database
+query to actually see: `record_bars`'s conflict check compares the whole
+`Bar`, not only OHLC, and `tick_volume` was the field that had moved.
+MT5 continues attributing a few very-late ticks to a bar for a short window
+*after* its nominal close, not only *before* it (D-042's original finding).
+"The interval has ended" was necessary but not sufficient.
+
+**Fix:** `_BAR_SETTLE_BUFFER = timedelta(seconds=30)` added on top of
+D-042's existing closedness check — a bar must be 30 seconds past its raw
+boundary, not just past it, before `bars()` returns it. 30 seconds is six
+poll cycles at the default 5-second interval: margin over the one observed
+revision (seen within roughly one poll of the boundary), not tuned tight
+against it. Two new tests make the boundary explicit: a bar one second past
+the raw interval end but still inside the buffer is withheld; one
+comfortably past the buffer is returned. Recorded as a D-042 addendum, not
+a new deviation — same underlying question (when is a broker-delivered bar
+actually done changing), refined by a second, independent piece of real
+evidence.
+
+Handled without stopping to ask first, unlike D-039: this is a buffer-sizing
+choice within an already-agreed architecture (exclude bars until settled),
+not a foundational semantic decision about what "UTC" means for every
+timestamp in the platform — the same distinction that made D-039 worth a
+question and this one not.
+
+**Evidence**
+
+```text
+ruff, mypy — clean, 98 source files
+tests/unit/test_mt5_readonly_gateway.py::TestBars — 8 passed (4 existing +
+  2 D-042 original + 2 new settle-buffer tests)
+full unit suite — 587 passed, 1 skipped (after fixing bar_row's default time)
+full suite with PostgreSQL — 712 passed, 3 skipped, exit 0 (0:02:59)
+```
+
+**Problems found**
+
+The fourth real defect, described above. Also worth naming: this session's
+own database-check mistake from the fourth-attempt investigation (querying
+`crumblr_soak` instead of the database actually in use) was *not* repeated
+this time — the fifth attempt's evidence was pulled from the correct
+database on the first try.
+
+A second, genuine process gap this time: after adding `_BAR_SETTLE_BUFFER`,
+verification ran only the targeted `TestBars`/`TestClockOffset` subset, not
+the full suite — and the full suite (started afterward, described below)
+caught two failures the targeted run could not have: `test_live_reader.py`'s
+own `bar_row()` fixture defaulted to a `time` sitting exactly on the old
+filter's boundary, which the new 30-second buffer then excluded. Fixed by
+giving that fixture the same "safely closed by default" shift already
+applied to `test_mt5_readonly_gateway.py`'s `a_bar_row()`. The lesson is
+procedural, not about the fix itself: a targeted test run after touching
+shared filter logic is not a substitute for the full suite before calling
+something verified.
+
+**Risk impact**
+
+None — read/persistence-layer robustness fix, no order path. Real cost: a
+fourth soak attempt spent on a genuine defect the previous three could not
+have surfaced (each ended before two consecutive polls of the same
+just-closed bar interval had a chance to disagree).
+
+**Decision**
+
+D-042 stands as CLOSED with this addendum rather than being reopened as a
+new deviation — the fix's principle (exclude a bar until it is done
+changing) did not change, only how "done changing" is measured.
+
+**Next**
+
+- Re-apply migrations to `crumblr` (dropped again by the suite above) and
+  confirm `crumblr_soak`'s schema is still intact.
+- Commit and push.
+- Restart Phase A a sixth time, against `crumblr_soak`.
+- If a full 30-60 minutes passes with ticks and bars both persisting
+  cleanly and no further conflicts: that is the clean Phase A run review
+  1.10/1.11 have been asking for. Proceed to recording the evidence, the
+  timestamp-boundary comparison D-039's fix enables, and scheduling Phase B
+  with the owner present.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

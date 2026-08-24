@@ -97,7 +97,10 @@ def tick_row(**overrides: Any) -> SimpleNamespace:
 
 def bar_row(**overrides: Any) -> SimpleNamespace:
     fields: dict[str, Any] = {
-        "time": 1_767_000_000,
+        # An hour before NOW, so a plain bar_row() is safely closed and past
+        # readonly.py's D-042 settle buffer rather than sitting right at the
+        # boundary.
+        "time": 1_767_000_000 - 3600,
         "open": 1.16700,
         "high": 1.16750,
         "low": 1.16680,

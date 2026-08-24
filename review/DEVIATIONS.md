@@ -729,6 +729,20 @@ mean anything should start here.
   not-yet-closed, so the fourth attempt ran 30 clean minutes, persisted real
   ticks, and stored zero bars. Once D-039 was fixed, this filter needed no
   change of its own — it was correct all along against genuinely-UTC input.
+- **Addendum, fifth Phase A attempt:** with D-039 fixed, bars started
+  persisting correctly — until one raised the same `JournalIntegrityError`
+  this fix exists to prevent. The bar for the 15:15-15:20 UTC interval was
+  first stored the moment real time crossed 15:20:00, then read again one
+  poll (5 seconds) later with a different `tick_volume` for the identical
+  interval: MT5 kept attributing a few very-late ticks to a bar for a short
+  window *after* its nominal close, not only before it. "The interval has
+  ended" was necessary but not sufficient. Added `_BAR_SETTLE_BUFFER`
+  (30 seconds, six poll cycles at the default 5-second interval) on top of
+  the existing closedness check, so a bar's first read already carries MT5's
+  settled figures rather than needing to tolerate a revision after the fact.
+  Two tests cover the boundary explicitly: a bar one second past the raw
+  interval end but still inside the buffer is withheld; one comfortably past
+  the buffer is returned.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
