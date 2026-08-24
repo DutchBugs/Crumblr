@@ -1709,6 +1709,74 @@ place an order, and a test fails if it ever reaches for one.
   (HANDOVER.md §4.5). `feedback.2.0.md` remains mandatory before any
   `order_send`, demo included.
 
+## Update 2026-08-24 (second entry) — the repository has a remote
+
+```text
+Component: 1 — Platform / Application
+Milestone: M0 — repository and engineering baseline
+Status before: no commits, no remote; every quality claim from one machine
+Status after:  initial commit pushed to a private remote; CI able to run
+```
+
+**What changed**
+
+The owner lifted the commit hold, which had stood since the first session
+(F-006), because the code now has to reach a second machine — the Windows MT5
+host. Initial commit `fd6a890`, 123 files, pushed to the private repository
+`DutchBugs/Crumblr`.
+
+**Separation of the personal and work accounts**
+
+The owner runs an unrelated project under a different GitHub account, and asked
+explicitly that the two not mix. Three crossover routes were found and closed:
+
+1. **Commit attribution.** The global git identity was the owner's work email
+   address, so every commit would have been attributed to the work account.
+   Overridden **repo-locally**; the global config was left untouched.
+2. **The SSH key.** The default key on the macOS host (`~/.ssh/id_ed25519`)
+   turned out to be a *deploy key belonging to the unrelated work repository* —
+   verified, not assumed. The remote therefore uses HTTPS, and the handover
+   says not to switch it to SSH.
+3. **The stored credential.** `credential.https://github.com.username` is
+   pinned repo-locally, so the macOS keychain keeps one entry per account
+   instead of one shared github.com credential.
+
+The token itself is fine-grained and scoped to this single repository. It never
+entered a chat transcript or a file: the first push was run by the owner in
+their own terminal.
+
+**A rejection worth recording**
+
+The first push was refused: a fine-grained token cannot create
+`.github/workflows/ci.yml` without the Workflows permission. The push was
+atomic, so nothing partial landed. Resolved by adding **Workflows: read and
+write** rather than by dropping the workflow file — dropping it would have
+preserved D-019 indefinitely, and the workflow is the point.
+
+**Evidence**
+
+- `git ls-remote origin` → `refs/heads/main` at `fd6a890`, identical to local
+  `HEAD`; branch tracking established
+- commit author verified as the personal address, not the work address
+- no `.env` tracked; a scan of all 123 tracked files found no credential-shaped
+  strings beyond the local development PostgreSQL and test fixtures
+
+**Risk impact**
+
+None to the running system. The relevant risk was disclosure, and the two
+things that could have leaked — MT5 credentials and the GitHub token — are both
+outside the repository by construction, one of them enforced by the config
+loader itself.
+
+**Next**
+
+- Record the first CI result here, pass or fail. Until then the quality figures
+  still rest on one developer machine (D-019 amended, not closed).
+- Clone to the Windows host and run the gate there. Expect **590 passed,
+  73 skipped** without a PostgreSQL — read the skip count rather than the
+  colour.
+- Then the demo account and MT5 first contact (HANDOVER.md §4).
+
 ---
 
 # 14. Update template

@@ -609,13 +609,22 @@ mean anything should start here.
   `NameError` the first time that type is used as a model field. The import-time
   saving is not worth a runtime failure in a trading process.
 
-### D-019 — CI has never executed
-- **Status:** pending — needs a git remote
+### D-019 — CI had never executed
+- **Status:** provisional — the blocker is gone; the evidence is not in yet
 - **Code:** `.github/workflows/ci.yml` defines lint, format, strict types,
   tests on Linux and Windows, and a gitleaks secret scan
-- **Watch for:** every quality claim in `status.md` was produced locally on
-  macOS arm64. The Windows job in particular is unproven, and it is the one
-  that will matter for the MT5 gateway.
+- **Original gap:** the workflow existed but no remote did, so it had never
+  run. Every quality claim in `status.md` came from one macOS arm64 machine.
+- **Current state:** the repository was pushed to a private remote on
+  2026-08-24 (`DutchBugs/Crumblr`, initial commit `fd6a890`), so the workflow
+  can now run. Whether it *passes* is a separate question and its first result
+  is unrecorded at the time of writing.
+- **Remaining gap:** no CI run has been recorded in `status.md` as evidence.
+  Until one is, the quality figures still rest on a single developer machine.
+- **Watch for:** the Windows job installs the `mt5` extra and is the one that
+  matters for the gateway. It has never executed anywhere.
+- **Gate affected:** M0 — review 1.6 §5 names a passing CI run or a recorded
+  exception as one of the two remaining M0 loose ends.
 
 ---
 

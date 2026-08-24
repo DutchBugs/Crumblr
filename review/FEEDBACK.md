@@ -58,7 +58,7 @@ different questions and conflating them is how "CLOSED" comes to be misread as
 | F-003 | HIGH | Kill-switch state does not survive a restart | CLOSED | SHIPPED | Reopened in 1.1 and rightly so — the first evidence built two objects in one interpreter. `tests/integration/test_halt_survives_restart.py` now spawns a real child process |
 | F-004 | MED/HIGH | Strategy development runs ahead of evidence | CLOSED | N/A — policy | Freeze recorded in `status.md` §10 and `CLAUDE.md` §4 |
 | F-005 | MEDIUM | Inconsistent maturity/progress signals | CLOSED | N/A — documentation | Percentages removed; per-capability maturity columns |
-| F-006 | LOW | Local Git initialised despite earlier agreement | CLOSED | N/A — process | Correction accepted in 1.1; local allowed, remote deferred |
+| F-006 | LOW | Local Git initialised despite earlier agreement | CLOSED | N/A — process | Correction accepted in 1.1; local allowed, remote deferred. **The hold was lifted 2026-08-24**: initial commit `fd6a890`, pushed to the private remote `DutchBugs/Crumblr` so the code could reach the Windows MT5 host and CI could finally run |
 | F-007 | HIGH | No execution-time risk revalidation | CLOSED | **DECIDED — PENDING M5** | `review/adr/ADR-001-…md`. No code exists |
 | F-008 | HIGH | No FLATTEN / cancel-pending control path | CLOSED | SHIPPED — **not MT5-validated** | `risk/operator_controls.py`, `tests/unit/test_operator_controls.py`. Real broker behaviour unproven |
 | F-009 | MEDIUM | Stale blockers in `status.md` contradict this tracker | CLOSED | N/A — documentation | APP-001/002 closed in place, APP-003/004 added, EV-001 split |

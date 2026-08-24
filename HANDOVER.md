@@ -69,8 +69,16 @@ uv run python scripts/run_replay.py --bars 2000 2>/dev/null | md5
 
 ```powershell
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+git clone https://github.com/DutchBugs/Crumblr.git
+cd Crumblr
 uv sync --extra mt5
 ```
+
+The repository is private, so the clone asks for credentials: the GitHub
+username and a fine-grained token as the password. Windows Credential Manager
+stores it after the first time. Give that token **Contents: read and write**
+and **Workflows: read and write** — a push is rejected outright without the
+second one, because the repository carries a CI workflow.
 
 `--extra mt5` is what pulls in the `MetaTrader5` package. It resolves to
 nothing on macOS and Linux — the marker is `sys_platform == 'win32'` — so the
@@ -422,11 +430,17 @@ output rather than trading evidence.
   of the host and never of the repository. **The Windows host has its own**, and
   it starts closed — a fresh machine refuses to trade until an operator arms it,
   which is the intended behaviour and not a fault.
-- **Nothing is committed.** The repository is initialised and everything is
-  staged, at the owner's request — they are holding commits until a working
-  prototype satisfies them. Local Git is allowed, a remote is deferred (F-006).
-  Moving the code to the Windows machine therefore means copying a working
-  tree, or finally creating that remote.
+- **History starts at one commit.** The owner held commits until a working
+  prototype existed (F-006); `fd6a890` on 2026-08-24 is the initial import of
+  everything through M2. There is no earlier history to consult — `status.md`
+  §13 is the record of how the code got here, and it is more detailed than a
+  commit log would have been.
+- **The remote is `DutchBugs/Crumblr`, private, on a personal account kept
+  separate from the owner's work account.** Identity and credentials are pinned
+  **repo-locally** for that reason: `user.email`, and
+  `credential.https://github.com.username`. Do not move either to the global
+  config, and do not switch the remote to SSH — the default key on the macOS
+  host is a deploy key belonging to an unrelated work repository.
 - **CI has never run on a runner.** Every quality figure in `status.md` was
   produced on one developer machine. The workflow is written, includes a
   PostgreSQL service and defines a Windows job that installs the `mt5` extra;
