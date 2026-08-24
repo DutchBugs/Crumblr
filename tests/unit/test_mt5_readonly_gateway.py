@@ -579,6 +579,42 @@ class TestTicks:
         )
         assert ticks[0].last is None
 
+    def test_real_numpy_structured_rows_convert_without_crashing(self) -> None:
+        """Found on the first real soak, 2026-08-24: `copy_ticks_from` returns a
+        numpy structured array, not `SimpleNamespace` rows of plain floats.
+        `numpy.float64` subclasses `float`, so `isinstance` did not catch it,
+        but numpy 2.x's own scalar `__repr__` — `"np.float64(1.167)"` — is not
+        something `Decimal()` can parse. Every tick crashed the reader before
+        this was fixed; this test uses an actual structured array, not a
+        stand-in, so the fix cannot silently regress.
+        """
+        import numpy as np
+
+        dtype = np.dtype(
+            [
+                ("time", "i8"),
+                ("time_msc", "i8"),
+                ("bid", "f8"),
+                ("ask", "f8"),
+                ("last", "f8"),
+                ("volume", "i8"),
+                ("flags", "i4"),
+            ]
+        )
+        rows = np.array(
+            [(1_767_000_300, 1_767_000_300_123, 1.16700, 1.16706, 0.0, 0, 6)], dtype=dtype
+        )
+
+        class WithTicks(FakeMt5):
+            def copy_ticks_from(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return tuple(rows)
+
+        ticks = gateway(WithTicks()).ticks(
+            "EUR/USD", since=datetime.fromtimestamp(0, tz=UTC), count=10, source="s"
+        )
+        assert ticks[0].bid == Decimal("1.167")
+        assert ticks[0].ask == Decimal("1.16706")
+
 
 class TestBars:
     def test_bars_are_read_converted_and_normalized(self) -> None:
@@ -613,6 +649,34 @@ class TestBars:
     def test_an_unsupported_timeframe_fails_loudly(self) -> None:
         with pytest.raises(KeyError, match="M2"):
             gateway(FakeMt5()).bars("EUR/USD", timeframe="M2", count=10, source="s")
+
+    def test_real_numpy_structured_rows_convert_without_crashing(self) -> None:
+        """The bar half of the same numpy 2.x repr defect as `TestTicks`'s."""
+        import numpy as np
+
+        dtype = np.dtype(
+            [
+                ("time", "i8"),
+                ("open", "f8"),
+                ("high", "f8"),
+                ("low", "f8"),
+                ("close", "f8"),
+                ("tick_volume", "i8"),
+                ("spread", "i4"),
+                ("real_volume", "i8"),
+            ]
+        )
+        rows = np.array(
+            [(1_767_000_000, 1.16700, 1.16750, 1.16680, 1.16720, 120, 6, 0)], dtype=dtype
+        )
+
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return tuple(rows)
+
+        result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+        assert result.bars[0].bar.open == Decimal("1.167")
+        assert result.bars[0].bar.high == Decimal("1.1675")
 
 
 # --------------------------------------------------------------------------- #

@@ -2462,6 +2462,84 @@ here substitutes for that evidence.
 - Only then: Dashboard v0, CI, domain-contract package, reconciliation — in
   review 1.10's own stated order.
 
+## Update 2026-08-24 (ninth entry) — Phase A first attempt: a real defect, found and fixed within minutes
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: LiveReader unit-tested, never run against the real terminal
+Status after:  first real attempt crashed on the first tick; root-caused,
+               fixed, regression-tested, and Phase A restarted
+```
+
+**What happened**
+
+`scripts/mt5_live_reader.py --duration 1800` was started against the real
+Pepperstone terminal. It connected, resolved `EURUSD`, and crashed on the
+very first tick with `decimal.InvalidOperation`.
+
+**Root cause: `copy_ticks_from`/`copy_rates_from_pos` return numpy structured
+arrays, not the named-tuple-with-plain-floats shape `account_info()` and
+`symbol_info()` return** — a real, observed difference exactly in the spirit
+of D-035, just one level deeper than the enum/bitmask defect D-037 already
+found. `numpy.float64` subclasses Python's `float`, so the adapter's
+`isinstance(value, float)` check passed silently, but numpy 2.x gives its
+scalars their own `repr` — `"np.float64(1.167)"` — which `Decimal()` cannot
+parse. Every tick has this shape, so every tick crashed. Recorded as D-040.
+
+**Why 20 unit tests for `ticks()`/`bars()` didn't catch it:** every test
+fixture built rows from `SimpleNamespace`, which holds plain Python floats.
+That's a faithful stand-in for the calls it was originally written to test
+(`account_info`/`symbol_info`), and an unfaithful one for the two new numpy-
+backed calls this session added — nothing had exercised those two with an
+actual `numpy.dtype` array before the real terminal did.
+
+**A note on this entry's own writing process:** the first `cat` of the
+crashed run's console output was not filtered before being displayed, and
+briefly showed the real account number in this session's own transcript
+(the `mt5.connected` log line — `Mt5Client` logs `login` deliberately, since
+the codebase's own position, stated in `client.py` and `.env.example`, is
+that an account number is an identifier rather than a secret). The raw
+console file itself never left `var/` (git-ignored) and was never
+committed. Flagged to the owner directly when it happened; going forward,
+console output from this script gets filtered or read via the sanitized
+JSON health snapshot rather than cat'd raw.
+
+**Fix**
+
+`_to_decimal` now converts through `float(value)` before `repr`, which
+strips a numpy wrapper (or does nothing to an already-plain float). Two new
+tests build genuine `numpy.dtype` structured arrays for `ticks()` and
+`bars()` — not `SimpleNamespace` — so this specific gap cannot regress
+silently.
+
+**Evidence**
+
+- `tests/unit/test_mt5_readonly_gateway.py` — 2 new tests using real numpy
+  structured arrays, both passed; 52 passed / 1 skipped in the file overall
+- ruff, mypy — clean, 97 source files
+- full suite with PostgreSQL, rerun after the fix — **691 passed, 3 skipped**
+  in 143s (up from 689/3; +2 new numpy regression tests, same three
+  platform-dependent skips, no failures)
+
+**Risk impact**
+
+None to the running system — read-only throughout. Real impact on the
+soak-test schedule: Phase A's first attempt produced zero usable evidence,
+restarted after the fix.
+
+**Decision**
+
+D-040 opened and closed the same session. Confirms the review's own framing
+(1.9 §16, 1.10 §13): the real terminal finds things a fake cannot, and this
+is exactly why the soak test was the priority rather than another round of
+simulation.
+
+**Next**
+
+- Restart Phase A with the fix in place.
+- Everything else unchanged from the previous entry's Next section.
+
 ---
 
 # 14. Update template

@@ -573,6 +573,34 @@ mean anything should start here.
   not a documentation update.
 - **Gate affected:** M1.
 
+### D-040 — `Decimal(repr(...))` broke on real MT5 data: numpy 2.x scalars are not plain floats
+- **Status:** RESOLVED 2026-08-24 — found on the first real soak attempt, fixed
+  the same session
+- **Spec:** build.md §21 / domain money rules — MT5 floats convert to
+  `Decimal` via `repr`, never via a direct `Decimal(float)` construction
+- **Original gap:** `_to_decimal` in `mt5_gateway/readonly.py` checked
+  `isinstance(value, float)` and called `Decimal(repr(value))`. That was
+  written and tested against `account_info()`/`symbol_info()`, which return
+  named tuples with genuine Python `float` attributes, and against test fakes
+  built the same way. `copy_ticks_from` and `copy_rates_from_pos` — this
+  session's new code, first run for real 2026-08-24 — return **numpy
+  structured arrays**. `numpy.float64` subclasses Python's `float`, so the
+  `isinstance` check passed, but numpy 2.x gives scalars their own `__repr__`:
+  `repr(numpy.float64(1.167))` is `"np.float64(1.167)"`, which
+  `Decimal()` cannot parse. Every single tick crashed the reader on `bid`.
+- **Why it wasn't caught first**: every unit test for `ticks()`/`bars()`
+  built rows from `SimpleNamespace` with plain Python floats — a faithful
+  stand-in for the account/symbol calls this pattern was proven against, and
+  an unfaithful one for `copy_ticks_from`/`copy_rates_from_pos`, which no
+  test had exercised with a real or realistic numpy array before the soak.
+  The exact class of gap D-035 names for the whole adapter, materialised.
+- **Fix:** `_to_decimal` now does `Decimal(repr(float(value)))` — `float()`
+  strips the numpy wrapper (or is a no-op on an already-plain float) before
+  `repr` ever sees it. Two new tests build genuine `numpy.dtype` structured
+  arrays (not `SimpleNamespace`) for both `ticks()` and `bars()`, so this
+  cannot regress silently again.
+- **Gate affected:** M1. Blocked the first soak-test attempt outright.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

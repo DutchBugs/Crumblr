@@ -69,17 +69,23 @@ class SymbolNotFoundError(RuntimeError):
 def _to_decimal(value: object, field: str) -> Decimal:
     """Convert an MT5 float to `Decimal` without going through binary float.
 
-    MT5 hands back Python floats. Passing one straight to `Decimal` preserves
-    the binary error rather than removing it, so the value is rendered with
-    `repr` first — `Decimal(repr(1.0850000000000002))` is the shortest decimal
-    that round-trips, which is what the terminal meant.
+    MT5 hands back Python floats from `account_info`/`symbol_info`, but a
+    numpy *scalar* — `numpy.float64` — from `copy_ticks_from` and
+    `copy_rates_from_pos`. Both pass `isinstance(value, float)`, since numpy's
+    float64 subclasses Python's `float`. They are not interchangeable for
+    this purpose: `repr(1.1685)` is `"1.1685"`, but numpy 2.x's own `__repr__`
+    for a scalar is `"np.float64(1.1685)"`, which `Decimal()` cannot parse.
+    Found running the first real continuous-read soak, 2026-08-24 — every
+    tick has this shape and every one crashed the reader. `float(value)`
+    strips the numpy wrapper before `repr` ever sees it, and is a no-op for
+    an already-plain float.
     """
     if isinstance(value, Decimal):
         return value
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, float):
-        return Decimal(repr(value))
+        return Decimal(repr(float(value)))
     raise TypeError(f"{field} is {type(value).__name__}, expected a number")
 
 
