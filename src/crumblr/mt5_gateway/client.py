@@ -12,6 +12,7 @@ up reporting an account it never actually read.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -44,6 +45,20 @@ class Mt5Module(Protocol):
     def copy_ticks_from(self, *args: Any, **kwargs: Any) -> Any: ...
     def positions_get(self, *args: Any, **kwargs: Any) -> tuple[Any, ...] | None: ...
     def orders_get(self, *args: Any, **kwargs: Any) -> tuple[Any, ...] | None: ...
+
+    # Request-parameter constants for copy_ticks_from / copy_rates_from_pos.
+    # Declared here rather than hardcoded at the call site: these are read off
+    # the real package at run time, not guessed from documentation — the same
+    # discipline D-037 exists to enforce for values read *from* MT5 applies
+    # just as much to values passed *to* it.
+    COPY_TICKS_ALL: int
+    TIMEFRAME_M1: int
+    TIMEFRAME_M5: int
+    TIMEFRAME_M15: int
+    TIMEFRAME_M30: int
+    TIMEFRAME_H1: int
+    TIMEFRAME_H4: int
+    TIMEFRAME_D1: int
 
 
 class Mt5UnavailableError(RuntimeError):
@@ -94,6 +109,39 @@ class Mt5Credentials:
 
     def __repr__(self) -> str:
         return f"Mt5Credentials(login={self.login}, server={self.server!r}, password=<redacted>)"
+
+
+class MissingCredentialsError(RuntimeError):
+    """The environment does not carry a full set of MT5 credentials."""
+
+
+def read_credentials(environ: dict[str, str] | None = None) -> Mt5Credentials:
+    """Assemble credentials from the environment, or say exactly what is absent.
+
+    build.md §21 keeps these out of the repository. On a workstation they come
+    from `.env`; in production from the Windows Credential Manager or a secret
+    manager. Either way this process is the only one that sees them.
+
+    Shared by `scripts/mt5_probe.py` and `scripts/mt5_live_reader.py` rather
+    than duplicated — the same lesson D-037 taught about decode tables applies
+    to a credential-shaped helper: two copies are two chances to drift.
+    """
+    env = os.environ if environ is None else environ
+    missing = [
+        name
+        for name in ("CRUMBLR_MT5_LOGIN", "CRUMBLR_MT5_PASSWORD", "CRUMBLR_MT5_SERVER")
+        if not env.get(name)
+    ]
+    if missing:
+        raise MissingCredentialsError(
+            "missing " + ", ".join(missing) + ". Copy .env.example to .env and fill it in, "
+            "or export them from the secret store. They never belong in config/."
+        )
+    return Mt5Credentials(
+        login=int(env["CRUMBLR_MT5_LOGIN"]),
+        password=env["CRUMBLR_MT5_PASSWORD"],
+        server=env["CRUMBLR_MT5_SERVER"],
+    )
 
 
 class Mt5Client:

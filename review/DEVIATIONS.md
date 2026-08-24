@@ -523,6 +523,56 @@ mean anything should start here.
 - **Gate affected:** M1 — closed by O-005. Live promotion — open again by
   design; see O-005 above.
 
+### D-038 — The continuous reader checks margin mode outside `AccountState`
+- **Status:** deliberate, scoped narrower than review 1.9 F-034 could be read
+- **Spec:** review 1.9 F-034 requires reconnect revalidation to include
+  "account mode" alongside server/currency/leverage/demo status
+- **Gap:** `AccountState` (the contract `ReadOnlyMt5Gateway.account()` returns
+  and `AccountGuardConfig` checks against) does not carry `margin_mode` — only
+  the first-contact probe reads it, ad hoc, the way `application/live_reader.py`
+  now also does. A config-declared `expected_margin_mode` on
+  `AccountGuardConfig`, checked inside `_verify_account` the same way currency
+  and leverage are, would be the more complete version of this — every caller
+  of `gateway.account()` would benefit, not just the reader.
+- **Why it is shaped this way:** extending a persisted domain contract
+  (`AccountState`) and a config schema is a larger, more consequential change
+  than this session judged the moment called for. `LiveReader` instead
+  captures the margin mode it observes on its *first* successful connection
+  and compares every reconnect against that, which is enough to catch a
+  changed account without a new config field or contract change.
+- **Watch for:** this means margin-mode drift is only caught *after* a
+  successful first connection in this process's lifetime — a wrong mode
+  present from the very first connect would not be flagged as a mismatch, only
+  recorded as the new baseline. `AccountGuardConfig.expected_margin_mode` is
+  the fix if that gap ever matters in practice; O-005 recorded the current
+  value (`RETAIL_HEDGING`) so it is on record either way.
+- **Gate affected:** M1 (F-034's revalidation requirement — met, in a
+  narrower form than the fullest reading of the finding).
+
+### D-039 — MT5 tick and bar timestamps are assumed UTC, unverified
+- **Status:** provisional — closes when the soak test (review 1.9 §5) runs
+- **Spec:** build.md §12.2 requires UTC-only internal timestamps
+- **Gap:** `ReadOnlyMt5Gateway.ticks()`/`.bars()` convert `copy_ticks_from`'s
+  `time`/`time_msc` and `copy_rates_from_pos`'s `time` with
+  `datetime.fromtimestamp(..., tz=UTC)` — treating the terminal's clock as UTC
+  outright. `positions()` already made the identical assumption for
+  `position.time` before this session, unremarked; this session's code
+  inherits it rather than resolving it, because nothing has read continuous
+  data from the real terminal yet to check it against.
+- **Why it matters:** if the Pepperstone server clock is not UTC (some MT5
+  servers run at UTC+2/+3, broker-dependent), every tick and bar timestamp
+  this reader persists would carry a constant offset — silently correct-looking,
+  wrong by a fixed amount, and exactly the kind of thing D-035 exists to name
+  before it is trusted.
+- **What is in place:** nothing beyond the assumption. The soak test is the
+  first opportunity to compare a stored tick's `event_time_utc` against the
+  wall clock and settle this the way D-037 was settled — by observation, not
+  by re-reading documentation more carefully.
+- **Watch for:** record the comparison in `status.md` §13 when the soak test
+  runs. If the offset is nonzero, this becomes a real defect in `readonly.py`,
+  not a documentation update.
+- **Gate affected:** M1.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

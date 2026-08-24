@@ -47,7 +47,12 @@ from typing import Any
 
 from crumblr.config import AccountGuardConfig, load_config
 from crumblr.domain.enums import Environment
-from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials, Mt5UnavailableError
+from crumblr.mt5_gateway.client import (
+    MissingCredentialsError,
+    Mt5Client,
+    Mt5UnavailableError,
+    read_credentials,
+)
 from crumblr.mt5_gateway.enums import (
     ACCOUNT_MARGIN_MODES,
     ACCOUNT_TRADE_MODES,
@@ -57,35 +62,6 @@ from crumblr.mt5_gateway.enums import (
 from crumblr.mt5_gateway.readonly import AccountGuardError, ReadOnlyMt5Gateway
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-class MissingCredentialsError(RuntimeError):
-    """The environment does not carry a full set of MT5 credentials."""
-
-
-def read_credentials(environ: dict[str, str] | None = None) -> Mt5Credentials:
-    """Assemble credentials from the environment, or say exactly what is absent.
-
-    build.md §21 keeps these out of the repository. On a workstation they come
-    from `.env`; in production from the Windows Credential Manager or a secret
-    manager. Either way this process is the only one that sees them.
-    """
-    env = os.environ if environ is None else environ
-    missing = [
-        name
-        for name in ("CRUMBLR_MT5_LOGIN", "CRUMBLR_MT5_PASSWORD", "CRUMBLR_MT5_SERVER")
-        if not env.get(name)
-    ]
-    if missing:
-        raise MissingCredentialsError(
-            "missing " + ", ".join(missing) + ". Copy .env.example to .env and fill it in, "
-            "or export them from the secret store. They never belong in config/."
-        )
-    return Mt5Credentials(
-        login=int(env["CRUMBLR_MT5_LOGIN"]),
-        password=env["CRUMBLR_MT5_PASSWORD"],
-        server=env["CRUMBLR_MT5_SERVER"],
-    )
 
 
 def _named(value: object, table: dict[int, str]) -> str:

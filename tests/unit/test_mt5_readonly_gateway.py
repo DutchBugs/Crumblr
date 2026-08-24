@@ -21,7 +21,7 @@ from typing import Any, cast
 import pytest
 
 from crumblr.config import AccountGuardConfig
-from crumblr.domain.enums import Side
+from crumblr.domain.enums import BarOrigin, Side
 from crumblr.domain.models import ApprovedOrder
 from crumblr.mt5_gateway.client import (
     Mt5CallFailedError,
@@ -96,6 +96,17 @@ class FakeMt5:
     reason in `last_error()`. Anything that pretended failures raise would test
     a terminal that does not exist.
     """
+
+    # Arbitrary but distinct — these fakes never care what the values mean,
+    # only that Mt5Module's Protocol has something to find.
+    COPY_TICKS_ALL = 3
+    TIMEFRAME_M1 = 1
+    TIMEFRAME_M5 = 5
+    TIMEFRAME_M15 = 15
+    TIMEFRAME_M30 = 30
+    TIMEFRAME_H1 = 16385
+    TIMEFRAME_H4 = 16388
+    TIMEFRAME_D1 = 16408
 
     def __init__(
         self,
@@ -475,6 +486,133 @@ class TestPositions:
     def test_a_none_result_with_success_reads_as_flat(self) -> None:
         """MT5 returns None with RES_S_OK when the book is genuinely empty."""
         assert gateway(FakeMt5(positions=None, error=(1, "Success"))).positions() == ()
+
+
+# --------------------------------------------------------------------------- #
+# Ticks and bars — HANDOVER.md §4.5, the continuous-read half of M1
+# --------------------------------------------------------------------------- #
+
+
+def a_tick_row(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "time": 1_767_000_300,
+        "time_msc": 1_767_000_300_123,
+        "bid": 1.16700,
+        "ask": 1.16706,
+        "last": 0.0,
+        "volume": 0,
+        "volume_real": 0.0,
+        "flags": 6,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def a_bar_row(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "time": 1_767_000_000,
+        "open": 1.16700,
+        "high": 1.16750,
+        "low": 1.16680,
+        "close": 1.16720,
+        "tick_volume": 120,
+        "spread": 6,
+        "real_volume": 0,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+class TestTicks:
+    def test_ticks_are_read_and_converted(self) -> None:
+        class WithTicks(FakeMt5):
+            def copy_ticks_from(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (
+                    a_tick_row(),
+                    a_tick_row(
+                        time=1_767_000_301, time_msc=1_767_000_301_500, bid=1.16702, ask=1.16708
+                    ),
+                )
+
+        ticks = gateway(WithTicks()).ticks(
+            "EUR/USD",
+            since=datetime.fromtimestamp(1_767_000_000, tz=UTC),
+            count=10,
+            source="mt5:PepperstoneUK-Demo",
+        )
+        assert len(ticks) == 2
+        assert ticks[0].bid == Decimal("1.167")
+        assert ticks[0].ask == Decimal("1.16706")
+        assert ticks[0].source == "mt5:PepperstoneUK-Demo"
+        assert ticks[0].canonical_symbol == "EUR/USD"
+        assert ticks[0].broker_symbol == "EURUSD"
+
+    def test_time_msc_gives_millisecond_precision(self) -> None:
+        class WithTicks(FakeMt5):
+            def copy_ticks_from(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_tick_row(time_msc=1_767_000_300_500),)
+
+        ticks = gateway(WithTicks()).ticks(
+            "EUR/USD", since=datetime.fromtimestamp(0, tz=UTC), count=10, source="s"
+        )
+        assert ticks[0].event_time_utc.microsecond == 500_000
+
+    def test_a_missing_time_msc_falls_back_to_second_precision(self) -> None:
+        class WithTicks(FakeMt5):
+            def copy_ticks_from(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_tick_row(time_msc=0),)
+
+        ticks = gateway(WithTicks()).ticks(
+            "EUR/USD", since=datetime.fromtimestamp(0, tz=UTC), count=10, source="s"
+        )
+        assert ticks[0].event_time_utc == datetime.fromtimestamp(1_767_000_300, tz=UTC)
+
+    def test_zero_last_is_treated_as_absent(self) -> None:
+        """MT5 reports 0.0 for `last` on a symbol with no last-trade price."""
+
+        class WithTicks(FakeMt5):
+            def copy_ticks_from(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_tick_row(last=0.0),)
+
+        ticks = gateway(WithTicks()).ticks(
+            "EUR/USD", since=datetime.fromtimestamp(0, tz=UTC), count=10, source="s"
+        )
+        assert ticks[0].last is None
+
+
+class TestBars:
+    def test_bars_are_read_converted_and_normalized(self) -> None:
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (
+                    a_bar_row(time=1_767_000_000),
+                    a_bar_row(time=1_767_000_300, open=1.16720, close=1.16740),
+                )
+
+        result = gateway(WithBars()).bars(
+            "EUR/USD", timeframe="M5", count=10, source="mt5:PepperstoneUK-Demo"
+        )
+        assert len(result.bars) == 2
+        assert result.bars[0].origin is BarOrigin.BROKER
+        assert result.bars[0].source == "mt5:PepperstoneUK-Demo"
+        assert result.bars[0].bar.open == Decimal("1.167")
+        assert result.is_clean
+
+    def test_bars_delivered_out_of_order_are_sorted_before_normalizing(self) -> None:
+        """Documented delivery order is not trusted any more than a stringified enum was."""
+
+        class WithBars(FakeMt5):
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                return (a_bar_row(time=1_767_000_300), a_bar_row(time=1_767_000_000))
+
+        result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+        assert result.is_clean
+        opens = [bar.bar.open_time_utc for bar in result.bars]
+        assert opens == sorted(opens)
+
+    def test_an_unsupported_timeframe_fails_loudly(self) -> None:
+        with pytest.raises(KeyError, match="M2"):
+            gateway(FakeMt5()).bars("EUR/USD", timeframe="M2", count=10, source="s")
 
 
 # --------------------------------------------------------------------------- #

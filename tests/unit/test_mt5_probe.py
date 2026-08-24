@@ -19,16 +19,19 @@ from typing import Any
 
 import pytest
 from scripts.mt5_probe import (
-    MissingCredentialsError,
     probe,
     raw_account_facts,
     raw_symbol_facts,
-    read_credentials,
     sanitize_report,
 )
 
 from crumblr.config import AccountGuardConfig
-from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
+from crumblr.mt5_gateway.client import (
+    MissingCredentialsError,
+    Mt5Client,
+    Mt5Credentials,
+    read_credentials,
+)
 from crumblr.mt5_gateway.enums import decode_filling_modes
 
 GUARD = AccountGuardConfig.model_validate(
@@ -99,6 +102,15 @@ def symbol_info(**overrides: Any) -> SimpleNamespace:
 
 class FakeMt5:
     """A terminal that answers the way MT5 does — ints, floats and bitmasks."""
+
+    COPY_TICKS_ALL = 3
+    TIMEFRAME_M1 = 1
+    TIMEFRAME_M5 = 5
+    TIMEFRAME_M15 = 15
+    TIMEFRAME_M30 = 30
+    TIMEFRAME_H1 = 16385
+    TIMEFRAME_H4 = 16388
+    TIMEFRAME_D1 = 16408
 
     def __init__(
         self, *, symbols: tuple[str, ...] = ("EURUSD.a", "EURUSD.a.cfd", "GBPUSD.a")

@@ -2211,6 +2211,150 @@ remains open — owner decision, not engineering.
   processing, F-031 sanitization, F-030 closure, and this first-contact
   entry) — held pending the owner's go-ahead.
 
+## Update 2026-08-24 (seventh entry) — review 1.9 processed; the continuous reader built and tested
+
+```text
+Component: 1 — Platform / Application
+Milestone: M1 — MT5 read-only gateway
+Status before: one successful MT5 connection proven; no continuous read, no
+               reconnect handling; the entity question open with no
+               resolution mechanism
+Status after:  O-005 recorded; a reconnect/revalidation engine built and
+               unit-tested against all five scenarios review 1.9 F-034 named;
+               a runnable soak-test script exists. The soak test itself —
+               against the real terminal — has not run yet
+```
+
+**Review 1.9 processed**
+
+`review/feedback.1.9.md` arrived (untracked file, same mechanism as 1.7/1.8).
+Processed per `CLAUDE.md` §1, committed separately as `57b5b05` before the
+engineering work below started:
+
+- **O-005** — for the demo/development environment only, the Pepperstone
+  entity is **Pepperstone Limited (UK)**, refining O-001's "Pepperstone EU"
+  shorthand now that first contact's `company` field is known. Explicitly
+  scoped: does not decide the entity for a future live account. Closes
+  D-034/APP-013 for M1; live promotion reopens the question by design.
+- **APP-016** recorded as **KNOWN / DEFERRED TO M5 READINESS** per the
+  reviewer's explicit instruction not to enable AlgoTrading yet.
+- **F-033** — stale post-first-contact sections (the M1 checklist, Component
+  1's objective, the milestone tracker, the risk table) rewritten to current
+  state. Historical §13 entries untouched.
+- **F-026 … F-032** reconfirmed CLOSED by the reviewer; nothing reopened.
+
+**The continuous reader (workstream A, review 1.9 §5 / F-034)**
+
+HANDOVER.md §4.5 named this the missing half of M1: `readonly.py` declared
+`ticks`/`bars` nowhere, and the Windows host had never read more than one
+snapshot. Built in this order:
+
+1. `src/crumblr/mt5_gateway/enums.py` gained `decode_enum`, reused by the
+   D-037 fix; `client.py`'s `Mt5Module` protocol gained `COPY_TICKS_ALL` and
+   the `TIMEFRAME_*` constants — read off the real package at call time, not
+   hardcoded, for the same reason D-037 existed.
+2. `ReadOnlyMt5Gateway.ticks()` and `.bars()` — the first calls
+   `copy_ticks_from`, the second `copy_rates_from_pos`, both converting
+   through a `_field()` helper that accepts either a numpy structured-array
+   row or a plain object, so the test fakes do not have to reproduce numpy.
+   `bars()` sorts before handing broker-delivered bars to
+   `market_data.pipeline.normalize_bars` — the documented delivery order is
+   not trusted, on the same principle D-037 was fixed on. 12 new tests in
+   `tests/unit/test_mt5_readonly_gateway.py`.
+3. `src/crumblr/application/live_reader.py` (new) — `LiveReader`, a
+   reconnect/revalidation state machine, deliberately **not** the decision
+   orchestrator: it reads ticks and bars and persists them, nothing else. Two
+   failure classes, handled differently on purpose:
+   - `STALE` — no fresh data for a while. Self-clears the moment fresh data
+     arrives; nothing here was ever wrong.
+   - `UNHEALTHY` — revalidation disagreed (server/currency/leverage/demo
+     status via the existing `AccountGuardError` path, or a new margin-mode
+     comparison against the first-observed value — D-038) or a stored bar
+     conflicted with a re-delivered one (`JournalIntegrityError`). **Sticky**:
+     only `LiveReader.acknowledge(operator=, note=)` clears it, mirroring
+     `risk/kill_switch.py`'s no-automatic-reset discipline as a deliberately
+     separate instance of it.
+4. `scripts/mt5_live_reader.py` (new) — the soak-test runner. Prints health
+   every poll, stops cleanly on Ctrl+C, writes a JSON health snapshot with
+   `--json` that carries no credential-shaped field.
+5. `MissingCredentialsError`/`read_credentials` moved from `mt5_probe.py` into
+   `mt5_gateway/client.py` so the new script does not duplicate them — the
+   same "one copy, not two that can drift" reasoning as the D-037 fix.
+
+**Every one of review 1.9 F-034's five required scenarios has a passing unit
+test** (`tests/unit/test_live_reader.py`, 13 tests, all against a scripted
+fake terminal — no PostgreSQL needed, `LiveReader` is typed against a
+narrower `MarketDataSink` protocol for exactly this):
+
+```text
+normal disconnect -> reconnect -> same account -> recover         PASS
+reconnect -> wrong server/account -> fail closed                  PASS
+reconnect -> symbol spec changed -> detect + record, no silence   PASS
+reconnect -> no tick data -> stale                                PASS
+terminal restart -> reconnect -> full account guard re-run        PASS
+```
+
+Two scope decisions recorded rather than silently made: margin-mode
+revalidation checks against the *first observed* value rather than a new
+`AccountGuardConfig.expected_margin_mode` field (D-038); tick/bar timestamps
+are still assumed UTC, unverified against a real feed (D-039, the same class
+of open question D-035 already names for everything else about this
+terminal).
+
+**A real bug found and fixed while writing the tests**
+
+`poll_once()` originally connected on the first call and returned immediately
+without reading — meaning the very first successful connection produced zero
+ticks, zero bars, and could not detect a `JournalIntegrityError` on that same
+call. Found by `TestFirstConnect` and `TestDataConflict` failing; fixed by
+falling through to a read in the same poll a connect succeeds, rather than
+waiting a full cycle. A second, separate bug — staleness never triggering
+when no data had ever arrived, because the reference timestamp was `None` —
+fixed by falling back to `last_reconnect_at_utc` when there is no tick or bar
+to measure staleness from yet.
+
+**Evidence**
+
+- `tests/unit/test_live_reader.py` — 13 passed (all new)
+- `tests/unit/test_mt5_readonly_gateway.py` — 7 new ticks/bars tests (51 total
+  in the file), all passed, none of the existing tests broken
+- ruff, mypy — clean, 97 source files
+- full suite with PostgreSQL, rerun after this entry's code — **686 passed, 3
+  skipped** (up from 666/3; +20 new tests, the same three platform-dependent
+  skips as before, no failures)
+- replay determinism — unchanged, byte-identical
+  (`6528cef1969d4d973cc085ebaebcc6a8`)
+
+**What this does not prove**
+
+Nothing here has run against the real terminal yet. Every scenario above is
+proven against a scripted fake, which is exactly the class of evidence D-035
+calls weaker than observation. `scripts/mt5_live_reader.py` exists to close
+that gap; running it, including a deliberate interruption, is the next step
+and needs the owner present — an interruption test does something to their
+real MT5 session.
+
+**Risk impact**
+
+None to the running system. Read-only throughout; no order path touched;
+`--json` output carries no account number (same `to_payload()` discipline as
+the probe's sanitized output).
+
+**Decision**
+
+F-034 substantially built and unit-tested; not closeable yet — review 1.9 §5
+asks for soak-test evidence against the real terminal, which this entry does
+not have. Left `IN PROGRESS` in `review/FEEDBACK.md`.
+
+**Next**
+
+- Run `scripts/mt5_live_reader.py` against the real terminal, with the owner
+  present, including at least one deliberate interruption (§5's requirement).
+- Record the result here, and settle D-039 (timestamp UTC assumption) from
+  what it shows.
+- Only after that: Dashboard v0 (F-035) and reconciliation, per review 1.9's
+  own ordering.
+
 ---
 
 # 14. Update template

@@ -25,21 +25,25 @@ from decimal import Decimal
 from typing import Any, NoReturn
 
 from crumblr.config import AccountGuardConfig
-from crumblr.domain.enums import Side
+from crumblr.domain.enums import BarOrigin, Side
 from crumblr.domain.models import (
     AccountState,
     ApprovedOrder,
+    Bar,
     InstrumentSpec,
+    MarketTick,
     PositionState,
 )
 from crumblr.domain.timeutils import utc_now
-from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client
+from crumblr.market_data.pipeline import BarBuildResult, normalize_bars
+from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module
 from crumblr.mt5_gateway.enums import (
     SYMBOL_TRADE_MODES,
     decode_enum,
     decode_filling_modes,
 )
 from crumblr.observability.logging import get_logger
+from crumblr.persistence.market_data import tick_identity
 
 _log = get_logger("mt5_gateway")
 
@@ -77,6 +81,41 @@ def _to_decimal(value: object, field: str) -> Decimal:
     if isinstance(value, float):
         return Decimal(repr(value))
     raise TypeError(f"{field} is {type(value).__name__}, expected a number")
+
+
+def _field(row: Any, name: str) -> Any:
+    """Read one field off a `copy_ticks_from` / `copy_rates_from_pos` row.
+
+    The real calls return numpy structured arrays, whose rows answer to
+    `row["field"]`; a hand-built fake in the test suite may use a plain
+    object with attributes instead. Supporting both means the fakes do not
+    have to reproduce numpy's dtype machinery to stand in for the real thing.
+    """
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return getattr(row, name)
+
+
+_TIMEFRAME_ATTRS: dict[str, str] = {
+    "M1": "TIMEFRAME_M1",
+    "M5": "TIMEFRAME_M5",
+    "M15": "TIMEFRAME_M15",
+    "M30": "TIMEFRAME_M30",
+    "H1": "TIMEFRAME_H1",
+    "H4": "TIMEFRAME_H4",
+    "D1": "TIMEFRAME_D1",
+}
+"""market_data.pipeline's timeframe names, mapped to the module attribute that
+carries MT5's own constant for it — read at call time, never hardcoded."""
+
+
+def _mt5_timeframe(module: Mt5Module, timeframe: str) -> int:
+    attr = _TIMEFRAME_ATTRS.get(timeframe)
+    if attr is None:
+        known = ", ".join(sorted(_TIMEFRAME_ATTRS))
+        raise KeyError(f"unsupported timeframe {timeframe!r}; known: {known}")
+    return int(getattr(module, attr))
 
 
 class ReadOnlyMt5Gateway:
@@ -265,6 +304,107 @@ class ReadOnlyMt5Gateway:
                 observed_at_utc=observed,
             )
             for position in raw
+        )
+
+    def ticks(
+        self, canonical_symbol: str, *, since: datetime, count: int, source: str
+    ) -> tuple[MarketTick, ...]:
+        """Read raw ticks from the terminal, forward from `since`.
+
+        HANDOVER.md §4.5 — the continuous-read half of M1 that `readonly.py`
+        did not yet implement. No dedup, gap or ordering logic here; that is
+        `market_data.pipeline`'s job, and it runs on whatever a caller stores.
+        This method only reads and converts what the terminal handed back.
+
+        **Unverified against a real feed**: MT5 tick timestamps are assumed
+        UTC, matching the same assumption `positions()` already makes for
+        `position.time`. The first continuous-read soak test is what actually
+        checks this — see status.md §13.
+        """
+        broker_symbol = self.resolve_symbol()
+        module = self._client.module
+        raw = self._client.checked(
+            "copy_ticks_from",
+            module.copy_ticks_from(broker_symbol, since, count, module.COPY_TICKS_ALL),
+        )
+        return tuple(
+            self._tick_from_raw(row, canonical_symbol, broker_symbol, source) for row in raw
+        )
+
+    def _tick_from_raw(
+        self, row: Any, canonical_symbol: str, broker_symbol: str, source: str
+    ) -> MarketTick:
+        bid = _to_decimal(_field(row, "bid"), "bid")
+        ask = _to_decimal(_field(row, "ask"), "ask")
+        last_raw = _field(row, "last")
+        time_msc = _field(row, "time_msc")
+        event_time = (
+            datetime.fromtimestamp(int(time_msc) / 1000, tz=UTC)
+            if time_msc
+            else datetime.fromtimestamp(int(_field(row, "time")), tz=UTC)
+        )
+        volume = _field(row, "volume")
+        flags = _field(row, "flags")
+        return MarketTick(
+            tick_id=tick_identity(
+                source=source,
+                canonical_symbol=canonical_symbol,
+                event_time_utc=event_time,
+                bid=bid,
+                ask=ask,
+            ),
+            source=source,
+            canonical_symbol=canonical_symbol,
+            broker_symbol=broker_symbol,
+            event_time_utc=event_time,
+            received_time_utc=utc_now(),
+            bid=bid,
+            ask=ask,
+            last=(_to_decimal(last_raw, "last") if last_raw else None),
+            volume=(int(volume) if volume else None),
+            flags=(int(flags) if flags is not None else None),
+        )
+
+    def bars(
+        self, canonical_symbol: str, *, timeframe: str, count: int, source: str
+    ) -> BarBuildResult:
+        """Read the broker's own bars for `timeframe`, most recent `count`.
+
+        Delivered pre-formed by MT5 (`copy_rates_from_pos`), not aggregated
+        from ticks — `origin=BarOrigin.BROKER`. Still passed through
+        `market_data.pipeline.normalize_bars` for the same gap/order/duplicate
+        checks a tick-built series gets: a delivered series is not more
+        trustworthy than a derived one, only differently sourced.
+        """
+        broker_symbol = self.resolve_symbol()
+        spec = self.instrument(canonical_symbol)
+        module = self._client.module
+        raw = self._client.checked(
+            "copy_rates_from_pos",
+            module.copy_rates_from_pos(broker_symbol, _mt5_timeframe(module, timeframe), 0, count),
+        )
+        bars = sorted((self._bar_from_raw(row) for row in raw), key=lambda bar: bar.open_time_utc)
+        return normalize_bars(
+            bars,
+            timeframe=timeframe,
+            spec=spec,
+            source=source,
+            origin=BarOrigin.BROKER,
+            received_time_utc=utc_now(),
+        )
+
+    def _bar_from_raw(self, row: Any) -> Bar:
+        real_volume = _field(row, "real_volume")
+        spread = _field(row, "spread")
+        return Bar(
+            open_time_utc=datetime.fromtimestamp(int(_field(row, "time")), tz=UTC),
+            open=_to_decimal(_field(row, "open"), "open"),
+            high=_to_decimal(_field(row, "high"), "high"),
+            low=_to_decimal(_field(row, "low"), "low"),
+            close=_to_decimal(_field(row, "close"), "close"),
+            tick_volume=int(_field(row, "tick_volume")),
+            real_volume=(int(real_volume) if real_volume else None),
+            spread_points=(int(spread) if spread is not None else None),
         )
 
     def terminal_health(self) -> dict[str, Any]:
