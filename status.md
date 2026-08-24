@@ -1776,6 +1776,11 @@ loader itself.
   73 skipped** without a PostgreSQL — read the skip count rather than the
   colour.
 - Then the demo account and MT5 first contact (HANDOVER.md §4).
+- **`feedback.1.7.md` is due.** Review 1.6 §10 named five triggers; all five
+  are now met. Nothing since 2026-08-22 — the M1 adapter, the probe, D-035…
+  D-037, the repository change — has been independently reviewed.
+  `review/FEEDBACK.md` now carries an *Unreviewed work* section saying what to
+  look at and where the evidence is.
 
 ---
 

@@ -2,11 +2,120 @@
 
 Everything a developer needs to pick this up cold.
 
-**Written 2026-08-18. Rewritten 2026-08-24, when a Windows host became
-available** — which changes what happens next more than anything since the
-project started. Section 4 is the runbook for it.
+**Written 2026-08-18. Rewritten 2026-08-24**, when a Windows host became
+available and the repository got a remote — together the biggest change in
+what happens next since the project started.
 
-Read this first, then `CLAUDE.md` §1 for the session protocol.
+**Start at §0.** It is the exact point of handover and the initialisation
+sequence. §4 is the MT5 runbook. Then `CLAUDE.md` §1 for the session protocol.
+
+---
+
+## 0. Start here — the exact point this was handed over
+
+**Handed over 2026-08-24 at commit `01fb9c7`**, pushed to
+`https://github.com/DutchBugs/Crumblr` (private).
+
+The last three things that happened, in order:
+
+1. The M1 read-only MT5 adapter was written and unit-tested (2026-08-23).
+2. `scripts/mt5_probe.py` was added, the first-contact runbook (§4) written,
+   and a defect found and deliberately left unpatched (D-037).
+3. The commit hold was lifted and the repository pushed to a private remote, so
+   the code could reach the Windows host.
+
+**The next action is MT5 first contact.** It is blocked on one thing only: the
+Pepperstone demo account does not exist yet. Everything else is ready.
+
+### 0.1 If you are a new session picking this up
+
+Follow `CLAUDE.md` §1 before anything else. In short: read
+`review/FEEDBACK.md`, resolve anything open, then start. At handover time
+nothing is open — but `feedback.1.7.md` is **due and not yet written**, and the
+tracker's "Unreviewed work" section says what a reviewer has not seen. Do not
+read "all findings CLOSED" as "all work reviewed".
+
+### 0.2 Initialise the Windows host
+
+```powershell
+winget install Git.Git
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+git clone https://github.com/DutchBugs/Crumblr.git
+cd Crumblr
+uv sync --extra mt5
+```
+
+The repository is private, so the clone asks for a username and a fine-grained
+token as the password; Windows Credential Manager keeps it afterwards. The
+token needs **Contents: read and write** and **Workflows: read and write** — a
+push is rejected outright without the second, because the repository carries a
+CI workflow.
+
+**Git identity does not travel with a clone.** The macOS host pins it
+repo-locally to keep a personal account separate from an unrelated work
+account, and a clone starts without that. Set it here too, before committing
+anything:
+
+```powershell
+git config --local user.name "Levi IJkema"
+git config --local user.email "<the address on the DutchBugs account>"
+git config --local credential.https://github.com.username DutchBugs
+```
+
+### 0.3 Prove the transfer before trusting it
+
+```powershell
+uv run python -c "import platform; print(platform.machine())"
+uv run python -c "import MetaTrader5; print(MetaTrader5.__version__)"
+uv run ruff check . ; uv run ruff format --check . ; uv run mypy ; uv run pytest
+```
+
+| Command | Expected |
+|---|---|
+| `platform.machine()` | `AMD64`. `ARM64` means **stop** — no MT5 wheels exist for it |
+| `MetaTrader5.__version__` | a version string. An ImportError means `--extra mt5` was missed |
+| ruff, mypy | clean, 93 source files |
+| pytest | **590 passed, 73 skipped** without a database |
+
+That skip count is the number that matters. The persistence tests skip silently
+when no PostgreSQL is reachable, so a run with a broken database looks exactly
+as green as a run with a working one. If you want all 663, start one:
+
+```powershell
+docker run -d --name crumblr-pg `
+  -e POSTGRES_USER=crumblr -e POSTGRES_PASSWORD=crumblr -e POSTGRES_DB=crumblr `
+  -p 55432:5432 postgres:17-alpine
+```
+
+Then watch the platform run, which needs no broker and no database:
+
+```powershell
+uv run python scripts/run_replay.py --bars 4000
+```
+
+### 0.4 Then, in order
+
+1. **Create the Pepperstone demo account** and log into it once, interactively,
+   in the MetaTrader 5 terminal. §4.1 explains why that step cannot be
+   scripted.
+2. **Run the probe** — `uv run python scripts/mt5_probe.py --json first-contact.json`.
+   Expect the account guard to fail on the first run while `APP-013` is open;
+   that is a finding, and the report still prints.
+3. **Record what it says** in `status.md` §13, and open a deviation for every
+   disagreement between the terminal and the code. Do not edit code to match
+   the terminal before writing down what differed — that is `APP-014`, and it
+   is the whole discipline of this step.
+
+### 0.5 Two things that will look broken and are not
+
+- **The system refuses to trade on a fresh machine.** The safety latch at
+  `.crumblr/safety_state.json` is per-host and git-ignored, and it starts
+  closed. A machine that has never recorded a RUNNING state is not permitted to
+  act on that absence. Arming it takes an operator and a note.
+- **CI may be red.** The workflow had never executed anywhere before
+  2026-08-24. Its first result is information, not regression — and until one
+  passing run is recorded, every quality figure in `status.md` still rests on a
+  single developer machine (`D-019`).
 
 ---
 
@@ -19,7 +128,7 @@ Read this first, then `CLAUDE.md` §1 for the session protocol.
 | **Tests** | 663 passing (`uv run pytest`, with PostgreSQL up) |
 | **Strategy** | `ict_v1` configured, feature-frozen. `baseline_v1` retained as benchmark |
 | **Data** | Synthetic only, but *stored*: every tick and bar a run observes is persisted. No real EUR/USD has ever been processed. |
-| **Reviews** | `feedback.1.0` … `1.6` processed, F-001…F-025 all CLOSED. `feedback.2.0.md` is mandatory before any `order_send`, demo included |
+| **Reviews** | `feedback.1.0` … `1.6` processed, F-001…F-025 all CLOSED. **`feedback.1.7.md` is due** — all five of its triggers are met and nothing since 2026-08-22 has been reviewed. `feedback.2.0.md` is mandatory before any `order_send`, demo included |
 
 The honest one-line summary: **the decision pipeline and its audit trail work;
 nothing has met a broker.**
@@ -256,7 +365,13 @@ An independent reviewing agent files versioned reviews in `review/`.
 
 **At the start of every session, read `review/FEEDBACK.md`** and resolve
 anything still open before starting new work. The full protocol is `CLAUDE.md`
-§1. Nothing is open at the time of writing.
+§1.
+
+Nothing is open at the time of writing — but that is not the same as reviewed.
+**`feedback.1.7.md` is due.** Review 1.6 §10 named five triggers for it and all
+five are met, so the M1 adapter, the probe, D-035…D-037 and the repository
+change have had no independent scrutiny at all. The tracker's *Unreviewed work*
+section lists exactly what a reviewer has not seen, and where the evidence is.
 
 ```text
 review/

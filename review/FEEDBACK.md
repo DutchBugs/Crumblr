@@ -125,12 +125,54 @@ reviewer set for the next gates. Tracked here so they are not lost.
 | Pepperstone MT5 demo account | M1 | The owner creating it (O-001). Server supplied 2026-08-18; the account itself does not exist |
 | Pepperstone entity: EU or UK? | M1 | O-001 names "Pepperstone EU"; the supplied server is `PepperstoneUK-Demo`. Different regulator, leverage cap and swap treatment |
 | Hedging or netting | M1 | `account_info()` on the real account. Deliberately not guessed |
-| Windows x86-64 MT5 host | M1 | Provisioning |
-| Read-only MT5 gateway | M1 | The two above |
+| ~~Windows x86-64 MT5 host~~ | M1 | **Done** 2026-08-24 — owner provisioned it |
+| Read-only MT5 gateway | M1 | **Written** 2026-08-23, **never connected**. Blocked only on the demo account now. `mt5_gateway/readonly.py` + `scripts/mt5_probe.py` |
 | Broker reconciliation | M5 | M1 |
 | Execution-time revalidation *implementation* | M5 | ADR-001 is written; the code lands with the execution engine |
 | Intraday cut-off and mandatory flatten times | M5 | An owner decision, per O-003 |
 | Supervisor recalibration for the M5 cadence | P2 | O-002 fixes the cadence; D-015 and EV-002 hold the work |
+
+---
+
+## Unreviewed work — `feedback.1.7.md` is due
+
+**No review has seen anything below.** The newest review is `feedback.1.6.md`
+(2026-08-18); this work landed on 2026-08-23 and 2026-08-24.
+
+Review 1.6 §10 lists five triggers for the next normal review. **All five are
+now met**, which is why this section exists rather than a note saying the
+project is between reviews:
+
+| Trigger from 1.6 §10 | State |
+|---|---|
+| raw tick/bar persistence | done (F-022) |
+| Alembic | done (F-020, F-023) |
+| corrected supervisor frequency-state | done (F-024) |
+| Pepperstone demo / Windows MT5 provisioning | **half** — the Windows host exists; the demo account does not |
+| read-only gateway implementation | done, and never connected |
+
+What a reviewer should examine, with where the evidence is:
+
+| Artifact | What it claims | Where to check it |
+|---|---|---|
+| Read-only MT5 gateway | Execution is refused *by construction*, not by configuration; the broker symbol is discovered, not assumed | `src/crumblr/mt5_gateway/{client,readonly}.py`; 41 tests in `tests/unit/test_mt5_readonly_gateway.py`; D-035, D-036 |
+| First-contact probe | Turns M1 first contact into one command whose output is a record; cannot trade | `scripts/mt5_probe.py`; 18 tests in `tests/unit/test_mt5_probe.py`; HANDOVER.md §4 |
+| D-037 / APP-015 | A real defect found and deliberately **not** patched: MT5 integer enums are stored as strings, and `filling_mode` is a bitmask | `review/DEVIATIONS.md` D-037; `status.md` §13 entry of 2026-08-24 |
+| Repository and remote | The commit hold was lifted; CI can now run for the first time | `status.md` §13 second entry of 2026-08-24; D-019 amended |
+| Handover | Whether a developer who was not present could actually execute the next step | `HANDOVER.md` §0 and §4 |
+
+Two things the reviewer is specifically invited to be sceptical about:
+
+1. **The fake terminal is the weakest evidence in the repository.** It was
+   written from the documented API, and D-037 is a worked example of it
+   confirming its author's reading rather than a broker's behaviour. Tests
+   passing against it should be read as "the adapter is internally consistent",
+   not "the adapter works".
+2. **Nothing has connected to MetaTrader 5.** Every MT5 claim in `status.md` is
+   about code, never about a terminal. `APP-014` exists to keep that visible.
+
+`feedback.2.0.md` remains mandatory before the first `order_send`, demo
+included, and is separate from 1.7.
 
 ---
 
