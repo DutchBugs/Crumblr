@@ -216,7 +216,7 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
 | M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
-| M1 MT5 read-only gateway | MT5-INTEGRATED (Phase A); PAPER-VALIDATED pending Phase B | NOT PASSED — Phase B is the sole remaining blocker | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. Four real defects found and fixed getting there (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth entry. **Phase B — the owner-present deliberate terminal interruption — has not run.** Review 1.11 §11: "M1 passes only after a clean Phase A and successful Phase B" |
+| M1 MT5 read-only gateway | MT5-INTEGRATED, Phase A and Phase B both complete | **Evidence complete — qualification pending reviewer/owner decision** | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. **Phase B satisfied 2026-08-24**, owner present: two deliberate MT5 terminal closures, both detected, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset) and fresh data resuming within seconds — F-034 closed. Four real defects found and fixed across both phases (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth/seventeenth entries. This document does not declare M1 "PASSED" — that is the reviewer's/owner's call per review 1.11 §11, which named exactly this evidence as the condition |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
 | M4 Risk engine | REPLAY-TESTED | NOT PASSED | Full §8.1 checklist and sizing; never met a real broker |
@@ -830,12 +830,15 @@ Next engineering steps once unblocked:
       UTC, now detected dynamically per connection rather than assumed).
       F-031 (login masking) and F-038 (chunked-insert atomicity proof) also
       closed along the way. Full detail: `status.md` §13 sixteenth entry.
-- [ ] **Run the real soak, Phase B**: one deliberate terminal interruption,
-      owner present, proving reconnect + full revalidation against reality
-      (review 1.10 §5). Do not combine failure modes in the first test.
+- [x] ~~Run the real soak, Phase B~~ — **satisfied 2026-08-24, owner present.**
+      Two deliberate MT5 terminal closures; both detected, both recovered
+      automatically with full revalidation (symbol, account, instrument
+      spec, broker clock offset) and fresh data resuming within seconds.
+      F-034 closed. Full detail: `status.md` §13 seventeenth entry.
 - [ ] Build Dashboard v0 — read-only, no MT5 import, no credentials, no
-      control surface (review 1.9 F-035, 1.10 §7). May start after Phase A
-      produces real rows; must not delay Phase A/B.
+      control surface (review 1.9 F-035, 1.10 §7). Phase A and Phase B are
+      both now complete, so this may start; should display the real rows
+      this session's soak produced (review 1.11 §9).
 - [ ] Implement the reconciliation loop (M5 prerequisite).
 - [ ] Store feature values, not only their hash — D-031.
 
@@ -3208,6 +3211,120 @@ before F-034 and the M1 qualification decision itself.
   may be prepared in parallel with scheduling Phase B, not instead of it.
 - Update `review/FEEDBACK.md`'s finding register and "Unreviewed work"
   table with this result.
+
+---
+
+## Update 2026-08-24 (seventeenth entry) — Phase B: two real reconnects, owner present, both clean
+
+**Verdict: Phase B satisfied. F-034 closed.**
+
+The owner confirmed availability immediately after the sixteenth entry's
+report. `scripts/mt5_live_reader.py` was restarted against the same
+`crumblr_soak` database Phase A had just proven clean (continuing that
+evidence rather than discarding it — Phase B is a continuation of normal
+operation with a deliberate interruption in the middle, not a fresh start).
+Connected cleanly; broker clock offset re-detected at 180 minutes, matching
+every prior measurement.
+
+**The owner then closed the MT5 terminal twice**, minutes apart. Full
+sequence, from the reader's own structured log:
+
+```text
+16:09:16  connected, HEALTHY (reconnect_count 1)
+16:10:23  live_reader.read_failed — "MT5 copy_ticks_from failed:
+          [-10001] IPC send failed" (first closure detected)
+16:10:28  mt5.disconnected
+16:10:34  mt5.connected — reconnect_count 2
+          symbol re-resolved (EURUSD)
+          live_reader.spec_changed logged, not hidden (fresh
+          captured_at_utc means every reconnect's spec fingerprint
+          differs — expected, and this is what makes that visible
+          rather than silent)
+          account guard re-run silently (no AccountGuardError — still
+          the correct account; a wrong one goes UNHEALTHY here instead,
+          per TestScenario2WrongAccountFailsClosed)
+          broker clock offset re-measured: 180 min (10778.20s raw)
+16:10:50  live_reader.read_failed — same IPC error (second closure
+          detected)
+16:10:55  mt5.disconnected
+16:10:58  mt5.connected — reconnect_count 3
+          symbol re-resolved, spec_changed logged again, account guard
+          passed again, offset re-measured: 180 min (10779.94s raw)
+```
+
+**Fresh data resumed immediately both times.** Verified directly against
+`crumblr_soak` at 16:12:00 UTC, ~74 seconds after the second reconnect:
+ticks had grown from Phase A's 2,920 to 3,578 and bars from 17 to 19 — no
+gap in persistence across either interruption — and the single most recent
+tick's `received_time_utc` was **1.6 seconds** old at the moment of the
+check.
+
+**Against the review 1.10 §5 sequence, checked off directly:**
+
+```text
+HEALTHY reader                              — yes, both times before closure
+→ deliberately stop/restart MT5 terminal    — owner did this twice
+→ reader detects loss                       — live_reader.read_failed, both times
+→ HEALTHY is lost                           — implied; no further data until reconnect
+→ terminal returns                          — owner reopened it, both times
+→ reconnect                                 — automatic, both times, ~6-11s after detection
+→ full revalidation                         — symbol, account, spec, clock offset — all four,
+                                               both times
+→ fresh data resumes                        — yes, within ~1-2 poll cycles both times
+```
+
+Two interruptions rather than one is not a departure from review 1.10 §5's
+"do not combine failure modes in the first test" — that guardrail is about
+mixing *different kinds* of failure together (e.g. a terminal closure and a
+database outage at once), not about repeating the same one. If anything,
+two consecutive clean recoveries is stronger evidence than one.
+
+**Evidence**
+
+```text
+ruff, mypy, tests — unchanged this entry; no code changed, only the real
+  terminal was interrupted
+Reconnects: 3 total (1 initial connect + 2 recoveries), 0 failed to recover
+Account guard: passed on every one of the 3 connects
+Broker clock offset: 180 min on all 3 (10779.15s, 10778.20s, 10779.94s raw
+  — all agreeing to within ~1 second of each other and of Phase A's own
+  measurements)
+Ticks: 2,920 → 3,578 across the run (Phase A count → post-Phase-B count)
+Bars: 17 → 19
+Data gap during either interruption: none observed in the persisted series
+```
+
+**Problems found**
+
+None. Both interruptions recovered exactly as the five unit-tested
+scenarios in `tests/unit/test_live_reader.py` predicted.
+
+**Risk impact**
+
+None — read-only, no order path. This is real-terminal confirmation that
+`LiveReader`'s reconnect/revalidation logic, unit-tested since review 1.9,
+behaves the same way against reality that it does against the scripted
+fake.
+
+**Decision**
+
+F-034 closed. Phase A and Phase B are both now satisfied — the trigger
+review 1.11 §12 step 14 named for `feedback.1.12.md` (M1 qualification /
+dashboard review) has been met. M1 qualification itself remains the
+reviewer's/owner's decision, not this document's to declare.
+
+**Next**
+
+- Update `review/FEEDBACK.md` (done alongside this entry): F-034 closed,
+  "Unreviewed work" section reflects both phases satisfied.
+- Await `feedback.1.12.md` for M1 qualification / dashboard review.
+- Dashboard v0 may now be prepared per review 1.10 §7/1.11 §9 — read-only,
+  no `MetaTrader5` import, no credentials, no `order_send`, no HALT reset,
+  no risk-config mutation, no buttons — displaying the real rows this
+  session's soak produced.
+- AlgoTrading, execution adapters, `order_send`, ICT v2, and any new
+  brokers/markets remain explicitly out of scope, unchanged from every
+  prior review.
 
 ---
 
