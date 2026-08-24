@@ -286,7 +286,10 @@ class LiveReader:
             self._client.disconnect()
             self._client.connect(self._credentials, terminal_path=self._terminal_path)
             gateway = ReadOnlyMt5Gateway(
-                self._client, self._guard, canonical_symbol=self._canonical_symbol
+                self._client,
+                self._guard,
+                canonical_symbol=self._canonical_symbol,
+                clock=self._clock,
             )
             # Raises AccountGuardError on server/login/currency/leverage/demo
             # mismatch — reconnect -> wrong account -> fail closed, for free,

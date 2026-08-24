@@ -13,6 +13,7 @@ MT5-INTEGRATED, and it is why this file lives in `tests/unit`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -174,10 +175,21 @@ class FakeMt5:
         return ()
 
 
-def gateway(fake: FakeMt5, *, guard: AccountGuardConfig = GUARD) -> ReadOnlyMt5Gateway:
+FAKE_NOW = datetime.fromtimestamp(1_767_000_000, tz=UTC)
+"""Matches `FakeMt5.symbol_info_tick`'s default `time`, so `gateway()`'s
+default clock detects a zero broker-clock offset (D-039) unless a test
+deliberately shifts one side of that pair to exercise the offset itself."""
+
+
+def gateway(
+    fake: FakeMt5,
+    *,
+    guard: AccountGuardConfig = GUARD,
+    clock: Callable[[], datetime] = lambda: FAKE_NOW,
+) -> ReadOnlyMt5Gateway:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=5_000_123, password="x", server="PepperstoneUK-Demo"))
-    return ReadOnlyMt5Gateway(client, guard)
+    return ReadOnlyMt5Gateway(client, guard, clock=clock)
 
 
 # --------------------------------------------------------------------------- #
@@ -561,7 +573,10 @@ def a_tick_row(**overrides: Any) -> SimpleNamespace:
 
 def a_bar_row(**overrides: Any) -> SimpleNamespace:
     fields: dict[str, Any] = {
-        "time": 1_767_000_000,
+        # An hour before FAKE_NOW/gateway()'s default clock, so a plain
+        # a_bar_row() is a closed bar by default (D-042) rather than sitting
+        # right at the boundary of "still forming".
+        "time": 1_767_000_000 - 3600,
         "open": 1.16700,
         "high": 1.16750,
         "low": 1.16680,
@@ -672,8 +687,8 @@ class TestBars:
         class WithBars(FakeMt5):
             def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
                 return (
-                    a_bar_row(time=1_767_000_000),
-                    a_bar_row(time=1_767_000_300, open=1.16720, close=1.16740),
+                    a_bar_row(time=1_767_000_000 - 3600),
+                    a_bar_row(time=1_767_000_000 - 3300, open=1.16720, close=1.16740),
                 )
 
         result = gateway(WithBars()).bars(
@@ -690,7 +705,10 @@ class TestBars:
 
         class WithBars(FakeMt5):
             def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
-                return (a_bar_row(time=1_767_000_300), a_bar_row(time=1_767_000_000))
+                return (
+                    a_bar_row(time=1_767_000_000 - 3300),
+                    a_bar_row(time=1_767_000_000 - 3600),
+                )
 
         result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
         assert result.is_clean
@@ -710,7 +728,7 @@ class TestBars:
         contradiction and halt the live reader. A bar only belongs in what
         this gateway returns once its own interval has actually finished.
         """
-        now = datetime.now(UTC)
+        now = FAKE_NOW
         closed_open = now - timedelta(minutes=15)  # M5: closed 10 minutes ago
         forming_open = now - timedelta(minutes=1)  # M5: only 1 minute in, still open
 
@@ -728,7 +746,7 @@ class TestBars:
 
     def test_a_bar_that_closes_between_two_polls_is_returned_on_the_later_one(self) -> None:
         """The other half of the same fix: nothing is lost, only delayed."""
-        now = datetime.now(UTC)
+        now = FAKE_NOW
         just_closed = now - timedelta(minutes=5, seconds=1)  # M5: closed 1 second ago
 
         class WithBars(FakeMt5):
@@ -756,7 +774,7 @@ class TestBars:
             ]
         )
         rows = np.array(
-            [(1_767_000_000, 1.16700, 1.16750, 1.16680, 1.16720, 120, 6, 0)], dtype=dtype
+            [(1_767_000_000 - 3600, 1.16700, 1.16750, 1.16680, 1.16720, 120, 6, 0)], dtype=dtype
         )
 
         class WithBars(FakeMt5):
@@ -766,6 +784,91 @@ class TestBars:
         result = gateway(WithBars()).bars("EUR/USD", timeframe="M5", count=10, source="s")
         assert result.bars[0].bar.open == Decimal("1.167")
         assert result.bars[0].bar.high == Decimal("1.1675")
+
+
+# --------------------------------------------------------------------------- #
+# D-039: the terminal's clock is not assumed to be UTC
+# --------------------------------------------------------------------------- #
+
+
+class TestClockOffset:
+    """Settled by observation on the fourth real soak, 2026-08-24: Pepperstone's
+
+    MT5 server clock ran a stable ~2:59:39-2:59:40 ahead of true UTC once the
+    reader had caught up to live data — not latency jitter, a genuine
+    UTC-labelling bug. `_clock_offset()` measures the gap between the
+    terminal's own current tick and this platform's clock, once per gateway
+    instance (i.e. once per `LiveReader` reconnect), and every timestamp this
+    gateway converts is corrected by it.
+    """
+
+    def test_a_broker_clock_ahead_of_utc_is_detected_and_corrected(self) -> None:
+        three_hours_ahead = FAKE_NOW + timedelta(hours=3)
+
+        class ShiftedClock(FakeMt5):
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    bid=1.16700, ask=1.16706, time=int(three_hours_ahead.timestamp())
+                )
+
+            def copy_rates_from_pos(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+                # A bar the broker's clock calls "closed" 10 minutes ago —
+                # i.e. genuinely closed only once its mislabelled timestamp
+                # is corrected back to true UTC.
+                broker_open = three_hours_ahead - timedelta(minutes=15)
+                return (a_bar_row(time=int(broker_open.timestamp())),)
+
+        result = gateway(ShiftedClock()).bars("EUR/USD", timeframe="M5", count=10, source="s")
+
+        assert len(result.bars) == 1
+        expected_true_utc = three_hours_ahead - timedelta(minutes=15, hours=3)
+        assert result.bars[0].bar.open_time_utc == expected_true_utc
+
+    def test_the_offset_rounds_to_the_nearest_thirty_minutes(self) -> None:
+        """A live measurement carries a little call latency; GMT offsets never do."""
+        almost_three_hours = FAKE_NOW + timedelta(hours=3) - timedelta(seconds=20)
+
+        class ShiftedClock(FakeMt5):
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    bid=1.16700, ask=1.16706, time=int(almost_three_hours.timestamp())
+                )
+
+        gw = gateway(ShiftedClock())
+        assert gw._clock_offset() == timedelta(hours=3)
+
+    def test_the_since_parameter_is_shifted_into_broker_clock_terms(self) -> None:
+        """Not correcting `since` too is what produced a several-hour tick
+
+        backlog on the fourth real soak: asking for ticks "since true-UTC
+        now minus 5 minutes" is, on a clock running 3 hours ahead, a request
+        for data starting just over 3 hours in that clock's own past.
+        """
+        three_hours_ahead = FAKE_NOW + timedelta(hours=3)
+        seen_since: list[datetime] = []
+
+        class ShiftedClock(FakeMt5):
+            def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    bid=1.16700, ask=1.16706, time=int(three_hours_ahead.timestamp())
+                )
+
+            def copy_ticks_from(
+                self, _symbol: str, since: datetime, *_args: Any
+            ) -> tuple[Any, ...]:
+                seen_since.append(since)
+                return ()
+
+        requested_since = three_hours_ahead - timedelta(hours=3, minutes=5)
+
+        gateway(ShiftedClock()).ticks("EUR/USD", since=requested_since, count=10, source="s")
+
+        assert seen_since == [three_hours_ahead - timedelta(minutes=5)]
+
+    def test_a_zero_offset_leaves_timestamps_untouched(self) -> None:
+        """The ordinary case, exercised everywhere else in this file — named
+        once, explicitly, so the zero case is not only ever implicit."""
+        assert gateway(FakeMt5())._clock_offset() == timedelta(0)
 
 
 # --------------------------------------------------------------------------- #

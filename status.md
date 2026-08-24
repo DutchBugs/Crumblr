@@ -745,6 +745,7 @@ Use this for architectural or risk decisions.
 | 2026-08-24 | **O-005**, superseding the row above: for the demo/development environment only, the Pepperstone entity is **Pepperstone Limited (UK)** | Review 1.9 §2 F-028: `Pepperstone Limited` (UK) and `Pepperstone EU Limited` (Cyprus) are officially distinct entities, and the observed `company`/`server` match the UK one. Scoped deliberately — refines O-001's demo shorthand without pre-deciding a future live account, which needs its own review against the owner's residence and live documentation | Treating this as a live-account entity decision; leaving D-034/APP-013 open indefinitely with no way to close a demo-only question | Reviewer + owner (O-005) |
 | 2026-08-24 | APP-016 (terminal `trade_allowed: false`) recorded as known and deliberately not changed | Review 1.9 §4: keeping the MT5 "AlgoTrading" toggle off is an additional safety layer while no execution path is approved. M5 readiness must require account permission, terminal permission, a verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO — all together, so the toggle alone can never be sufficient | Enabling AlgoTrading now "to be ready"; treating the toggle as the execution gate | Reviewer + owner |
 | 2026-08-24 | A real MT5 soak/live run must use its own database (`crumblr_soak`), never the shared dev/test database (`crumblr`, `DEFAULT_TEST_URL`) | The twelfth update-log entry's own "worth a dedicated soak-only database... noted here rather than acted on" line — raised again independently by the reviewer/supervisors before it was acted on. `tests/integration`'s `engine` fixture drops the schema at teardown by design; the third Phase A attempt crashed on it the moment the two shared one database. `scripts/mt5_live_reader.py` now refuses to start at all unless `CRUMBLR_DATABASE_URL` is explicitly set, rather than silently falling back to the test default — "remember to set it" is not a control, same reasoning as F-031. `crumblr_soak` created on the same local PostgreSQL instance, migrated with the same Alembic baseline, `.env`/`.env.example` updated | Re-migrating the shared database before every soak attempt indefinitely; changing `create_db_engine`'s global default (would affect `run_replay.py` and other legitimate dev-default callers) | Reviewer/owner |
+| 2026-08-24 | The MT5 broker-clock offset (D-039) is detected dynamically once per gateway connection, never hard-coded | The fourth Phase A attempt proved Pepperstone's server clock runs a stable ~2:59:39-2:59:40 ahead of true UTC — real, measured, not a documentation gap. Review 1.11 §7 explicitly forbids inventing a correction without observation; observation now existed, but a fixed `+3` would have been a second silent assumption exactly where the first one used to be, wrong the moment DST shifts the real offset or a different account/server is used. `ReadOnlyMt5Gateway._clock_offset()` instead measures the gap from `symbol_info_tick` against the platform's own clock every time a gateway is constructed — which is every `LiveReader` reconnect — rounded to the nearest 30 minutes (GMT offsets are always whole/half-hour). User confirmed this direction over a hard-coded offset or leaving it undocumented, when asked directly | Hard-coding `+3`; documenting the gap without correcting it and leaving M1 blocked | User (relaying reviewer framing) |
 
 ---
 
@@ -2898,6 +2899,125 @@ startup rather than relying on documentation alone.
   verification (F-037/D-039) and Phase B scheduling, per review 1.11 §6-8.
 - If it failed again: diagnose before a fifth attempt, same discipline as
   D-040/D-041/D-042.
+
+---
+
+## Update 2026-08-24 (fourteenth entry) — Phase A fourth attempt: no crash, real ticks proven, bars blocked by D-039, now fixed and closed
+
+**What happened**
+
+The fourth Phase A attempt ran for the full 30 minutes without a single
+disconnect: `status HEALTHY` throughout, `reconnect_count: 1` (the initial
+connect only), `consecutive_failures: 0`, `last_error: None`. That is real
+progress — the first attempt with zero connection-stability problems.
+
+It used the shared `crumblr` database, not the new `crumblr_soak` one: it
+had already been launched before `crumblr_soak` existed (the user relayed
+reviewer/supervisor feedback asking for a dedicated database while this
+attempt was already past halfway, and it was deliberately left running
+rather than interrupted — real-terminal soaks are not something to restart
+over tooling). This meant the wrong-database mistake from the twelfth entry
+was accidentally repeated once more for this specific run, harmlessly this
+time since the schema had already been re-migrated beforehand.
+
+**The console showed `last_bar=-` for all 360 polls.** Final health:
+`last_bar_at_utc: None`. Zero bars persisted in 30 minutes — worth
+investigating rather than accepting, since "clean connection" is not the
+same claim as "clean data".
+
+**Investigation**
+
+Queried the actual database directly (`crumblr`, not `crumblr_soak` — the
+first check queried the wrong one and had to be redone once that was
+noticed): **19,437 real ticks were stored** — genuine proof of real
+EUR/USD ticks reaching PostgreSQL, the review's primary ask for Phase A.
+Zero bars, confirmed.
+
+Sampling `event_time_utc` (from the terminal) against `received_time_utc`
+(this platform's own `utc_now()`) across 20 points spread through the
+run's ticks showed the gap growing from near-zero at connect to a
+**stable ~2:59:39-2:59:40**, holding there for the rest of the run. Two
+findings from that one measurement:
+
+1. **F-037/D-039, settled:** the terminal's clock is not UTC. It runs
+   about three hours ahead of true UTC — `readonly.py` had assumed
+   otherwise throughout, silently, since before this session.
+2. **Why `last_tick` climbed so fast and bars never appeared:**
+   `ticks()` passed a true-UTC `since` straight to `copy_ticks_from`,
+   which the terminal compared against its own, three-hours-later clock —
+   turning "since 5 minutes ago" into "since about 3 hours and 5 minutes
+   ago" and handing back a multi-hour backlog that took the whole 30
+   minutes to work through. `bars()`'s D-042 filter compares a bar's
+   (mislabelled) open time against true UTC now; a bar stamped 3 hours
+   into the apparent future looks perpetually not-yet-closed, so D-042's
+   fix — correct in isolation — never let a single bar through against
+   this input.
+
+**Decision point**
+
+This touches core data semantics (every stored timestamp's meaning) and
+the review's own explicit constraint — "do not invent a broker-time
+correction unless observation requires one" — now satisfied, but *how* to
+apply the correction was still a real design choice: hard-code the
+measured ~3 hours, or detect it dynamically each session. Asked the user
+directly rather than deciding unilaterally, given the magnitude. Chosen:
+**dynamic detection**, matching the project's existing "discover, never
+assume" pattern for the symbol and account.
+
+**Fix**
+
+`ReadOnlyMt5Gateway._clock_offset()`: on first use after each gateway
+construction (i.e. every `LiveReader` reconnect — `_reconnect()` now
+threads its own `self._clock` through to the gateway it builds), reads
+`symbol_info_tick`'s current time, compares it to the platform's own
+clock, and rounds to the nearest 30 minutes. A new `_to_utc()` helper
+applies the correction wherever a raw MT5 timestamp is converted
+(`ticks`/`_tick_from_raw`, `bars`/`_bar_from_raw`, `positions`), and
+`ticks()` shifts the caller-supplied `since` into the terminal's own
+clock before calling `copy_ticks_from` — the same correction run in
+reverse.
+
+**Evidence**
+
+```text
+ruff, mypy — clean, 98 source files
+tests/unit/test_mt5_readonly_gateway.py::TestClockOffset — 4 new tests
+full unit suite — 582 passed, 1 skipped
+full suite with PostgreSQL — 711 passed, 3 skipped, exit 0 (0:15:09)
+```
+
+**Problems found**
+
+The two described above (D-039 itself, and the compounding effect on
+`since`), both now understood and fixed. A third, smaller mistake caught
+mid-investigation: the first database check queried `crumblr_soak` instead
+of the database this run had actually used (`crumblr`) — corrected before
+drawing any conclusion from it.
+
+**Risk impact**
+
+None to the running system — read path only. Real positive impact: the
+platform's stored timestamps were silently wrong by a fixed ~3 hours since
+before this session (`positions()` inherited the same assumption, also
+fixed here), and this closes that gap with evidence rather than leaving it
+open indefinitely per D-039's own "watch for" note.
+
+**Decision**
+
+F-037 closed. D-039 resolved. `status.md` §10 records the dynamic-detection
+choice. Fourth attempt's own evidence (30 clean minutes, zero disconnects,
+19,437 real ticks) stands, but does not by itself satisfy "clean bars
+proven" — that needs a fifth attempt with both fixes present.
+
+**Next**
+
+- Re-apply migrations (the pytest run in progress will drop `crumblr`'s
+  schema again at teardown, same as every prior cycle).
+- Commit and push.
+- Restart Phase A a fifth time, this time actually against `crumblr_soak`.
+- If clean (ticks and bars both persisting, health stays HEALTHY): proceed
+  to timestamp boundary verification against the fresh evidence and
+  schedule Phase B with the owner present.
 
 ---
 

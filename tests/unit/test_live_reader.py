@@ -166,7 +166,10 @@ class ScriptedMt5:
         return self.symbol
 
     def symbol_info_tick(self, _symbol: str) -> SimpleNamespace:
-        return SimpleNamespace(bid=1.16700, ask=1.16706)
+        # `time` matches NOW so the gateway's D-039 clock-offset detection
+        # resolves to zero by default; a test exercising the offset itself
+        # overrides this.
+        return SimpleNamespace(bid=1.16700, ask=1.16706, time=int(NOW.timestamp()))
 
     def copy_ticks_from(self, *_a: Any, **_k: Any) -> tuple[Any, ...] | None:
         return self.tick_rows

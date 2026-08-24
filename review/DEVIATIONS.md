@@ -550,28 +550,62 @@ mean anything should start here.
   narrower form than the fullest reading of the finding).
 
 ### D-039 — MT5 tick and bar timestamps are assumed UTC, unverified
-- **Status:** provisional — closes when the soak test (review 1.9 §5) runs
+- **Status:** RESOLVED 2026-08-24 — settled by observation on the fourth
+  real Phase A attempt, fixed the same session, closing F-037
 - **Spec:** build.md §12.2 requires UTC-only internal timestamps
-- **Gap:** `ReadOnlyMt5Gateway.ticks()`/`.bars()` convert `copy_ticks_from`'s
+- **Gap:** `ReadOnlyMt5Gateway.ticks()`/`.bars()` converted `copy_ticks_from`'s
   `time`/`time_msc` and `copy_rates_from_pos`'s `time` with
   `datetime.fromtimestamp(..., tz=UTC)` — treating the terminal's clock as UTC
-  outright. `positions()` already made the identical assumption for
-  `position.time` before this session, unremarked; this session's code
-  inherits it rather than resolving it, because nothing has read continuous
-  data from the real terminal yet to check it against.
-- **Why it matters:** if the Pepperstone server clock is not UTC (some MT5
-  servers run at UTC+2/+3, broker-dependent), every tick and bar timestamp
-  this reader persists would carry a constant offset — silently correct-looking,
-  wrong by a fixed amount, and exactly the kind of thing D-035 exists to name
-  before it is trusted.
-- **What is in place:** nothing beyond the assumption. The soak test is the
-  first opportunity to compare a stored tick's `event_time_utc` against the
-  wall clock and settle this the way D-037 was settled — by observation, not
-  by re-reading documentation more carefully.
-- **Watch for:** record the comparison in `status.md` §13 when the soak test
-  runs. If the offset is nonzero, this becomes a real defect in `readonly.py`,
-  not a documentation update.
-- **Gate affected:** M1.
+  outright. `positions()` made the identical assumption for `position.time`.
+- **What observation found:** the fourth real Phase A attempt (30 minutes,
+  real Pepperstone demo, 19,437 real ticks persisted) showed the assumption
+  was wrong. Comparing each stored tick's `event_time_utc` (from the
+  terminal) against its `received_time_utc` (this platform's own UTC clock,
+  `utc_now()`) across 20 samples spread through the run: the gap grew from
+  near zero at connect to a **stable ~2:59:39-2:59:40** once the reader had
+  caught up to live data, and stayed there — not latency jitter, a genuine,
+  constant, ~3-hour clock offset. The same run also proved a second-order
+  effect: because `ticks()` passed a true-UTC `since` straight to
+  `copy_ticks_from`, the terminal (comparing it against its own, 3-hours-later
+  clock) interpreted "since 5 minutes ago" as "since about 3 hours and 5
+  minutes ago", handing back a multi-hour backlog that took the entire
+  30-minute run to work through — this is *why* the fourth attempt's tick
+  count was so high and why not one bar was ever returned: D-042's
+  still-forming-bar filter compares a bar's (mislabelled) open time against
+  true UTC now, and a bar that is really closed but stamped 3 hours into the
+  apparent future looks perpetually not-yet-closed.
+- **Fix:** `ReadOnlyMt5Gateway._clock_offset()` measures the gap once per
+  gateway instance — comparing `symbol_info_tick`'s current reading against
+  this platform's own clock, rounded to the nearest 30 minutes (GMT offsets
+  are always whole or half-hour multiples; a live measurement carries a
+  little call latency the rounding absorbs). A new `_to_utc()` helper applies
+  the correction everywhere a raw MT5 timestamp is converted
+  (`ticks()`/`_tick_from_raw`, `bars()`/`_bar_from_raw`, `positions()`), and
+  `ticks()` shifts the caller-supplied `since` into the terminal's own clock
+  before calling `copy_ticks_from`, undoing the same offset in the other
+  direction. Detected fresh on every `LiveReader` reconnect (a new gateway
+  instance each time — `_reconnect()` now threads its own `self._clock`
+  through to the gateway it builds), not assumed to hold across a restart, a
+  DST change, or a different broker/server — the same "discover, never
+  hard-code" rule O-001 already applies to the symbol and account.
+- **Deliberately not hard-coded:** review 1.11 §7 explicitly warned against
+  inventing a broker-time correction "unless observation requires one" — it
+  now does, and a fixed `+3` would have been a second, undocumented
+  assumption sitting where the first one used to be, silently wrong the
+  moment DST shifts the real offset or a different account/server is used.
+- **Evidence:** `tests/unit/test_mt5_readonly_gateway.py::TestClockOffset`
+  (4 tests: offset detected and applied to bars, rounds to the nearest 30
+  minutes, `since` shifted correctly, zero offset leaves timestamps
+  untouched); every other existing test in the file continues to assert
+  offset-zero behaviour via a `gateway()` helper whose fake clock matches its
+  fake terminal's `symbol_info_tick` by construction.
+- **Watch for:** the correction is a snapshot taken at connect time, not a
+  continuously tracked drift — if the terminal's own clock drifts within one
+  connection's lifetime (rather than jumping at a DST boundary between
+  connections), that drift would not be caught until the next reconnect.
+  Not addressed here; no evidence from this soak suggests it is needed.
+- **Gate affected:** M1. F-037 required this closed before qualification;
+  it now is.
 
 ### D-040 — `Decimal(repr(...))` broke on real MT5 data: numpy 2.x scalars are not plain floats
 - **Status:** RESOLVED 2026-08-24 — found on the first real soak attempt, fixed
@@ -687,6 +721,14 @@ mean anything should start here.
 - **Gate affected:** M1. Would have made every real Phase A attempt fail
   within one bar interval, deterministically, regardless of how clean the
   rest of the feed was.
+- **Addendum, fourth Phase A attempt:** this fix's own correctness turned out
+  to depend on D-039, which was still open at the time. `received_time_utc`
+  is true UTC; `bar.open_time_utc` was not, until D-039's fix — it carried an
+  unlabelled ~3-hour broker-clock offset. Comparing a mislabelled-ahead
+  timestamp against a true-UTC reference makes every bar look perpetually
+  not-yet-closed, so the fourth attempt ran 30 clean minutes, persisted real
+  ticks, and stored zero bars. Once D-039 was fixed, this filter needed no
+  change of its own — it was correct all along against genuinely-UTC input.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

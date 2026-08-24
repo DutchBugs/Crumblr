@@ -20,7 +20,8 @@ Two rules from owner decision O-001 shape the rest:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -34,7 +35,7 @@ from crumblr.domain.models import (
     MarketTick,
     PositionState,
 )
-from crumblr.domain.timeutils import utc_now
+from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.pipeline import BarBuildResult, interval_for, normalize_bars
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module, mask_login
 from crumblr.mt5_gateway.enums import (
@@ -136,11 +137,14 @@ class ReadOnlyMt5Gateway:
         guard: AccountGuardConfig,
         *,
         canonical_symbol: str = "EUR/USD",
+        clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         self._client = client
         self._guard = guard
         self._canonical_symbol = canonical_symbol
+        self._clock = clock
         self._resolved_symbol: str | None = None
+        self._broker_clock_offset: timedelta | None = None
 
     # ------------------------------------------------------------------ #
     # Read operations
@@ -167,7 +171,7 @@ class ReadOnlyMt5Gateway:
                 else None
             ),
             leverage=int(info.leverage),
-            observed_at_utc=utc_now(),
+            observed_at_utc=self._clock(),
         )
         self._verify_account(state)
         return state
@@ -250,6 +254,51 @@ class ReadOnlyMt5Gateway:
         )
         return chosen
 
+    def _clock_offset(self) -> timedelta:
+        """How far ahead of true UTC the terminal's own clock runs (D-039).
+
+        MT5's raw `time`/`time_msc` fields are the *server's* clock, not
+        necessarily UTC — many brokers run servers at UTC+2/+3. Discovered
+        by observation the first real continuous-read soak, 2026-08-24: a
+        30-minute run against Pepperstone's demo showed a stable +2:59:39 to
+        +2:59:40 gap between broker-reported tick time and this platform's
+        own UTC clock, once the reader had caught up to live data — not a
+        one-off latency artefact, and consistent with the same D-039 gap
+        `positions()` already carried, unremarked, before this fix.
+
+        Rather than hard-code that observation, this asks the terminal for
+        its current tick and measures the gap live, every time a gateway
+        instance connects — a `LiveReader` reconnect builds a fresh gateway,
+        so this re-detects on every reconnect rather than assuming a value
+        detected once stays true across a restart, a DST change, or a
+        different broker/server entirely. Rounded to the nearest 30 minutes,
+        since GMT offsets are always whole or half-hour multiples and a raw
+        measurement carries a little call latency.
+        """
+        if self._broker_clock_offset is None:
+            broker_symbol = self.resolve_symbol()
+            module = self._client.module
+            tick = self._client.checked("symbol_info_tick", module.symbol_info_tick(broker_symbol))
+            broker_now = datetime.fromtimestamp(int(_field(tick, "time")), tz=UTC)
+            raw_offset = broker_now - self._clock()
+            half_hours = round(raw_offset / timedelta(minutes=30))
+            self._broker_clock_offset = timedelta(minutes=30 * half_hours)
+            _log.info(
+                "mt5.broker_clock_offset_detected",
+                offset_minutes=int(self._broker_clock_offset.total_seconds() // 60),
+                raw_offset_seconds=raw_offset.total_seconds(),
+            )
+        return self._broker_clock_offset
+
+    def _to_utc(self, raw_seconds: float) -> datetime:
+        """A raw MT5 timestamp (server clock), corrected to true UTC.
+
+        Takes seconds rather than an `int` so a caller with `time_msc`
+        (millisecond precision) can pass `time_msc / 1000` straight through
+        without losing sub-second resolution to a premature truncation.
+        """
+        return datetime.fromtimestamp(raw_seconds, tz=UTC) - self._clock_offset()
+
     def instrument(self, canonical_symbol: str) -> InstrumentSpec:
         """Read the symbol specification as the broker currently reports it."""
         if canonical_symbol != self._canonical_symbol:
@@ -278,7 +327,7 @@ class ReadOnlyMt5Gateway:
             # Confirmed against a real terminal 2026-08-24 (status.md §13).
             filling_modes=decode_filling_modes(int(info.filling_mode)),
             trade_mode=decode_enum(int(info.trade_mode), SYMBOL_TRADE_MODES),
-            captured_at_utc=utc_now(),
+            captured_at_utc=self._clock(),
         )
 
     def positions(self) -> tuple[PositionState, ...]:
@@ -296,7 +345,7 @@ class ReadOnlyMt5Gateway:
                 raise Mt5CallFailedError("positions_get", code, message)
             return ()
 
-        observed = utc_now()
+        observed = self._clock()
         return tuple(
             PositionState(
                 ticket=int(position.ticket),
@@ -306,7 +355,7 @@ class ReadOnlyMt5Gateway:
                 open_price=_to_decimal(position.price_open, "price_open"),
                 stop_loss_price=(_to_decimal(position.sl, "sl") if position.sl else None),
                 take_profit_price=(_to_decimal(position.tp, "tp") if position.tp else None),
-                opened_at_utc=datetime.fromtimestamp(int(position.time), tz=UTC),
+                opened_at_utc=self._to_utc(int(position.time)),
                 profit=_to_decimal(position.profit, "profit"),
                 swap=_to_decimal(position.swap, "swap"),
                 magic=int(position.magic) if getattr(position, "magic", None) else None,
@@ -325,16 +374,22 @@ class ReadOnlyMt5Gateway:
         `market_data.pipeline`'s job, and it runs on whatever a caller stores.
         This method only reads and converts what the terminal handed back.
 
-        **Unverified against a real feed**: MT5 tick timestamps are assumed
-        UTC, matching the same assumption `positions()` already makes for
-        `position.time`. The first continuous-read soak test is what actually
-        checks this — see status.md §13.
+        **D-039, resolved by observation 2026-08-24**: MT5 tick timestamps are
+        the server's own clock, not necessarily UTC — see `_clock_offset`.
+        `since` is supplied in true UTC by the caller, so it is shifted into
+        the terminal's own clock before being sent, the same correction run
+        in reverse from what `_tick_from_raw` applies to what comes back.
+        Skipping this half would ask the terminal for ticks "since" a moment
+        that, on its own clock, is really `_clock_offset()` in the past —
+        which is exactly what produced a several-hour backlog on the first
+        real soak that used this method.
         """
         broker_symbol = self.resolve_symbol()
         module = self._client.module
+        since_broker = since + self._clock_offset()
         raw = self._client.checked(
             "copy_ticks_from",
-            module.copy_ticks_from(broker_symbol, since, count, module.COPY_TICKS_ALL),
+            module.copy_ticks_from(broker_symbol, since_broker, count, module.COPY_TICKS_ALL),
         )
         return tuple(
             self._tick_from_raw(row, canonical_symbol, broker_symbol, source) for row in raw
@@ -348,9 +403,9 @@ class ReadOnlyMt5Gateway:
         last_raw = _field(row, "last")
         time_msc = _field(row, "time_msc")
         event_time = (
-            datetime.fromtimestamp(int(time_msc) / 1000, tz=UTC)
+            self._to_utc(int(time_msc) / 1000)
             if time_msc
-            else datetime.fromtimestamp(int(_field(row, "time")), tz=UTC)
+            else self._to_utc(int(_field(row, "time")))
         )
         volume = _field(row, "volume")
         flags = _field(row, "flags")
@@ -366,7 +421,7 @@ class ReadOnlyMt5Gateway:
             canonical_symbol=canonical_symbol,
             broker_symbol=broker_symbol,
             event_time_utc=event_time,
-            received_time_utc=utc_now(),
+            received_time_utc=self._clock(),
             bid=bid,
             ask=ask,
             last=(_to_decimal(last_raw, "last") if last_raw else None),
@@ -403,7 +458,7 @@ class ReadOnlyMt5Gateway:
             "copy_rates_from_pos",
             module.copy_rates_from_pos(broker_symbol, _mt5_timeframe(module, timeframe), 0, count),
         )
-        received_time_utc = utc_now()
+        received_time_utc = self._clock()
         interval = interval_for(timeframe)
         bars = sorted(
             (
@@ -426,7 +481,7 @@ class ReadOnlyMt5Gateway:
         real_volume = _field(row, "real_volume")
         spread = _field(row, "spread")
         return Bar(
-            open_time_utc=datetime.fromtimestamp(int(_field(row, "time")), tz=UTC),
+            open_time_utc=self._to_utc(int(_field(row, "time"))),
             open=_to_decimal(_field(row, "open"), "open"),
             high=_to_decimal(_field(row, "high"), "high"),
             low=_to_decimal(_field(row, "low"), "low"),
@@ -445,7 +500,7 @@ class ReadOnlyMt5Gateway:
             "trade_allowed": bool(getattr(info, "trade_allowed", False)),
             "build": version[1] if version and len(version) > 1 else None,
             "ping_last_ms": getattr(info, "ping_last", None),
-            "observed_at_utc": utc_now().isoformat(),
+            "observed_at_utc": self._clock().isoformat(),
         }
 
     # ------------------------------------------------------------------ #
