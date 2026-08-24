@@ -216,7 +216,7 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
 | M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
-| M1 MT5 read-only gateway | REPLAY-TESTED, one connection MT5-INTEGRATED | NOT PASSED | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). **First contact made 2026-08-24** (D-035 partially resolved): account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. Continuous bar/tick read and reconnect-with-revalidation (`LiveReader`) are **built and unit-tested** against all five review 1.9 F-034 scenarios, but **not yet run against the real terminal** — review 1.10's real-soak gate is the remaining step before this milestone passes |
+| M1 MT5 read-only gateway | MT5-INTEGRATED (Phase A); PAPER-VALIDATED pending Phase B | NOT PASSED — Phase B is the sole remaining blocker | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. Four real defects found and fixed getting there (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth entry. **Phase B — the owner-present deliberate terminal interruption — has not run.** Review 1.11 §11: "M1 passes only after a clean Phase A and successful Phase B" |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
 | M4 Risk engine | REPLAY-TESTED | NOT PASSED | Full §8.1 checklist and sizing; never met a real broker |
@@ -819,17 +819,17 @@ Next engineering steps once unblocked:
       revalidation~~ — `application/live_reader.py::LiveReader`, built and
       unit-tested 2026-08-24 (HANDOVER.md §4.5, review 1.9 F-034). All five
       required reconnect scenarios pass against a scripted fake terminal.
-- [ ] **Run the real soak, Phase A**: `scripts/mt5_live_reader.py` against
-      the actual Pepperstone terminal, normal operation, 30-60 minutes during
-      an active FX session. Prove real ticks/M5 bars land in PostgreSQL and
-      settle D-039/F-037 (timestamp semantics) from what it shows. Two
-      attempts so far both crashed on real-market conditions synthetic tests
-      never exercised — D-040 (numpy scalar repr), then D-041 (PostgreSQL
-      parameter ceiling on a large tick batch); both fixed and regression
-      tested. Review 1.11 additionally required F-031 (login masked in
-      ordinary logs) and F-038 (chunked-insert failure semantics proven, not
-      assumed) resolved before the third attempt — both done this pass. Third
-      attempt next.
+- [x] ~~Run the real soak, Phase A~~ — **satisfied 2026-08-24, sixth
+      attempt.** 30 minutes, real Pepperstone demo, zero disconnects, zero
+      errors: 2,920 real ticks and 17 real M5 bars persisted, all
+      `data_quality=GOOD`, zero anomalies, zero gaps, every bar aligned to a
+      5-minute UTC boundary. Four real defects found and fixed across the
+      six attempts — D-040 (numpy scalar repr), D-041 (PostgreSQL parameter
+      ceiling), D-042 in two parts (still-forming bar, then a post-close
+      settle window), and D-039 (the terminal's clock runs ~3 hours ahead of
+      UTC, now detected dynamically per connection rather than assumed).
+      F-031 (login masking) and F-038 (chunked-insert atomicity proof) also
+      closed along the way. Full detail: `status.md` §13 sixteenth entry.
 - [ ] **Run the real soak, Phase B**: one deliberate terminal interruption,
       owner present, proving reconnect + full revalidation against reality
       (review 1.10 §5). Do not combine failure modes in the first test.
@@ -3121,6 +3121,93 @@ changing) did not change, only how "done changing" is measured.
   1.10/1.11 have been asking for. Proceed to recording the evidence, the
   timestamp-boundary comparison D-039's fix enables, and scheduling Phase B
   with the owner present.
+
+---
+
+## Update 2026-08-24 (sixteenth entry) — Phase A: the clean run, six attempts in
+
+**Verdict: Phase A satisfied.** A sixth attempt — after clearing one piece of
+leftover state, described below — ran the full 30 minutes against the real
+Pepperstone demo terminal with zero disconnects, zero errors, and zero data
+conflicts.
+
+**One operational step before the clean run.** The attempt right before this
+one (against the newly dedicated `crumblr_soak`, correctly this time) failed
+*immediately*, on its very first poll, on the exact same bar the fifth
+attempt had already stored — MT5 reported yet another different `close` for
+the 15:15 UTC interval, weeks — no, minutes — after the fifth attempt's own
+already-revised value had settled. `crumblr_soak` is scratch state for an
+in-progress soak, not a record worth preserving across a failed attempt, so
+its schema was dropped and rebuilt rather than treated as evidence to
+reconcile. (One wrinkle: `drop_schema()` clears the application's own tables
+but not Alembic's `alembic_version` tracking table, so `alembic upgrade
+head` afterward believed it had nothing to do and left the tables missing.
+`bootstrap_schema()` — the same `create_all`-based path tests use — was used
+directly instead, which does not depend on the version table's state.) This
+third revision, on a bar already revised once, is noted but not chased
+further right now: the magnitude was tiny (a 0.00003 close difference) and
+it happened across two separate terminal sessions, not within one — a
+different shape than D-042's original within-session finding. Worth
+watching for if it recurs within a single continuous run; not evidence of
+that yet.
+
+**The clean run itself:**
+
+```text
+Connected:        2026-08-24T15:33:43 UTC
+Duration:         30:06 (360 polls, 5s interval)
+Reconnects:       1 (the initial connect only)
+Consecutive failures: 0
+Errors:           none
+Broker clock offset: 180 min (exactly 3h), measured at 2:59:39.26 raw
+Ticks persisted:  2,920
+Bars persisted:   17, all M5, all data_quality=GOOD, zero anomalies
+Bar alignment:    all 17 open times land exactly on a 5-minute UTC boundary
+Bar continuity:   zero gaps — every consecutive pair is exactly 5 minutes apart
+Last tick age:    19.5 seconds old at the moment it was read
+```
+
+**F-037/D-039 evidence, from this run specifically:** every stored bar's
+open time is minute-aligned to 0/5/10/.../55 with zero seconds — direct
+confirmation that the corrected timestamps land on real M5 boundaries, not
+only that the gap measurement was stable. Combined with the fourth and
+fifth attempts' independent ~180-minute offset measurements (10779.77s,
+10779.26s — agreeing to within half a second of each other), F-037 is
+closed on stronger evidence than the fix that closed it already had.
+
+**Evidence location:** `var/soak_phase_a_health.json` (gitignored, local) —
+the sanitized health snapshot, no account number. Raw counts and sample
+rows recorded above; the database itself (`crumblr_soak`) is local-only and
+not part of this repository.
+
+**Problems found**
+
+None in this run itself. The pre-run state-clearing step and its
+`alembic_version` wrinkle, described above.
+
+**Risk impact**
+
+None — read-only, no order path. This is the evidence review 1.9/1.10/1.11
+have all named as the primary blocker to M1 qualification.
+
+**Decision**
+
+Phase A: satisfied. Six real-terminal attempts, four real defects found and
+fixed (D-040, D-041, D-042 in two parts, D-039), one operational fix
+(dedicated soak database), one process-discipline lesson (full suite over
+targeted subsets after touching shared filter logic). Phase B — the
+deliberate, owner-present terminal interruption — is the only thing left
+before F-034 and the M1 qualification decision itself.
+
+**Next**
+
+- Report this result to the user/owner plainly and ask whether they are
+  available now for Phase B, per the project's own repeated requirement
+  that the owner be present for the deliberate interruption.
+- Do not start Dashboard v0 before Phase B, per review 1.10 §7/1.11 §9 — it
+  may be prepared in parallel with scheduling Phase B, not instead of it.
+- Update `review/FEEDBACK.md`'s finding register and "Unreviewed work"
+  table with this result.
 
 ---
 
