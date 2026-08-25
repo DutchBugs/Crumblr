@@ -43,6 +43,8 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
 from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import Environment, SnapshotCompleteness
@@ -89,6 +91,17 @@ class BrokerStateSink(Protocol):
     """
 
     def record(self, observation: BrokerStateObservation) -> None: ...
+
+
+class InstrumentSpecSink(Protocol):
+    """The slice of `persistence.instrument_specs.InstrumentSpecStore` this
+
+    reader uses. Closes the gap `review/DEVIATIONS.md` D-045 named: a
+    durable instrument spec, so F-048's live decision pipeline can size
+    against one without itself talking to MT5.
+    """
+
+    def record(self, spec: InstrumentSpec) -> None: ...
 
 
 DEFAULT_TICK_LOOKBACK = timedelta(minutes=5)
@@ -260,6 +273,7 @@ class LiveReader:
         environment: Environment = Environment.PAPER,
         broker_state_store: BrokerStateSink | None = None,
         broker_state_interval: timedelta = DEFAULT_BROKER_STATE_INTERVAL,
+        instrument_spec_store: InstrumentSpecSink | None = None,
         clock: Callable[[], UtcDatetime] = utc_now,
         sleep: Callable[[float], None] = _time.sleep,
     ) -> None:
@@ -281,6 +295,7 @@ class LiveReader:
         self._environment = environment
         self._broker_state_store = broker_state_store
         self._broker_state_interval = broker_state_interval
+        self._instrument_spec_store = instrument_spec_store
         self._clock = clock
         self._sleep = sleep
 
@@ -486,6 +501,11 @@ class LiveReader:
 
         self._gateway = gateway
         self._spec = spec
+        if self._instrument_spec_store is not None:
+            try:
+                self._instrument_spec_store.record(spec)
+            except SQLAlchemyError as error:
+                _log.warning("live_reader.instrument_spec_persist_failed", error=str(error))
         self._health = ReaderHealth(
             status=ReaderStatus.HEALTHY,
             connected=True,

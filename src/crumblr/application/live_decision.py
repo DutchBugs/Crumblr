@@ -1,0 +1,612 @@
+"""The live/shadow decision pipeline (review 1.15 §7, review 1.16 §9).
+
+    real closed M5 bar
+            |
+      feature pipeline
+            |
+       Trading Agent
+            |
+    TradeIntent / NO_TRADE
+            |
+  intent-time deterministic Risk Engine
+            |
+         Supervisor
+            |
+    STOP HERE FOR SHADOW MODE
+
+**Why this is a separate class, not a mode of `LiveReader` or
+`ReplayOrchestrator`.** Review 1.16 §9 is explicit: "Build it as a separate
+`LiveDecisionOrchestrator`/equivalent rather than turning `LiveReader` into
+a trading process." The boundary this keeps:
+
+    LiveReader              = observe/persist real broker + market state
+    LiveDecisionOrchestrator = decide, from what LiveReader already persisted
+    Execution service (M5)  = later, execute
+
+This class never imports `MetaTrader5` and never opens an MT5 connection —
+it reads real market data (`MarketDataStore`), the real broker-state
+snapshots F-047 captures (`BrokerStateStore`), and the real instrument spec
+LiveReader now persists (`InstrumentSpecStore`), all through PostgreSQL. The
+Trading Agent (`trading_agent.registry`) and the deterministic Risk Engine
+(`risk.policies`) and Supervisor (`evaluator.pretrade`) are exactly the same
+components `ReplayOrchestrator` already uses and this codebase already
+tests — nothing about *how a decision is judged* is new here, only *where
+its inputs come from*.
+
+**Execution is not reachable from this module.** There is no `ApprovedOrder`
+construction, no `order_check`, no `order_send` anywhere in this file.
+`decide_once()` returns after the Supervisor's verdict, always — the
+"STOP HERE FOR SHADOW MODE" line in the diagram above is not a comment
+about intent, it is where the code actually stops.
+
+**Known v0 gaps, recorded rather than hidden:**
+
+- D-031 (feature-value persistence) is not closed by this module — every
+  `DecisionCapsule` still carries `feature_values_hash`, not the values
+  themselves. Review 1.16 §10 explicitly allows "a first wiring test" before
+  that closes; it is what this module is.
+- `orders_in_last_hour` is always `0` — no order path exists to count, and
+  reporting a real count would imply one does.
+- `seen_decision_hashes` (duplicate-intent detection) is tracked only for
+  this process's lifetime, not persisted — a restart losing that memory
+  produces a duplicate *audit row*, never a duplicate order, since none can
+  be submitted.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Protocol
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+from crumblr.application.reconciliation import BrokerStateSource, ExpectedState, reconcile
+from crumblr.application.recording import RunRecorder
+from crumblr.config import PlatformConfig
+from crumblr.domain.enums import (
+    IncidentStatus,
+    ReasonCode,
+    RiskVerdict,
+    SessionState,
+    SupervisorVerdict,
+)
+from crumblr.domain.events import SignalGenerated, SystemHalted
+from crumblr.domain.models import (
+    AccountState,
+    Bar,
+    BrokerAccountSnapshot,
+    BrokerPositionSnapshot,
+    DecisionCapsule,
+    InstrumentSpec,
+    MarketBar,
+    MarketSnapshot,
+    MarketTick,
+    PositionState,
+    RiskDecision,
+    SupervisorDecision,
+    TradeIntent,
+)
+from crumblr.domain.money import price_to_points
+from crumblr.domain.timeutils import UtcDatetime, utc_now
+from crumblr.evaluator import pretrade
+from crumblr.market_data.synthetic import snapshot_id_for
+from crumblr.observability.logging import get_logger
+from crumblr.risk import policies, session, trading_window
+from crumblr.risk.kill_switch import EquityLedger, KillSwitch
+from crumblr.risk.session import RiskSessionStore
+from crumblr.trading_agent import registry
+from crumblr.trading_agent.base import AgentContext, FeatureEvidence
+from crumblr.trading_agent.sessions import trading_day
+
+_log = get_logger("live_decision")
+
+RECENT_BAR_WINDOW = 400
+"""Same rolling window `ReplayOrchestrator` hands the feature pipeline
+
+(`MAX_HISTORY_BARS`) — kept equal so a strategy sees the same amount of
+history in both paths."""
+
+CODE_COMMIT = "uncommitted-prototype"
+
+
+class MarketDataSource(Protocol):
+    """The slice of `persistence.market_data.MarketDataStore` this reads."""
+
+    def recent_bars(
+        self, *, canonical_symbol: str, timeframe: str, limit: int
+    ) -> tuple[MarketBar, ...]: ...
+    def latest_tick(self, *, canonical_symbol: str) -> MarketTick | None: ...
+
+
+class InstrumentSpecSource(Protocol):
+    """The slice of `persistence.instrument_specs.InstrumentSpecStore` this reads."""
+
+    def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
+
+
+@dataclass(frozen=True)
+class LiveDecisionOutcome:
+    """What one `decide_once()` call produced, for logging and tests."""
+
+    capsule: DecisionCapsule | None
+    skipped_reason: str | None = None
+
+    @property
+    def skipped(self) -> bool:
+        return self.capsule is None and self.skipped_reason is not None
+
+
+def _account_state_from_snapshot(snapshot: BrokerAccountSnapshot, *, is_demo: bool) -> AccountState:
+    """Convert a durable `BrokerAccountSnapshot` (F-047) into the live-read
+
+    `AccountState` shape the risk engine expects.
+
+    `login` has no real value here on purpose: `BrokerAccountSnapshot` never
+    carries the raw MT5 login (build.md §21) — only `account_ref`, a
+    fingerprint. `0` is a placeholder that can never match a real
+    `expected_login`, which is the fail-closed direction if a future config
+    ever sets one; account identity for the *live* decision path is verified
+    by reconciliation's `account_ref` comparison instead, not by this field
+    — see `LiveDecisionOrchestrator.__init__`'s `RiskContext`.
+    """
+    return AccountState(
+        login=0,
+        server=snapshot.server,
+        currency=snapshot.currency,
+        is_demo=is_demo,
+        trade_allowed=snapshot.account_trade_allowed,
+        expert_allowed=snapshot.account_trade_allowed,
+        connected=True,
+        balance=snapshot.balance,
+        equity=snapshot.equity,
+        margin=snapshot.margin,
+        margin_free=snapshot.margin_free,
+        margin_level=snapshot.margin_level,
+        leverage=snapshot.leverage,
+        observed_at_utc=snapshot.observed_at_utc,
+    )
+
+
+def _position_state_from_snapshot(position: BrokerPositionSnapshot) -> PositionState:
+    return PositionState(
+        ticket=position.ticket,
+        broker_symbol=position.broker_symbol,
+        side=position.side,
+        volume=position.volume,
+        open_price=position.open_price,
+        current_price=position.current_price,
+        stop_loss_price=position.stop_loss_price,
+        take_profit_price=position.take_profit_price,
+        opened_at_utc=position.opened_at_utc,
+        profit=position.profit,
+        swap=position.swap,
+        magic=position.magic,
+        observed_at_utc=position.observed_at_utc,
+    )
+
+
+def _spread_points(tick: MarketTick, spec: InstrumentSpec) -> int:
+    return price_to_points(tick.ask - tick.bid, spec.point)
+
+
+def _build_market_snapshot(
+    tick: MarketTick, *, history: tuple[Bar, ...], spec: InstrumentSpec, timeframe: str
+) -> MarketSnapshot:
+    """Assemble the normalised snapshot handed to the Trading Agent, from a
+
+    real persisted tick and real persisted bar history — the live-data
+    counterpart of `market_data.synthetic.build_snapshot`, which this
+    mirrors field for field except for where its inputs come from.
+    """
+    return MarketSnapshot(
+        snapshot_id=snapshot_id_for(spec.canonical_symbol, tick.event_time_utc),
+        symbol=spec.canonical_symbol,
+        event_time_utc=tick.event_time_utc,
+        received_time_utc=tick.received_time_utc,
+        bid=tick.bid,
+        ask=tick.ask,
+        spread_points=_spread_points(tick, spec),
+        timeframe=timeframe,
+        bars=history,
+        session_state=SessionState.OPEN,
+        symbol_spec_version=spec.spec_version,
+        data_quality=tick.data_quality,
+    )
+
+
+class LiveDecisionOrchestrator:
+    """One decision window at a time, against real persisted state.
+
+    Construct once per process (a script calls `decide_once()` on a timer,
+    the same shape `LiveReader.poll_once()` already uses). Every dependency
+    is a narrow Protocol read from PostgreSQL — see the module docstring for
+    why nothing here ever reaches MT5.
+    """
+
+    def __init__(
+        self,
+        config: PlatformConfig,
+        *,
+        market_data: MarketDataSource,
+        broker_state: BrokerStateSource,
+        instrument_specs: InstrumentSpecSource,
+        recorder: RunRecorder,
+        kill_switch: KillSwitch,
+        session_store: RiskSessionStore,
+        canonical_symbol: str = "EUR/USD",
+        timeframe: str = "M5",
+        clock: Callable[[], UtcDatetime] = utc_now,
+    ) -> None:
+        self._config = config
+        self._market_data = market_data
+        self._broker_state = broker_state
+        self._instrument_specs = instrument_specs
+        self._recorder = recorder
+        self._kill_switch = kill_switch
+        self._session_store = session_store
+        self._canonical_symbol = canonical_symbol
+        self._timeframe = timeframe
+        self._clock = clock
+
+        self._strategy = registry.resolve(config.trading_agent.strategy_id)
+        self._expectation = ExpectedState.flat(
+            config.account_guard, canonical_symbol=canonical_symbol
+        )
+        self._risk_context = policies.RiskContext(
+            risk=config.risk,
+            execution=config.execution,
+            allowed_symbols=frozenset(config.enabled_symbols()),
+            require_demo_account=config.account_guard.require_demo_account,
+            expected_server=config.account_guard.expected_server,
+            # See `_account_state_from_snapshot`: the reconstructed live
+            # AccountState has no real login to compare, so this is always
+            # None regardless of `config.account_guard.expected_login` —
+            # deliberately, so that check can never fire a false BLOCK
+            # against a placeholder value. Account identity is verified by
+            # reconciliation's `account_ref` comparison instead.
+            expected_login=None,
+            expected_currency=config.account_guard.expected_currency,
+            expected_leverage=config.account_guard.expected_leverage,
+            risk_config_version=config.config_version,
+            intraday=trading_window.policy_from_config(config.intraday),
+        )
+        self._policy = pretrade.SupervisorPolicy(
+            enabled=config.supervisor.enabled,
+            veto_on_unknown_regime=config.supervisor.veto_on_unknown_regime,
+            allowed_strategy_ids=frozenset({config.trading_agent.strategy_id}),
+            allowed_model_versions=None,
+            max_intents_per_hour=config.supervisor.max_intents_per_hour,
+        )
+
+        self._ledger: EquityLedger | None = None
+        self._current_trading_day: date | None = None
+        self._seen_hashes: set[str] = set()
+        self._last_decided_open_time: datetime | None = None
+
+    def decide_once(self) -> LiveDecisionOutcome:
+        """Evaluate the newest closed real bar, if it has not been judged yet.
+
+        Never raises for an ordinary "nothing new / not enough evidence"
+        condition — those are `LiveDecisionOutcome.skipped_reason`, the same
+        philosophy `LiveReader.poll_once()` uses for its own health
+        transitions: a caller driving this on a timer should not have to
+        wrap every call in its own try/except for expected quiet windows.
+        """
+        spec = self._instrument_specs.latest(canonical_symbol=self._canonical_symbol)
+        if spec is None:
+            return self._skip("no instrument spec has been observed yet")
+
+        bars = self._market_data.recent_bars(
+            canonical_symbol=self._canonical_symbol,
+            timeframe=self._timeframe,
+            limit=RECENT_BAR_WINDOW,
+        )
+        if len(bars) < self._strategy.minimum_bars:
+            return self._skip(
+                f"only {len(bars)} bars stored, strategy needs {self._strategy.minimum_bars}"
+            )
+
+        latest_open_time = bars[-1].bar.open_time_utc
+        if (
+            self._last_decided_open_time is not None
+            and latest_open_time <= self._last_decided_open_time
+        ):
+            return self._skip("no new closed bar since the last decision")
+
+        tick = self._market_data.latest_tick(canonical_symbol=self._canonical_symbol)
+        if tick is None:
+            return self._skip("no tick has been observed yet")
+
+        account_snapshot = self._broker_state.latest_account_snapshot()
+        if account_snapshot is None:
+            return self._skip("no broker-state snapshot has ever been captured")
+
+        now = self._clock()
+        market_day = trading_day(tick.event_time_utc)
+        if self._current_trading_day is None or self._ledger is None:
+            self._recover_session(account_snapshot, market_day)
+        elif market_day != self._current_trading_day:
+            self._current_trading_day = market_day
+            assert self._ledger is not None
+            self._ledger.start_new_session()
+        assert self._ledger is not None
+        self._ledger.update(account_snapshot.equity)
+
+        positions = tuple(
+            _position_state_from_snapshot(position)
+            for position in self._broker_state.positions_for(account_snapshot.snapshot_id)
+        )
+
+        self._check_loss_gates(now)
+        self._check_session_boundary(tick.event_time_utc, positions, now)
+
+        history = tuple(bar.bar for bar in bars)
+        snapshot = _build_market_snapshot(
+            tick, history=history, spec=spec, timeframe=self._timeframe
+        )
+        self._last_decided_open_time = latest_open_time
+
+        outcome = self._strategy.evaluate(
+            snapshot,
+            history,
+            spec,
+            AgentContext(
+                open_position_sides=tuple(position.side for position in positions),
+                requested_risk_fraction=self._config.risk.max_risk_per_trade,
+                min_stop_distance_points=self._config.risk.min_stop_distance_points,
+            ),
+        )
+        if outcome.features is None:
+            return self._skip("strategy has too little history to say anything")
+
+        features = outcome.features
+        decision = outcome.decision
+
+        self._recorder.record(
+            SignalGenerated(
+                signal_id=uuid5(
+                    NAMESPACE_URL,
+                    f"crumblr:signal:{snapshot.snapshot_id}:{self._strategy.strategy_id}",
+                ),
+                snapshot_id=snapshot.snapshot_id,
+                symbol=snapshot.symbol,
+                strategy_id=self._strategy.strategy_id,
+                strategy_version=self._strategy.version,
+                model_version=self._config.trading_agent.model_version,
+                proposed_side=decision.side,
+                confidence=decision.confidence,
+                regime=features.regime,
+                feature_snapshot_id=features.feature_snapshot_id,
+                feature_set_version=features.feature_set_version,
+                reason_codes=decision.reason_codes,
+            ),
+            correlation_id=snapshot.snapshot_id,
+            occurred_at_utc=snapshot.event_time_utc,
+            source="trading_agent",
+        )
+
+        if decision.intent is None:
+            capsule = self._seal(snapshot, spec, features, None, None, None, positions)
+            return LiveDecisionOutcome(capsule=capsule)
+
+        intent = decision.intent
+        self._recorder.record(
+            intent,
+            correlation_id=snapshot.snapshot_id,
+            occurred_at_utc=snapshot.event_time_utc,
+            source="trading_agent",
+        )
+
+        reconciliation_result = reconcile(self._broker_state, self._expectation, now=now)
+        portfolio = policies.PortfolioState(
+            account=_account_state_from_snapshot(
+                account_snapshot, is_demo=self._config.account_guard.require_demo_account
+            ),
+            open_positions=positions,
+            ledger=self._ledger,
+            orders_in_last_hour=0,
+            seen_decision_hashes=frozenset(self._seen_hashes),
+            open_risk_fraction=self._config.risk.max_risk_per_trade * Decimal(len(positions)),
+        )
+        risk_decision = policies.evaluate(
+            intent, snapshot, spec, portfolio, self._risk_context, self._kill_switch, now=now
+        )
+        self._recorder.record(
+            risk_decision,
+            correlation_id=snapshot.snapshot_id,
+            occurred_at_utc=snapshot.event_time_utc,
+            source="risk_engine",
+        )
+        if risk_decision.verdict is RiskVerdict.HALT:
+            self._trip(risk_decision.reason_codes, "risk_engine", now, snapshot.snapshot_id)
+        if risk_decision.verdict is not RiskVerdict.PASS:
+            capsule = self._seal(snapshot, spec, features, intent, risk_decision, None, positions)
+            return LiveDecisionOutcome(capsule=capsule)
+
+        supervisor_decision = pretrade.evaluate(
+            intent,
+            features,
+            self._policy,
+            pretrade.SupervisorContext(
+                intents_in_last_hour=0,
+                incident_status=IncidentStatus.CLEAR,
+                reconciliation_status=reconciliation_result.status,
+            ),
+            now=now,
+        )
+        self._recorder.record(
+            supervisor_decision,
+            correlation_id=snapshot.snapshot_id,
+            occurred_at_utc=snapshot.event_time_utc,
+            source="supervisor",
+        )
+        if supervisor_decision.verdict is SupervisorVerdict.HALT:
+            self._trip(supervisor_decision.reason_codes, "supervisor", now, snapshot.snapshot_id)
+
+        self._seen_hashes.add(intent.decision_hash)
+        capsule = self._seal(
+            snapshot, spec, features, intent, risk_decision, supervisor_decision, positions
+        )
+        self._persist_session(positions, now)
+        return LiveDecisionOutcome(capsule=capsule)
+
+    # ------------------------------------------------------------------ #
+
+    def _skip(self, reason: str) -> LiveDecisionOutcome:
+        _log.info("live_decision.skipped", reason=reason)
+        return LiveDecisionOutcome(capsule=None, skipped_reason=reason)
+
+    def _recover_session(self, account_snapshot: BrokerAccountSnapshot, market_day: date) -> None:
+        recovery = session.recover_session(
+            self._session_store.load_latest(),
+            live_equity=account_snapshot.equity,
+            live_open_positions=len(self._broker_state.positions_for(account_snapshot.snapshot_id)),
+            market_day=market_day,
+        )
+        self._ledger = recovery.ledger
+        self._current_trading_day = recovery.trading_day
+        if recovery.must_halt:
+            self._trip(
+                recovery.reason_codes,
+                "risk_session_recovery",
+                account_snapshot.observed_at_utc,
+                uuid5(NAMESPACE_URL, f"crumblr:live-recovery:{account_snapshot.snapshot_id}"),
+                detail=recovery.detail,
+            )
+
+    def _check_loss_gates(self, now: UtcDatetime) -> None:
+        if self._kill_switch.is_halted or self._ledger is None:
+            return
+        breached: list[ReasonCode] = []
+        if self._ledger.drawdown_fraction >= self._config.risk.max_drawdown:
+            breached.append(ReasonCode.MAX_DRAWDOWN)
+        if self._ledger.session_loss_fraction >= self._config.risk.max_daily_loss:
+            breached.append(ReasonCode.DAILY_LOSS_LIMIT)
+        if breached:
+            self._trip(
+                tuple(breached),
+                "risk_engine",
+                now,
+                uuid5(NAMESPACE_URL, f"crumblr:live-loss-gate:{now.isoformat()}"),
+                detail=(
+                    f"drawdown={self._ledger.drawdown_fraction:.4f} "
+                    f"session_loss={self._ledger.session_loss_fraction:.4f}"
+                ),
+            )
+
+    def _check_session_boundary(
+        self, moment: UtcDatetime, positions: tuple[PositionState, ...], now: UtcDatetime
+    ) -> None:
+        if self._kill_switch.is_halted:
+            return
+        policy = self._risk_context.intraday
+        if not positions or not policy.enabled:
+            return
+        past_deadline = trading_window.requires_flat(moment, policy)
+        crossed = any(
+            trading_window.has_crossed_rollover(position.opened_at_utc, moment)
+            for position in positions
+        )
+        if not (past_deadline or crossed):
+            return
+        self._trip(
+            (ReasonCode.OVERNIGHT_EXPOSURE,),
+            "risk_engine",
+            now,
+            uuid5(NAMESPACE_URL, f"crumblr:live-session-boundary:{moment.isoformat()}"),
+            detail=(
+                f"{len(positions)} position(s) still open at {moment.isoformat()}, "
+                "past the flatten deadline"
+            ),
+        )
+
+    def _trip(
+        self,
+        reason_codes: tuple[ReasonCode, ...],
+        tripped_by: str,
+        occurred_at_utc: UtcDatetime,
+        correlation_id: UUID,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        if self._kill_switch.is_halted:
+            return
+        state_before = self._kill_switch.state
+        self._kill_switch.trip(
+            reason_codes=reason_codes,
+            tripped_by=tripped_by,
+            occurred_at_utc=occurred_at_utc,
+            detail=detail,
+        )
+        self._recorder.record(
+            SystemHalted(
+                state_before=state_before,
+                state_after=self._kill_switch.state,
+                reason_codes=reason_codes,
+                tripped_by=tripped_by,
+                detail=detail,
+            ),
+            correlation_id=correlation_id,
+            occurred_at_utc=occurred_at_utc,
+            source="risk_engine",
+        )
+        self._recorder.flush()
+
+    def _persist_session(self, positions: tuple[PositionState, ...], now: UtcDatetime) -> None:
+        if self._ledger is None or self._current_trading_day is None:
+            return
+        state = session.snapshot(
+            self._ledger,
+            trading_day=self._current_trading_day,
+            realized_pnl=self._ledger.current_equity - self._ledger.starting_equity,
+            open_risk_fraction=self._config.risk.max_risk_per_trade * Decimal(len(positions)),
+            open_position_count=len(positions),
+            recorded_at_utc=now,
+        )
+        self._session_store.save(state)
+
+    def _seal(
+        self,
+        snapshot: MarketSnapshot,
+        spec: InstrumentSpec,
+        features: FeatureEvidence,
+        intent: TradeIntent | None,
+        risk_decision: RiskDecision | None,
+        supervisor_decision: SupervisorDecision | None,
+        positions: tuple[PositionState, ...],
+    ) -> DecisionCapsule:
+        """Persist the immutable record of this window (build.md §11).
+
+        `spec` is passed in rather than read from `self` because — unlike
+        `ReplayOrchestrator`, which holds one fixed spec for the whole run —
+        this orchestrator re-reads the latest durable spec on every
+        `decide_once()` call, so the broker symbol recorded here must be the
+        one the *decided* snapshot actually used, not whatever `latest()`
+        would return if called again after the fact.
+        """
+        capsule = DecisionCapsule(
+            capsule_id=uuid5(NAMESPACE_URL, f"crumblr:live-capsule:{snapshot.snapshot_id}"),
+            occurred_at_utc=snapshot.event_time_utc,
+            correlation_id=snapshot.snapshot_id,
+            canonical_symbol=snapshot.symbol,
+            broker_symbol=spec.broker_symbol,
+            market_snapshot_id=snapshot.snapshot_id,
+            feature_set_version=features.feature_set_version,
+            feature_values_hash=features.feature_values_hash,
+            strategy_version=self._strategy.version,
+            model_version=None,
+            model_output=None,
+            trade_intent=intent,
+            risk_config_version=self._config.config_version,
+            risk_decision=risk_decision,
+            supervisor_decision=supervisor_decision,
+            execution_result=None,
+            position_state_before=positions,
+            position_state_after=positions,
+            code_commit=CODE_COMMIT,
+            environment=self._config.environment,
+        )
+        self._recorder.seal(capsule)
+        return capsule

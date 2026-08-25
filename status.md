@@ -191,21 +191,23 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-25 — review 1.16 processed: F-052 (one
-                coherent `account_info()` read per broker snapshot) and
-                F-050 (`BrokerStateHealth`, separate from `ReaderStatus`)
-                fixed/built same day; read-only reconciliation v0 built
-                (`application/reconciliation.py`, `scripts/reconcile.py`)
-                — MATCHED/MISMATCHED/UNKNOWN against the F-047 snapshots,
-                fail-closed exactly per the review's rule table. F-051
-                (real-terminal verification) remains open — no MT5 host
-                available this session
+Last meaningful update: 2026-08-25 — F-048 shipped: real closed M5 bars now
+                reach the Trading Agent, the intent-time Risk Engine and
+                the Supervisor through a new, deliberately separate
+                `LiveDecisionOrchestrator` — execution stays structurally
+                unreachable. Closed a dependency discovered mid-build
+                (durable `InstrumentSpec` persistence, D-045) before F-048
+                could size against real specs. Domain-contract package
+                assembled for reviewer approval (Phase 1a). CI status
+                (Phase 1b) and F-051 (real-terminal verification of
+                F-047/F-052/F-048) both still need a Windows/MT5 session
+                or GitHub Actions access this environment does not have
 Next objective: F-051 on the next Windows/MT5 session (verify F-047/F-052
-                and a real flat-account reconciliation → MATCHED); run CI
-                on a runner and record the result; provide domain
-                contracts for reviewer/human approval to close M0
-                (Phase 1, still open in parallel); F-048 live/shadow
-                decision orchestrator next
+                against the real terminal, and a real flat-account
+                reconciliation → MATCHED, and a real live decision through
+                F-048 end to end); run CI on a runner and record the
+                result; close D-031 (feature-value persistence) before
+                calling any live-shadow evidence audit-quality
 ```
 
 ## Scope
@@ -247,14 +249,13 @@ Next objective: F-051 on the next Windows/MT5 session (verify F-047/F-052
 - [x] `pyproject.toml`
 - [x] dependency lockfile — `uv.lock`, CI installs with `--locked`
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
-- [x] strict typing — mypy `strict`, clean over 114 source files
+- [x] strict typing — mypy `strict`, clean over 120 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 823 total (property/replay/chaos suites plus unit and
+- [x] tests — 839 total (property/replay/chaos suites plus unit and
       integration, the latter needing a real PostgreSQL and skipping loudly
-      without one); 820 passed, 3 skipped (platform-dependent, explained) on
-      the Windows host with PostgreSQL up, 2026-08-25 (review 1.16 pass:
-      F-052/F-050 fixed/built, reconciliation v0 shipped — see §13
-      twenty-fourth entry)
+      without one); 836 passed, 3 skipped (platform-dependent, explained) on
+      the Windows host with PostgreSQL up, 2026-08-25 (F-048 live/shadow
+      decision orchestrator shipped — see §13 twenty-sixth entry)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
@@ -782,6 +783,8 @@ Use this for architectural or risk decisions.
 | 2026-08-25 | One `account_info()` read per `BrokerAccountSnapshot`, not two | Review 1.16 F-052: the original `capture_broker_state` called `gateway.account()` then a separate `gateway.account_extras()` — two reads that could straddle a real change at the broker (a fill, a swap charge) between them, producing a stored row that never existed as such at the broker. `ReadOnlyMt5Gateway.account_with_extras()` derives `AccountState` and `AccountExtras` from one raw `account_info()` response instead | Two reads with separate observation timestamps, presented as one snapshot anyway (the review's own "alternative design", rejected as more complex for no benefit at this stage) | Reviewer (F-052) |
 | 2026-08-25 | Broker-state freshness (`BrokerStateHealth`) is a type separate from `ReaderStatus`/`ReaderHealth`, not a field added to either | Review 1.16 F-050: fresh EUR/USD ticks and a stale/missing/incomplete account snapshot are different facts, and folding them into one status would let one hide the other the moment a live decision or an order needs to see both independently. `is_usable(now, max_age)` gives reconciliation a direct predicate for the review's own missing/stale/incomplete → UNKNOWN rule | Adding `broker_state_status` fields onto `ReaderHealth` | Reviewer (F-050) |
 | 2026-08-25 | Reconciliation v0 reads only the durable F-047 snapshots, never a live MT5 call, and expected state is `ExpectedState.flat()` (zero positions, zero pending orders) until an execution path exists | Review 1.15 §14/1.16 §7-8: comparing the latest MT5 snapshot against itself ("MT5 to MT5") would detect nothing; expected state must eventually come from the platform's own durable order/position history once `order_send` exists, never from what MT5 last reported. `UNKNOWN` (missing/stale/incomplete observation) is structurally distinct from `MISMATCHED` (a real disagreement) and neither is ever silently upgraded to `MATCHED` | Deriving "expected" from the same MT5 read being reconciled; treating a stale/incomplete snapshot as good enough to reconcile against | Reviewer (review 1.16 §7-8) |
+| 2026-08-25 | `LiveDecisionOrchestrator` is a class of its own, not a mode added to `LiveReader` or `ReplayOrchestrator` | Review 1.16 §9 is explicit: "Build it as a separate `LiveDecisionOrchestrator`/equivalent rather than turning `LiveReader` into a trading process." Keeps the boundary `LiveReader` = observe/persist real broker+market state; `LiveDecisionOrchestrator` = decide from what was persisted; execution service (M5) = later, execute. The Trading Agent, Risk Engine and Supervisor it calls are exactly the same components `ReplayOrchestrator` already uses — nothing about how a decision is judged changed, only where its inputs come from | Adding a "live mode" flag to `LiveReader`; forking `ReplayOrchestrator`'s decision logic into a parallel copy | Reviewer (review 1.16 §9) |
+| 2026-08-25 | `instrument_specs` gets a real producer: `LiveReader` now persists the spec it already observes on every reconnect | F-048 needs a durable instrument spec to size against without the decision orchestrator itself talking to MT5 — a dependency discovered while building F-048, not planned ahead of it. Closes part of the gap D-045 (then D-045, now folded into D-046) already named: "the day `instrument_specs` gets a real producer..." | Passing a hardcoded/config-supplied spec into the live decision path (risks silent drift from the real broker spec); giving the decision orchestrator its own MT5 read (violates the LiveReader=observe boundary) | |
 | 2026-08-25 | **O-006**: the next promotion target is a controlled MT5 **DEMO** account autonomous canary order — real decisioning, real order submission, real demo fills, zero live-money exposure — not a live account, not strategy validation from a handful of trades | Review 1.15 §3 interprets the owner's direction toward "daadwerkelijk getrade kan worden" concretely, so "autonomous trading" cannot later be read as authorizing more than this. Reprioritizes engineering away from dashboard/foundation polish (both now substantially closed) onto the M5 critical path: CI/M0 closure → F-047 durable broker-state persistence → read-only reconciliation → F-048 live shadow decision pipeline (execution stays disabled) → execution-safety work (F-049) → `feedback.2.0` → one gated canary order | Owner (relayed via reviewer, review 1.15 §3/§12) |
 
 ---
@@ -954,12 +957,27 @@ Next engineering steps once unblocked:
       kept separate from `ReaderStatus`
 - [ ] F-051 (review 1.16 §4) — real-terminal verification of F-047/F-052/
       reconciliation. Still blocked on MT5 host access
-- [ ] Phase 3 — attach the agent: F-048 live/shadow decision orchestrator —
-      real closed M5 bar → features → Trading Agent → intent-time Risk →
-      Supervisor → persist → dashboard, **execution stays disabled**. Close
-      D-031 (persist feature values, not only their hash) before this is
-      evidence-quality, since a hash alone cannot explain a live decision
-      (review 1.15 §7/§9).
+- [x] ~~Phase 3 — attach the agent: F-048 live/shadow decision
+      orchestrator~~ — done 2026-08-25.
+      `application/live_decision.py::LiveDecisionOrchestrator`, a class
+      deliberately separate from `LiveReader` and `ReplayOrchestrator`: real
+      closed M5 bar → features → Trading Agent → intent-time Risk (fed real
+      F-047 broker state) → Supervisor (fed a real `ReconciliationStatus`
+      from `application/reconciliation.py`) → persists via the same
+      journal machinery replay uses → **stops — no `ApprovedOrder` is ever
+      constructed**. `scripts/live_decision.py` drives it. Unblocked a
+      dependency found mid-build: `InstrumentSpec` had no durable producer
+      (D-045) — closed via `persistence/instrument_specs.py`. D-031
+      (feature-value persistence) is **not** closed by this — review 1.16
+      §10 explicitly allows "a first wiring test" before that closes; this
+      is that wiring test, recorded as D-046 alongside two smaller v0
+      scope choices (`orders_in_last_hour` always 0, dedup not persisted
+      across restarts — neither matters before an execution path exists).
+      Dashboard integration not attempted — review 1.16 §12 says wait for
+      real-MT5 validation first
+- [ ] Not yet attempted — dashboard integration for broker state/
+      reconciliation/decision-pipeline data (review 1.16 §12), correctly
+      deferred until F-051 (real-terminal validation) succeeds
 - [ ] Phase 4 — execution safety: separate execution-capable MT5 adapter,
       `order_check`, ADR-001 execution-time risk revalidation, automatic
       intraday flatten, terminal/account execution guard (review 1.15 §12
@@ -4341,6 +4359,142 @@ honestly as blocked on tooling access rather than silently left unmentioned.
   does not close M0 on its own.
 - F-048 (live/shadow decision orchestrator) is the next code-shaped piece
   of the critical path once M0 closes, per review 1.16 §9.
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-sixth entry) — F-048: real market data now reaches the Trading Agent, Risk Engine and Supervisor; execution stays unreachable
+
+**Verdict: `LiveDecisionOrchestrator` closes the gap between `LiveReader`**
+**(real MT5 data) and the decision pipeline (Trading Agent/Risk/Supervisor)**
+**that F-044 first named. A real closed M5 bar can now produce a real,**
+**persisted Signal/Risk/Supervisor decision — with no code path to an**
+**order anywhere in the process.**
+
+Continuing review 1.16's required order (§16 steps 11+, after F-052/F-050/
+reconciliation): the live/shadow decision orchestrator, per §9's exact
+pipeline diagram.
+
+**A real blocking dependency, found while building this, closed first.**
+The Trading Agent's `evaluate()` call needs an `InstrumentSpec` (contract
+size, point, digits, volume steps) to size and validate against — and
+`instrument_specs` (the table) has existed since the M2 baseline migration
+with no producer: `LiveReader` observes a real spec on every reconnect and
+only ever held it in memory, for `spec_changed` detection (D-045). Closed
+via `persistence/instrument_specs.py::InstrumentSpecStore` — content-keyed
+by `spec_version`, the same identity discipline every other table in this
+schema uses — wired into `LiveReader._reconnect()` as an optional sink,
+the same opt-in pattern F-047's broker-state capture already established
+(`None` by default, so every existing caller/test is unaffected).
+`tests/integration/test_instrument_spec_store.py` (4 tests).
+
+**`LiveDecisionOrchestrator`** (`application/live_decision.py`) is a class
+of its own, not a mode added to `LiveReader` or `ReplayOrchestrator` —
+review 1.16 §9 is explicit about this boundary, and the reasoning holds up:
+`LiveReader` observes and persists, this decides from what was persisted,
+an eventual execution service later executes. One `decide_once()` call is
+one decision window:
+
+```text
+InstrumentSpecStore.latest()      -> the spec to size against
+MarketDataStore.recent_bars()     -> up to 400 bars of real history
+MarketDataStore.latest_tick()     -> the current quote
+BrokerStateStore.latest_account_snapshot()/positions_for() -> real F-047 state
+    |
+build a real MarketSnapshot (mirrors market_data.synthetic.build_snapshot,
+    field for field, except every input is real)
+    |
+risk_session.recover_session()    -> a durable ledger, from real equity
+loss-gate / session-boundary checks (same logic ReplayOrchestrator proves,
+    now reading real broker state instead of a simulated broker)
+    |
+trading_agent.registry: the same strategy replay uses, called the same way
+    |
+SignalGenerated persisted regardless (including NO_TRADE)
+    |
+if a TradeIntent: reconcile() [application/reconciliation.py, this
+    session's earlier work] -> real ReconciliationStatus fed to the
+    Supervisor, not a hardcoded MATCHED
+    |
+risk.policies.evaluate() -- unmodified, the same function replay uses
+    |
+evaluator.pretrade.evaluate() -- unmodified, the same function replay uses
+    |
+DecisionCapsule sealed through the same RunRecorder/journal machinery
+    |
+STOP -- no ApprovedOrder, no order_check, no order_send anywhere
+```
+
+Nothing about *how a decision is judged* is new — the Trading Agent, Risk
+Engine and Supervisor are literally the same functions `ReplayOrchestrator`
+already calls and this codebase already tests. The only new work is *where
+the inputs come from*.
+
+**Account identity, reconciled with F-052's own lesson.** `BrokerAccountSnapshot`
+never carries the raw MT5 login (build.md §21) — only `account_ref`, a
+fingerprint. The live-reconstructed `AccountState.login` is therefore a
+placeholder `0` that can never match a real `expected_login`, the
+fail-closed direction if one is ever configured; the `RiskContext` built
+for this path forces `expected_login=None` regardless of what the shipped
+config says, and account identity is instead verified by reconciliation's
+own `account_ref` comparison — a second, independent check, not a gap.
+Documented in the module docstring and `_account_state_from_snapshot`'s own
+comment, not discovered later.
+
+**Known v0 gaps, recorded as D-046 rather than hidden:** `orders_in_last_hour`
+is always `0` (no order path exists to count); `seen_decision_hashes`
+(duplicate-intent detection) lives only for the process's lifetime, not
+persisted (a restart losing it produces a duplicate audit row, never a
+duplicate order); D-031 (feature-value persistence) is **not** closed by
+this entry — review 1.16 §10 explicitly permits "a first wiring test"
+before that closes, and this is that wiring test, not yet evidence-quality
+shadow output.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 120 source files
+pytest                — 836 passed, 3 skipped, 0 failed
+                         (up from 820 — 16 new tests: 4 instrument-spec
+                         store, 2 LiveReader instrument-spec wiring, 8
+                         LiveDecisionOrchestrator control-flow-against-
+                         fakes, 2 end-to-end against real PostgreSQL with
+                         a full 400-bar deterministic synthetic series)
+```
+
+Manually verified: `scripts/live_decision.py` run against the real
+`crumblr_soak` database — connects, builds the durable runtime (kill
+switch correctly reports `UNKNOWN`, fail-closed, since no safety state has
+ever been recorded there), and correctly reports "skipped — no instrument
+spec has been observed yet" — honest, since no real-terminal `LiveReader`
+run with this session's code has happened yet (same F-051 limitation).
+
+**Problems found.** None beyond the InstrumentSpec dependency itself, which
+was anticipated as a possibility (D-045 already flagged the gap) and closed
+before it could block this entry rather than discovered as a surprise
+partway through.
+
+**Decision.** F-048 closed (SHIPPED), not yet real-terminal-validated
+(folded into F-051's scope, unchanged). InstrumentSpec persistence closes
+part of D-045; the instrument-spec-comparison half of D-045 (reconciliation
+still cannot compare specs) remains open, now genuinely closable since a
+durable spec exists — not attempted this entry. Dashboard integration for
+broker state/reconciliation/decision-pipeline data (review 1.16 §12)
+correctly not attempted — waiting on real-MT5 validation first, as the
+review specifies.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session: verify F-047/F-052 against the
+  real terminal, confirm reconciliation reports `MATCHED` against a real
+  flat demo account, and run `scripts/live_decision.py` against real data
+  end to end.
+- Run CI on a runner and record the result; the domain-contract package
+  awaits human review (both Phase 1, unchanged).
+- Close D-031 (feature-value persistence) before calling any live-shadow
+  evidence audit-quality (review 1.16 §10).
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---

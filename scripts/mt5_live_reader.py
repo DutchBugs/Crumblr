@@ -49,6 +49,7 @@ from crumblr.mt5_gateway.client import (
 )
 from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, DEFAULT_TEST_URL, create_db_engine
+from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.market_data import MarketDataStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -170,6 +171,7 @@ def main() -> int:
     engine = create_db_engine(database_url)
     store = MarketDataStore(engine)
     broker_state_store = BrokerStateStore(engine)
+    instrument_spec_store = InstrumentSpecStore(engine)
     reader = LiveReader(
         Mt5Client(),
         credentials,
@@ -183,6 +185,7 @@ def main() -> int:
         environment=Environment(args.environment),
         broker_state_store=broker_state_store,
         broker_state_interval=timedelta(seconds=args.broker_state_interval),
+        instrument_spec_store=instrument_spec_store,
     )
 
     print("\n" + "=" * 78)

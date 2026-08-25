@@ -275,6 +275,47 @@ class TestFirstConnect:
         assert health.connected is False
 
 
+class RecordingInstrumentSpecSink:
+    """Stands in for `InstrumentSpecStore` — no PostgreSQL required."""
+
+    def __init__(self) -> None:
+        self.specs: list[Any] = []
+
+    def record(self, spec: Any) -> None:
+        self.specs.append(spec)
+
+
+class TestInstrumentSpecPersistence:
+    """Closes `review/DEVIATIONS.md` D-045's named gap: a durable spec,
+
+    recorded on every reconnect, optional so existing callers see no change.
+    """
+
+    def test_disabled_by_default_nothing_is_recorded(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+
+        health = reader(fake, sink, clock).poll_once()
+
+        assert health.status is ReaderStatus.HEALTHY
+
+    def test_a_successful_reconnect_records_the_spec(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        spec_sink = RecordingInstrumentSpecSink()
+        clock = FakeClock(NOW)
+
+        reader(fake, sink, clock, instrument_spec_store=spec_sink).poll_once()
+
+        assert len(spec_sink.specs) == 1
+        assert spec_sink.specs[0].canonical_symbol == "EUR/USD"
+
+
 class TestBrokerStateHealthIsUsable:
     """Review 1.16 F-050 §3's rule, as a predicate: usable only if present,
 

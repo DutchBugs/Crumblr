@@ -11,7 +11,7 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-25 (D-045: reconciliation v0 scope, review 1.16 §7).
+Last updated 2026-08-25 (D-046: `LiveDecisionOrchestrator` v0, review 1.16 §9).
 
 ---
 
@@ -837,6 +837,46 @@ mean anything should start here.
   checks it already makes
 - **Gate affected:** none directly. A refinement reconciliation needs before
   M5 treats it as complete, not a blocker to the v0 that exists now
+
+### D-046 — `LiveDecisionOrchestrator` v0 has three narrower-than-eventual behaviours
+- **Status:** PROVISIONAL — each closes on its own schedule, noted below
+- **Spec:** review 1.15 §7 / review 1.16 §9 specify a live/shadow decision
+  pipeline: real M5 bar → features → Trading Agent → intent-time Risk →
+  Supervisor → persist, execution disabled
+- **Original gap:** `LiveReader` (real MT5 data) and `ReplayOrchestrator`
+  (the decision pipeline) were entirely unconnected — see F-048
+- **Current state:** `application/live_decision.py::LiveDecisionOrchestrator`
+  closes the connection, reusing the same Trading Agent/Risk Engine/
+  Supervisor components replay already uses. Three narrower-than-eventual
+  behaviours, each already named in the module's own docstring rather than
+  discovered later:
+  1. **No raw account login for the risk engine's identity check.**
+     `BrokerAccountSnapshot` never carries the raw MT5 login (build.md §21),
+     so the live-reconstructed `AccountState.login` is a placeholder `0`
+     that can never match a real `expected_login` — the fail-closed
+     direction if one is ever configured. Account identity for the live
+     path is verified by reconciliation's `account_ref` fingerprint
+     comparison instead (`application/reconciliation.py`), not by this
+     field
+  2. **`orders_in_last_hour` is always `0`.** No order path exists to
+     count against — reporting a nonzero placeholder would imply one does
+  3. **`seen_decision_hashes` is process-lifetime only, not persisted.** A
+     restart losing this memory produces a duplicate *audit row* in the
+     journal, never a duplicate order, since none can be submitted yet
+- **Remaining gap:** D-031 (feature-value persistence) is not closed by
+  this module — every capsule still carries only `feature_values_hash`.
+  Review 1.16 §10 explicitly permits "a first wiring test" before that
+  closes; this module is that wiring test, not yet evidence-quality shadow
+  output
+- **Watch for:** (1) closes itself if a future `expected_login` is ever
+  configured and this reconstruction is not revisited first — that would
+  silently BLOCK every live intent, safely but confusingly, so revisit
+  `_account_state_from_snapshot` before setting `expected_login`. (2) and
+  (3) become real gaps only once an execution adapter exists (M5) — at that
+  point rate limiting and duplicate-order protection must be durable, not
+  process-lifetime
+- **Gate affected:** none directly. A prerequisite for evidence-quality
+  live-shadow decisions and, later, M5 — not itself claiming to be either
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
