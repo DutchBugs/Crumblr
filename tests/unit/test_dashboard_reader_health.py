@@ -29,3 +29,18 @@ def test_a_well_formed_snapshot_is_returned_verbatim(tmp_path: Path) -> None:
     snapshot = read_health_snapshot(path)
 
     assert snapshot == {"status": "HEALTHY", "reconnect_count": 2}
+
+
+def test_a_leading_byte_order_mark_does_not_make_it_unreadable(tmp_path: Path) -> None:
+    """A snapshot written or hand-edited by a Windows tool (PowerShell's
+
+    default `Out-File` among them) commonly carries a UTF-8 BOM — found by
+    manually testing the dashboard against a hand-written snapshot file,
+    which then rendered as UNKNOWN instead of the STALE it actually said.
+    """
+    path = tmp_path / "health.json"
+    path.write_text('{"status": "STALE", "reconnect_count": 2}', encoding="utf-8-sig")
+
+    snapshot = read_health_snapshot(path)
+
+    assert snapshot == {"status": "STALE", "reconnect_count": 2}

@@ -204,6 +204,17 @@ class TestLatestReads:
 
         assert store.latest_bar(canonical_symbol=SPEC.canonical_symbol, timeframe="M15") is None
 
+    def test_recent_bars_are_the_newest_n_in_chronological_order(self, engine: Engine) -> None:
+        store = MarketDataStore(engine)
+        store.record_bars([a_bar(minute) for minute in range(0, 50, 5)])
+
+        recent = store.recent_bars(canonical_symbol=SPEC.canonical_symbol, timeframe="M5", limit=3)
+
+        opens = [bar.bar.open_time_utc for bar in recent]
+        assert opens == sorted(opens), "chart data must read left-to-right in time order"
+        assert opens[-1] == a_bar(45).bar.open_time_utc, "must be the newest bars, not the oldest"
+        assert len(recent) == 3
+
 
 class TestChunkedInsertFailureSemantics:
     """F-038 (review 1.11): the D-041 chunking must have a proven, not assumed,

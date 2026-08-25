@@ -27,7 +27,13 @@ def read_health_snapshot(path: Path) -> dict[str, Any] | None:
     worse, not shown it.
     """
     try:
-        raw = path.read_text(encoding="utf-8")
+        # "utf-8-sig" strips a leading byte-order mark if one is present and
+        # is otherwise identical to "utf-8" — a snapshot written or hand-
+        # edited by a Windows tool (PowerShell's default `Out-File` among
+        # them) commonly carries one, and a BOM in front of "{" is invalid
+        # JSON, which would otherwise silently read as an unreadable
+        # snapshot rather than the health it actually contains.
+        raw = path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
     try:

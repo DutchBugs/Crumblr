@@ -112,6 +112,19 @@ class TestJournalLatest:
 
         assert journal.latest(EventType.SUPERVISOR_DECISION_MADE) is None
 
+    def test_recent_returns_the_newest_n_in_chronological_order(self, engine: Engine) -> None:
+        journal = EventJournal(engine)
+        base = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)
+        events_in = [an_event(occurred_at=base + timedelta(minutes=m)) for m in range(5)]
+        journal.append_many(events_in)
+
+        recent = journal.recent(limit=2)
+
+        assert [event.event_id for event in recent] == [
+            events_in[3].event_id,
+            events_in[4].event_id,
+        ]
+
 
 # --------------------------------------------------------------------------- #
 # 3 — crash consistency

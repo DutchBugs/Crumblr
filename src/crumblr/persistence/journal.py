@@ -160,6 +160,22 @@ class EventJournal:
             row = connection.execute(statement).mappings().first()
         return _decode_row(row) if row is not None else None
 
+    def recent(self, *, limit: int) -> tuple[Event[Contract], ...]:
+        """The most recent `limit` events of any type, oldest first.
+
+        For an activity timeline, not replay — see `latest`'s docstring for
+        why this orders descending internally before reversing back to
+        chronological order for display.
+        """
+        statement = (
+            select(events)
+            .order_by(desc(events.c.occurred_at_utc), desc(events.c.sequence))
+            .limit(limit)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return tuple(reversed([_decode_row(row) for row in rows]))
+
     def stream(self, *, batch_size: int = 1000) -> Iterator[Event[Contract]]:
         """Read the whole journal without holding it all in memory."""
         statement = (

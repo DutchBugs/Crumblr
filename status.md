@@ -185,16 +185,25 @@ Notes:    Two conditions remain, neither blocked on a broker.
 ```text
 Status: BUILDING
 Owner:
-Current milestone: M0
-Implementation maturity: REPLAY-TESTED
-Gate qualification: NOT PASSED
-Last meaningful update: 2026-08-24 — review 1.10 processed; the continuous
-                reader and reconnect revalidation are built and unit-tested
-Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
-                reader against the actual Pepperstone terminal, proving real
-                ticks/bars land in PostgreSQL, then one deliberate
-                interruption with the owner present, proving reconnect and
-                full revalidation against reality rather than a fake
+Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
+Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
+Gate qualification: M0 NOT PASSED (CI + contract review still open);
+                M1 PASSED; M2 PASSED
+Last meaningful update: 2026-08-25 — review 1.15 processed: dashboard/
+                foundation polish declared substantially complete;
+                engineering reprioritized onto the M5 critical path
+                (O-006). Three new findings opened: F-047 (durable
+                broker account/position/pending-order snapshots),
+                F-048 (live/shadow decision orchestrator attaching the
+                Trading Agent to real MT5 data, execution disabled),
+                F-049 (multi-gated execution enablement). Not yet
+                implemented this pass — trackers updated, engineering
+                not started pending direction on committing/pushing
+                the pending review-1.13/1.14 work first
+Next objective: Phase 1 of review 1.15 §12 — run CI on a runner and record
+                the result; provide domain contracts for reviewer/human
+                approval to close M0. Then F-047 broker-state
+                persistence and read-only reconciliation (Phase 2)
 ```
 
 ## Scope
@@ -225,7 +234,7 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 | M5 Paper execution | SPECIFIED | **NO-GO** | Twelve prerequisites open — see `review/feedback.1.0.md` §6 |
 | M6 Trading Agent | REPLAY-TESTED | FEATURE FREEZE | `ict_v1` + `baseline_v1`; next step is evidence, not concepts |
 | M7 Evaluator / Supervisor | UNIT-TESTED | SAFETY WORK ONLY | Layer 1. Two of its seven checks now report themselves as **not in force** rather than passing (F-024); post-trade and drift not started |
-| M8 Dashboard | IMPLEMENTED (v0, read-only) | NOT PASSED | Dashboard v0 built 2026-08-24 — read-only status page + JSON endpoint (`scripts/run_dashboard.py`, `src/crumblr/dashboard/`), deliberately scoped to review 1.12 §8's minimum screen, not the full build.md §22/M8 spec (D-043). No manual HALT/CANCEL/FLATTEN control surface exists — M8 itself requires that and is not attempted |
+| M8 Dashboard | IMPLEMENTED (v0.1, read-only, visually redesigned) | NOT PASSED | Dashboard v0 built 2026-08-24 — read-only status page + JSON endpoint (`scripts/run_dashboard.py`, `src/crumblr/dashboard/`), deliberately scoped to review 1.12 §8's minimum screen, not the full build.md §22/M8 spec (D-043). Visually rebuilt 2026-08-25 (review 1.13 §§4-10, F-042/F-043/F-044) into a dark ops-console layout with an EUR/USD candlestick chart, decision pipeline and activity timeline. Review 1.14 **accepted the visual direction** and closed two follow-on findings the same day: F-045 (the `PAPER` badge misread as an active campaign — now `DEMO DATA`) and F-046 (stale/missing data must look visibly non-live — historical banner + chart overlay). **Visual scope frozen** (review 1.14 §10, reconfirmed review 1.15 §15): only broker-state/reconciliation/real-decision data panels may still be added, once F-047/F-048 exist to source them honestly — no further layout/framework/animation work is planned. No manual HALT/CANCEL/FLATTEN control surface exists — M8 itself requires that and is not attempted |
 | M9 Paper campaign support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 | M10 Shadow support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 
@@ -236,20 +245,25 @@ Next objective: Run the real soak (review 1.10 Phase A/B): the continuous
 - [x] `pyproject.toml`
 - [x] dependency lockfile — `uv.lock`, CI installs with `--locked`
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
-- [x] strict typing — mypy `strict`, clean over 97 source files
+- [x] strict typing — mypy `strict`, clean over 106 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 721 total (property/replay/chaos suites plus unit and
+- [x] tests — 757 total (property/replay/chaos suites plus unit and
       integration, the latter needing a real PostgreSQL and skipping loudly
-      without one); 718 passed, 3 skipped (platform-dependent, explained) on
-      the Windows host with PostgreSQL up, 2026-08-24 (review 1.12 pass:
-      F-039/F-040/F-041 fixed and tested)
+      without one); 754 passed, 3 skipped (platform-dependent, explained) on
+      the Windows host with PostgreSQL up, 2026-08-25 (review 1.14 pass:
+      F-045/F-046 fixed and tested, F-044 heading refined, F-033 closed a
+      fifth time)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
 - [x] MT5-touching tests exist and pass on the Windows host — `test_mt5_probe.py`,
       `test_mt5_readonly_gateway.py`, `test_live_reader.py` — all against a
-      fake terminal; **no test in the repository has run against the real
-      terminal**, only the manual first-contact probe has (status.md §13)
+      fake terminal; **no automated test in the repository runs against the
+      real terminal.** Real-terminal evidence instead comes from manual runs
+      recorded in status.md §13: the first-contact probe, Phase A (30 clean
+      minutes, continuous real ticks/bars), and Phase B (two deliberate
+      terminal closures, both detected and recovered with full revalidation)
+      — F-034/F-037 closed, M1 PASSED (review 1.14 §11 F-033)
 - [ ] CI pipeline — workflow committed; the repository has had a remote since
       2026-08-24, so nothing external blocks running it, but it has not been
       confirmed to run yet (review 1.9 §8, 1.10 §8)
@@ -308,7 +322,12 @@ Per capability, because "implemented" and "validated" are different claims
 | automatic flatten at the deadline | | | | | |
 | execution-time revalidation | | | | | |
 
-No capability is MT5-integrated or paper-validated, and none can be until M1.
+No risk capability is MT5-integrated or paper-validated yet. M1 (read-only
+MT5 data) passed 2026-08-24, but that is a separate claim from this table:
+nothing in this codebase feeds a live MT5 tick into the risk engine — that
+needs a live decision pipeline, which does not exist (F-044, `feedback.1.13.md`)
+— so the MT5/paper columns stay blank until execution work begins, not
+"until M1" as this line previously implied (review 1.14 §11 F-033).
 
 ### Data
 
@@ -317,7 +336,10 @@ Persisted by the running orchestrator, not merely storable (D-030 closed).
 - [x] raw ticks — `market_ticks`, written for every window the run observed
 - [x] raw bars — `market_bars`, each carrying its origin and, when derived, the
       pipeline version that produced it
-- [x] symbol specs — `instrument_specs` table exists; no producer until M1
+- [x] symbol specs — `instrument_specs` table exists; still no producer.
+      `LiveReader` observes real `InstrumentSpec` values every reconnect
+      (Phase A/B) but only holds them in memory for change detection
+      (`live_reader.spec_changed`) — it never writes to this table
 - [ ] features — the hash and version are journalled, the values are not
 - [x] signals — `SignalGenerated`, one per evaluated window including NO_TRADE
 - [x] trade intents — `TradeIntentCreated`
@@ -367,7 +389,7 @@ something was found and dealt with (F-009).
 | APP-010 | MEDIUM | `metadata.create_all` was the only way to build the schema, on a database that now holds data (D-029) | | **CLOSED 2026-08-18** | Alembic baseline; the runtime migrates rather than creates; a restored `pg_dump` is proven to reproduce the run |
 | APP-011 | MEDIUM | Two supervisor checks could not fire but reported as passed (D-015, D-028, EV-002) | | **CLOSED 2026-08-18** | Threshold set to `null` = uncalibrated; every decision carries `uncalibrated_checks` and the run report names them. The calibration itself still needs real data |
 | APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18** | One-exposure is a hard constant with the reviewer's four cases tested. Intraday entries are refused and a breach halts — **the automatic flatten is M5** (D-033, ADR-004) |
-| APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **PARTLY CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). **Still open:** continuous bar/tick read and observed reconnect behaviour, HANDOVER.md §4.5 |
+| APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). Continuous bar/tick read and observed reconnect behaviour, once "still open" here, completed the same day: Phase A (30 clean minutes) and Phase B (two deliberate terminal closures, both recovered with full revalidation) — F-034/F-037 closed, M1 PASSED (`feedback.1.12.md`). Closed in place per review 1.14 §11 F-033, which found this row still read as open after the fact |
 | APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | **CLOSED 2026-08-24** | Confirmed against the real terminal (`filling_mode=2`→IOC, `trade_mode=4`→FULL, matching documentation) and fixed: decode logic shared between the gateway and the probe in `mt5_gateway/enums.py` |
 | APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | **CLOSED FOR DEMO 2026-08-24, by O-005** | Owner/reviewer decision: demo entity is **Pepperstone Limited (UK)**, amending O-001 for demo/development only. Does **not** decide the entity for a future live account — that reopens this question against live documentation (D-034) |
 | APP-016 | LOW | The terminal reports `trade_allowed: false` even though the account itself reports `trade_allowed: true` | | **KNOWN / DEFERRED TO M5 READINESS** (review 1.9 §4) | Reviewer/owner decision: **do not enable AlgoTrading yet** — M1 is read-only, and leaving it off is an extra safety layer with no approved execution path. Before M5: account permission, terminal permission, verified demo account, an explicitly enabled execution adapter and `feedback.2.0` GO must **all** be true together — the UI toggle alone must never be sufficient |
@@ -754,6 +776,8 @@ Use this for architectural or risk decisions.
 | 2026-08-24 | Broker-clock offset detection (D-039) fails closed on a stale/implausible reference tick, rather than caching whatever it measures | Review F-040: the offset is derived from the gap between `symbol_info_tick`'s timestamp and the platform's own clock; if that tick is stale (e.g. the terminal handing back the last quote it ever saw), the derived "offset" is not a timezone at all, and D-039's fix would then mis-correct every timestamp for the life of that gateway connection with no way to notice. `_clock_offset()` now rejects a measurement whose residual from a clean half-hour multiple exceeds 3 minutes (real offsets round cleanly; a stale tick does not), or whose magnitude exceeds ±15h (no real GMT offset does), raising rather than caching — the next call re-measures fresh. `LiveReader` treats this the same as a stale feed: `DISCONNECTED`, not sticky, clears on its own once a fresh tick arrives | A fixed staleness cutoff on tick age alone (the tick's own clock is exactly what is in question, so its age cannot be measured independently of the offset it is meant to establish); trusting the first measurement for the life of the connection, as before | Reviewer (F-040) |
 | 2026-08-24 | The soak database is reset only via `alembic downgrade base` -> `upgrade head`, never `bootstrap_schema()`/`create_all` against a hand-dropped database | Review F-041: the third Phase A attempt's own recovery mixed the two paths — tables dropped by hand, then rebuilt with `create_all` while `alembic_version` still claimed head, so a later `alembic upgrade head` believed the database already current and did nothing. `tests/integration/test_migrations.py` already proves the downgrade/upgrade round trip leaves nothing behind; `scripts/reset_soak_database.py` is that same proven pair, run deliberately, refusing to run against a URL without "soak" in it and requiring `--yes` | Leaving the reset as an unrepeatable manual recovery; a script that wraps `drop_schema()`+`bootstrap_schema()` for speed, reintroducing the same drift | Reviewer (F-041) |
 | 2026-08-24 | Dashboard v0 built as FastAPI + server-rendered Jinja2 HTML, its own `src/crumblr/dashboard/` package rather than inside `api/` | Asked the user directly (AskUserQuestion) rather than picking a stack silently, since a new dependency and a long-lived architectural surface are the kind of decision worth pausing for. FastAPI chosen over Streamlit (heavier dependency, framework-owned process model, less natural to keep strictly read-only) and over stdlib `http.server` (zero dependencies but hand-rolled HTML across several panels grows awkward). Kept out of `api/` because build.md §21 already earmarks that package for "authenticated operator functions" — the opposite of what v0 must be — so the read-only boundary is a physically separate package, not a convention inside one meant to eventually hold mutation | Streamlit; stdlib `http.server`; building inside `api/` | User |
+| 2026-08-25 | Dashboard v0's live refresh is a small vanilla-JS poller against `GET /api/state` that updates only the fast-moving fields (price, tick age, the three headline status badges, tick/bar counts, the chart); slower-moving panels (connection detail, account context, decision pipeline, activity timeline) stay accurate as of the last full page load rather than being live-bound | Review 1.13 §10 prefers "5-second refresh/poll for state without full-page flicker" but explicitly forbids building a JavaScript application framework merely for polish, and restricts any JS polling to `GET /api/state` only (no mutation endpoint). A full DOM-diffing/templating layer in JS would duplicate the Jinja rendering logic — a second place the same bug could be introduced — for panels that in practice change on the order of minutes (reconnects, decisions, journal events), not seconds. Scoping the live JS binding to only the fields where "stale-looking" is a real F-043 risk (price/health) keeps the JS small, auditable, and free of a second rendering engine | A full client-side rendering framework; a meta-refresh full-page reload (simpler but produces the flicker the review explicitly wants avoided); fetching and swapping the full `/` HTML via JS (equally correct, more bytes per poll, and not `GET /api/state` as the review specifies) | Reviewer (review 1.13 §10) |
+| 2026-08-25 | **O-006**: the next promotion target is a controlled MT5 **DEMO** account autonomous canary order — real decisioning, real order submission, real demo fills, zero live-money exposure — not a live account, not strategy validation from a handful of trades | Review 1.15 §3 interprets the owner's direction toward "daadwerkelijk getrade kan worden" concretely, so "autonomous trading" cannot later be read as authorizing more than this. Reprioritizes engineering away from dashboard/foundation polish (both now substantially closed) onto the M5 critical path: CI/M0 closure → F-047 durable broker-state persistence → read-only reconciliation → F-048 live shadow decision pipeline (execution stays disabled) → execution-safety work (F-049) → `feedback.2.0` → one gated canary order | Owner (relayed via reviewer, review 1.15 §3/§12) |
 
 ---
 
@@ -876,14 +900,54 @@ Next engineering steps once unblocked:
       imports `MetaTrader5`/`crumblr.mt5_gateway`. Deliberate scope reduction
       against build.md §22/M8's full spec recorded as D-043 — no manual
       HALT/CANCEL/FLATTEN control surface exists yet, by design.
-- [ ] Run CI on a runner and record the result (review 1.12 §9).
-- [ ] Provide the domain-contract package for reviewer/human approval; close M0
-      (review 1.12 §9).
-- [ ] Implement the reconciliation loop (M5 prerequisite, read-only first —
-      review 1.12 §10).
-- [ ] Decide remaining owner risk/intraday/HALT-reset policies before M5
-      (review 1.12 §11).
-- [ ] Store feature values, not only their hash — D-031.
+- [x] ~~Visually rebuild Dashboard v0 and close F-042/F-043/F-044~~ —
+      2026-08-25 (review 1.13). ~~F-045/F-046 and the F-044 heading
+      refinement~~ — 2026-08-25 (review 1.14). **Dashboard visual scope now
+      frozen** (review 1.15 §15) — only broker-state/reconciliation/real-
+      decision data panels may still be added, once F-047/F-048 exist to
+      source them honestly.
+
+**O-006 (review 1.15 §3/§12): the critical path from here to one gated DEMO**
+**canary order — CI/M0 first, nothing else jumps the queue:**
+
+- [ ] Phase 1 — close M0 administratively: run CI on a runner and record the
+      result; provide the domain-contract package for reviewer/human
+      approval (review 1.12 §9, repeated by review 1.15 §11: "M0 has been
+      open long enough").
+- [ ] Phase 2 — broker truth: F-047 durable `broker_account_snapshots` /
+      `broker_position_snapshots` / `broker_pending_order_snapshots` (balance
+      **and** equity, both `Decimal`; explicit `COMPLETE`/`UNKNOWN`/`FAILED`
+      set-completeness, never conflating "empty" with "failed"); then
+      read-only reconciliation (`MATCHED`/`MISMATCHED`/`UNKNOWN`,
+      `MISMATCHED`/`UNKNOWN` → HALT) built from those snapshots (review 1.15
+      §5/§10).
+- [ ] Phase 3 — attach the agent: F-048 live/shadow decision orchestrator —
+      real closed M5 bar → features → Trading Agent → intent-time Risk →
+      Supervisor → persist → dashboard, **execution stays disabled**. Close
+      D-031 (persist feature values, not only their hash) before this is
+      evidence-quality, since a hash alone cannot explain a live decision
+      (review 1.15 §7/§9).
+- [ ] Phase 4 — execution safety: separate execution-capable MT5 adapter,
+      `order_check`, ADR-001 execution-time risk revalidation, automatic
+      intraday flatten, terminal/account execution guard (review 1.15 §12
+      Phase 4 — the existing M5 checklist, now sequenced explicitly after
+      Phases 1-3 rather than in parallel with them).
+- [ ] Phase 5 — owner policy: risk per trade, max daily loss/drawdown,
+      last-entry cutoff, mandatory flatten deadline, production/demo
+      HALT-reset authority — all still open (Q7/Q8, ADR-004 §3).
+- [ ] Phase 6 — F-049 multi-gated execution enablement (environment=DEMO,
+      account/server verified, reconciliation=MATCHED, data=HEALTHY,
+      safety=RUNNING, risk policy owner-approved, execution adapter
+      explicitly enabled, terminal AlgoTrading enabled, `feedback.2.0` GO —
+      simultaneously); then `feedback.2.0.md`; then one deliberately
+      constrained canary DEMO order, treated as a technical proof (proposal
+      → risk → supervisor → order_check → order_send → broker ack → fill →
+      reconciliation → SL presence → closure → audit trail), **not** as
+      evidence the strategy is profitable (review 1.15 §13/§14/§16).
+
+Next regular review triggers on a meaningful package per review 1.15 §17 —
+CI+M0 closure, and/or broker-state persistence + reconciliation, and/or live
+shadow Agent decisions on real data — not after one small change.
 
 ---
 
@@ -3598,6 +3662,351 @@ are now all complete.
   available, F-039/F-040/F-041 addressed, CI and/or M0 contract review, and
   initial reconciliation evidence — is now partly met; CI, the contract
   review and reconciliation remain.
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twentieth entry) — review 1.13 processed: Dashboard v0 redesigned, F-043/F-044 closed
+
+**Verdict: Dashboard v0 rebuilt to a modern dark ops-console layout per review**
+**1.13 §§4-10. F-043 (stale-data presentation) and F-044 (replay-vs-live**
+**decision labelling) closed. Read-only boundary unchanged and re-verified.**
+
+Review 1.13 accepted the dashboard's functional boundary from the previous
+pass and asked for a visual rebuild toward "a modern trading-operations
+console, not a developer debug page" (§4), plus two new findings. The owner
+independently asked for the same thing in the same terms. Processed per the
+review's own required order (§18): keep the boundary, rebuild the visuals,
+fix F-043, fix F-044; CI/domain-contracts/reconciliation (items 6-8) are
+each their own follow-up pass, not attempted this entry — flagged rather
+than silently deferred.
+
+**Visual rebuild (F-042, review §§4-10).** Full rewrite of
+`src/crumblr/dashboard/templates/dashboard.html`: dark charcoal/navy palette,
+consistent card system, small status badges instead of raw text, and the
+five-row layout the review specifies —
+
+```text
+Top bar:  CRUMBLR / EUR/USD Autonomous Trading Platform, with DEMO /
+          READ ONLY / EXECUTION DISABLED always visible, never subtle
+Row 1:    MT5 / Data feed / Safety / Milestone — four compact status cards
+Row 2:    EUR/USD hero (large bid/ask/spread/last-tick-age) + a hand-rolled
+          vanilla-JS/SVG candlestick chart of the last 60 closed M5 bars —
+          no charting library, no framework
+Row 3:    Connection / Data integrity / Account context panels
+Row 4:    Decision pipeline — Trading Agent -> Risk Engine -> Supervisor ->
+          Execution (DISABLED), each its own card; NO_TRADE renders as an
+          intentional state, not an empty/broken one
+Row 5:    Recent journal activity — a compact table from EventJournal.recent()
+```
+
+Visual-state semantics (review §9) implemented as a single lookup
+(`app.py::state_class`, mirrored in ~15 lines of JS for the live-refreshed
+fields) rather than repeated conditionals: `CONNECTED/HEALTHY/RUNNING/GOOD/
+MATCHED` → green, `STALE/UNCALIBRATED/DEGRADED` → amber, everything else —
+**including `UNKNOWN`**, per the review's own "most conservative state
+dominates" rule — → red. "Account context"/"Connection" fields with no
+persisted source (entity, margin mode, broker clock offset) render literally
+as `NOT AVAILABLE` rather than a guessed value, per the review's explicit
+instruction.
+
+**Auto-refresh** (review §10): a ~120-line vanilla-JS poller hits
+`GET /api/state` every 5 seconds and updates only the fields that actually
+change second-to-second in practice — the two headline status badges, the
+safety badge, the EUR/USD price block, tick/bar counts, the reconnect/error
+line, and the candlestick chart — without a full-page reload/flicker and
+without duplicating the server's Jinja rendering logic for the slower-moving
+panels (connection detail, account context, decision pipeline, activity
+timeline), which stay accurate as of the last full page load. No mutation
+endpoint is polled or exists.
+
+**F-043 — stale-data presentation.** `DashboardState` gained
+`mt5_connectivity`/`data_feed_state` (`CONNECTED/DISCONNECTED/UNKNOWN` and
+`HEALTHY/STALE/DOWN/UNKNOWN`), derived from `LiveReader`'s own
+`status`/`connected` fields rather than a freshness threshold the dashboard
+would have to guess at independently. A missing reader-health snapshot now
+reads as `UNKNOWN` (red), never as `HEALTHY`. A database outage is caught at
+the route level (`SQLAlchemyError`) and renders a full-page `DATABASE
+UNAVAILABLE` state at HTTP 503 — explicitly distinct from "no data yet",
+which is what F-043 asked for. Five presentation cases are now
+directly tested: fresh, stale, disconnected, missing snapshot, and database
+unavailable (`tests/integration/test_dashboard.py::TestF043PresentationStates`,
+5 tests).
+
+**F-044 — decision-context ambiguity.** Confirmed by reading the code rather
+than assuming: `application/live_reader.py` has zero references to
+`TradingAgent`/`RiskEngine`/`Supervisor` — `LiveReader` only ingests and
+persists real MT5 ticks/bars, and nothing in this codebase feeds a live tick
+into a live decision today. Every journalled decision is therefore a
+replay/backtest artifact, never a live one, and `DashboardState
+.decision_pipeline_label` says so unconditionally: `"LATEST REPLAY DECISION"`
+when at least one exists, `"NO LIVE DECISION PIPELINE ACTIVE"` when none do
+— never phrased as though it belongs to the live price shown next to it.
+Every decision now also carries `environment`/`source`/`occurred_at_utc`/
+`correlation_id`/a version label, both in the JSON and rendered in the
+pipeline banner. `tests/integration/test_dashboard.py
+::TestF044DecisionContextIsNeverAmbiguous` (2 tests).
+
+**New read paths, added to the existing stores rather than duplicated ad
+hoc** (same reasoning as the nineteenth entry's `latest_tick`/`latest_bar`):
+`MarketDataStore.recent_bars()` (newest N, chronological order, for the
+chart) and `EventJournal.recent()` (newest N of any type, chronological
+order, for the timeline) — `read_bars`/`read_all` both order ascending for
+replay, the wrong direction for "what just happened".
+
+**A real bug found by manually smoke-testing the visual states, not by unit
+tests alone**: hand-writing a test reader-health snapshot via PowerShell's
+`Out-File` produced a file with a leading UTF-8 byte-order mark, which made
+`read_health_snapshot` silently treat a well-formed `STALE` snapshot as
+unreadable (rendered `UNKNOWN`) — invalid JSON has a BOM in front of `{`.
+Real production writers (`Path.write_text(..., encoding="utf-8")` in
+`mt5_live_reader.py`) never add a BOM, so this had not been exercised, but a
+hand-edited or differently-tooled snapshot file could hit it in practice.
+Fixed with a one-line change (`"utf-8-sig"` instead of `"utf-8"`, which
+strips a BOM if present and is identical otherwise) plus a regression test.
+This is the value of actually opening the page rather than only trusting
+green tests — recorded per `CLAUDE.md`'s UI-testing requirement.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 106 source files
+pytest                — 748 passed, 3 skipped, 0 failed
+                         (up from 737 — 11 new tests: 5 F-043, 2 F-044,
+                         1 bar-gap, 1 BOM regression, plus 2 persistence-
+                         layer tests for recent_bars/recent)
+```
+
+Manually verified in a browser-equivalent check (`curl`/`Invoke-WebRequest`,
+no interactive browser available in this session — same limitation and same
+mitigation as the eighteenth entry): started the dashboard against real
+`crumblr_soak` data (13,108 ticks, 37 bars). Confirmed: the candlestick chart
+renders real OHLC bars including a genuine ~70-minute data gap between two
+reader sessions (`bar_gap_count` correctly reported it as `1`); age
+formatting reads "15h 8m ago" rather than a raw Python `timedelta`; a
+hand-crafted `STALE` reader-health snapshot correctly turned the Data Feed
+badge amber and populated the reconnect count/last-error fields once the BOM
+bug above was fixed; the `DATABASE UNAVAILABLE` page renders at 503 against
+an intentionally unreachable engine.
+
+**Problems found.** The BOM bug above (fixed). No regressions in the
+existing 737 tests.
+
+**Decision.** F-042 (visual baseline), F-043 (stale-data presentation) and
+F-044 (decision-context ambiguity) closed. The read-only boundary from
+review 1.9 F-035/review 1.12 §8 is unchanged and re-verified structurally
+(`TestReadOnlyBoundary` still passes against the redesigned app). CI,
+domain-contract review and reconciliation (review 1.13 §18 items 6-8) remain
+open — not attempted this entry, prioritized after the dashboard per the
+user's explicit direction this session.
+
+**Next**
+
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (review 1.13 §§14-15).
+- Build read-only reconciliation against real MT5 state (review 1.13 §16).
+- Decide remaining owner risk/intraday/HALT-reset policies before M5
+  (review 1.13 §11).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-first entry) — review 1.14 processed: dashboard visual direction accepted, F-045/F-046 closed, F-033 closed a fifth time
+
+**Verdict: Dashboard v0's visual direction is ACCEPTED (review 1.14 §2) — no**
+**further large visual work planned. F-045 (environment badge) and F-046**
+**(historical/offline treatment) closed. F-044's heading refined. F-033's**
+**stale current-state claims corrected a fifth time.**
+
+Review 1.14 reviewed the owner-supplied screenshot of the redesigned
+dashboard and confirmed it "now visibly resembles a modern trading-operations
+interface" (§1). It closed F-042/F-043/F-044 in implementation, asked for two
+new semantic fixes (F-045, F-046) plus a copy refinement to F-044's visible
+heading, reconfirmed a fifth F-033 documentation gap, and explicitly told the
+project to stop spending engineering time on dashboard visuals after these
+and return to CI/domain-contracts/reconciliation (§16). Processed per the
+review's own required order.
+
+**F-045 — environment badge (review §6).** The top-bar badge showed the raw
+`Environment.PAPER` config value. To an owner glancing at the screen that
+reads as an active paper-execution campaign; none has started
+("Paper campaign: NOT STARTED" above) and this build has no order path at
+all (F-035). `DashboardState` gained `environment_badge_label`
+(`state.py::_environment_badge_label`): `PAPER` renders as `"DEMO DATA"`;
+every other `Environment` value (`BACKTEST`/`REPLAY`/`SHADOW`/`LIVE`) already
+says what it means and passes through unchanged.
+`tests/integration/test_dashboard.py::TestF045EnvironmentBadgeIsNotMisreadAsACampaign`
+(3 tests).
+
+**F-046 — historical/offline treatment (review §7).** The review's own
+example was reproduced against the real `crumblr_soak` data during manual
+testing: `MT5 UNKNOWN`, `DATA FEED UNKNOWN`, last tick ~17h old, while the
+old bid/ask and candlestick chart kept rendering with no visual distinction
+from live. Whenever `data_feed_state != "HEALTHY"` (stale, disconnected, or
+no reader session at all), the EUR/USD hero now shows a
+"Historical data — no active live data session" banner (amber, or red when
+the state is `DOWN`/`UNKNOWN`) with the last-live-tick age alongside it, and
+the chart gets a subdued "No active live data session" overlay — per the
+review's explicit "do not hide the chart" instruction, the chart itself
+never disappears, only its live-ness claim is withdrawn. Both the initial
+server render and the 5-second JS poll refresh keep this in sync as
+`data_feed_state` changes between polls, not only at page load.
+`tests/integration/test_dashboard.py::TestF046HistoricalDataIsNeverMistakenForLive`
+(3 tests).
+
+**F-044 refinement (review §5).** The visible section heading still read
+"Decision pipeline — latest window" — easier to misread as live than the
+banner beneath it already prevented. Changed to
+"Decision pipeline — latest replay window", matching the review's own
+suggested wording.
+
+**Age-formatting consistency, found while implementing F-046.** The
+server-rendered page used `app.py::format_age()` (hours-aware: "16h 48m"),
+but the JS poller's inline age calculation only handled seconds and minutes,
+so a session that went stale between the initial render and a 5-second
+refresh would silently regress to a raw minute count. Added a JS `formatAge()`
+mirroring the Python formatter and used it everywhere the poller updates an
+age string, closing the gap review §9.B asked about ("make sure the
+screenshot/runtime build uses that version").
+
+**F-033, fifth reopen/close (review §11).** Three current-state claims in
+this document still contradicted the fact that M1 had passed:
+
+```text
+"no test in the repository has run against the real terminal, only the
+  manual first-contact probe has" — silently ignored Phase A (30 real
+  minutes) and Phase B (two real reconnects), both manual-but-far-beyond-
+  a-probe evidence
+"No capability is MT5-integrated ... and none can be until M1" — M1 had
+  already passed; the real, still-true gap is that no live decision
+  pipeline exists (F-044), not that M1 is pending
+APP-014 "PARTLY CLOSED ... still open: continuous bar/tick read and
+  observed reconnect behaviour" — both completed in Phase A/B the same day
+  APP-014 was last touched
+```
+
+All three rewritten in place (§3 platform checklist, §3 Risk section intro,
+§2 APP-014 row) rather than only noted here, per the pattern the last four
+F-033 reopenings established.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 106 source files
+pytest                — 754 passed, 3 skipped, 0 failed
+                         (up from 748 — 6 new tests: 3 F-045, 3 F-046)
+```
+
+Manually verified in a browser-equivalent check (`curl`, same limitation as
+the eighteenth/twentieth entries): started the dashboard against the real
+`crumblr_soak` data with no `LiveReader` currently running (no health
+snapshot file). Confirmed: badge renders `DEMO DATA`, not `PAPER`; heading
+renders "Decision pipeline — latest replay window"; the historical banner
+renders unhidden (`data_feed_state` was `UNKNOWN` — no reader session) with
+"17h 3m" as the last-live-tick age, matching `format_age`'s hour-aware
+formatting; the chart overlay renders alongside the still-visible
+candlesticks, not in place of them.
+
+**Problems found.** The JS/Python age-formatter drift above (fixed same
+entry). No regressions in the existing 748 tests.
+
+**Decision.** F-045 and F-046 closed. F-044's heading refined. F-033 closed
+a fifth time. Dashboard visual scope is now frozen per review 1.14 §10 — the
+next dashboard work, if any, is semantic labels, a reconciliation panel, or
+account-snapshot data, not layout/animation/framework work. CI, the domain-
+contract package and reconciliation (review 1.14 §16 steps 6-11) remain open
+— not attempted this entry, per the review's own required order putting the
+dashboard refinements first.
+
+**Next**
+
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (review 1.14 §§12-13).
+- Build read-only reconciliation against real MT5 state (review 1.14 §14).
+- Decide remaining owner risk/intraday/HALT-reset policies before M5
+  (review 1.14 §16 step 12).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-second entry) — review 1.15 processed: engineering reprioritized to the M5 critical path (O-006), F-047/F-048/F-049 opened
+
+**Verdict: dashboard and foundation polish are substantially complete. Review**
+**1.15 redirects engineering effort toward one gated autonomous DEMO canary**
+**order (O-006) via an explicit six-phase path. Three findings opened;**
+**nothing implemented yet this entry — trackers updated only.**
+
+Review 1.15 reconfirmed F-045/F-046/F-044/F-033 (closed by the twenty-first
+entry) without new comment, and explicitly told the project to stop treating
+documentation cleanup and dashboard visuals as ongoing work unless a
+contradiction affects a gate or operator decision (§2). It then relayed a
+direct owner instruction: move toward an attachable Trading Agent and actual
+autonomous DEMO trading without unnecessary delay. Recorded as **O-006** —
+concrete target is one `feedback.2.0`-gated canary order on the MT5 DEMO
+account, explicitly **not** a live account, not real money, and not
+evidence the strategy is profitable from a handful of trades.
+
+**F-047 (new) — durable broker account/position/pending-order state.** The
+platform persists ticks, bars, journal decisions, risk-session state and
+safety state, but nothing durably records the *observed real broker's*
+balance/equity/margin, open positions or pending orders — only ever held
+in-memory by whatever last called `account_info()`/`positions_get()`.
+Blocks reconciliation, live risk state and the first demo order. Review
+specifies append-only snapshot tables, `balance` and `equity` both as
+`Decimal`, and an explicit `COMPLETE`/`UNKNOWN`/`FAILED` completeness state
+so an empty position book is never confused with a failed query — the same
+fail-vs-empty distinction `positions_get(None)` already makes in-memory,
+now required to survive into persistence. Not started this entry.
+
+**F-048 (new) — live/shadow decision orchestrator.** `LiveReader` (real MT5
+ticks/bars) and `ReplayOrchestrator`/Trading Agent (replay decisions) remain
+two unconnected systems, correct at M1 and confirmed again by F-044 — now
+the main blocker to the agent operating on real data at all. Required: real
+closed M5 bar → features → Trading Agent → intent-time Risk → Supervisor →
+persist, with order submission never reached (shadow/dry-run only). Agent
+boundary restated as non-negotiable regardless of implementation (no MT5
+credentials, no `order_send` access, no HALT-reset authority, no risk-policy
+mutation). Not started this entry.
+
+**F-049 (new) — multi-gated execution enablement.** Formalizes that the
+first order must require environment=DEMO, verified account/server,
+reconciliation=MATCHED, data=HEALTHY, safety=RUNNING, owner-approved risk
+policy, an explicitly enabled execution adapter, terminal AlgoTrading
+enabled, and `feedback.2.0` GO — simultaneously, with the MT5 AlgoTrading
+toggle alone never sufficient (consistent with the existing APP-016
+decision). Correctly not yet implemented — M5 is NO-GO. Not started this
+entry.
+
+**Decision.** Trackers (`review/FEEDBACK.md`, this document's §10/§12/§13,
+the M8 milestone row) updated to record O-006 and F-047/F-048/F-049.
+Engineering on F-047/F-048/CI was deliberately **not** started in this same
+entry: Phase 1 of the review's own critical path (§12) is running CI on a
+runner, which requires committing and pushing the substantial uncommitted
+review-1.13/1.14 work already sitting in the working tree — a shared,
+harder-to-reverse action this document's owner has not yet confirmed (asked
+at the end of the twenty-first entry, not yet answered). Implementing
+F-047/F-048 ahead of that confirmation would also mean committing to
+specific schema/architecture choices (snapshot table shape, where the live
+orchestrator lives, how shadow mode is wired) without the chance to check
+those against the owner's actual priority ordering first.
+
+**Evidence.** No code changed this entry; `ruff`/`mypy`/`pytest` status is
+unchanged from the twenty-first entry (754 passed, 3 skipped).
+
+**Problems found.** None — a tracking/reprioritization entry only.
+
+**Next**
+
+- Get direction on committing and pushing the review-1.13/1.14/1.15 tracker
+  work, since Phase 1 (CI) cannot run without it.
+- Phase 1: run CI on a runner and record the result; assemble the
+  domain-contract package for reviewer/human approval (review 1.15 §11).
+- Phase 2: implement F-047 broker-state snapshots, then read-only
+  reconciliation (review 1.15 §5/§10).
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---

@@ -3,147 +3,605 @@
 <head>
 <meta charset="utf-8">
 <title>Crumblr — read only</title>
-<meta http-equiv="refresh" content="5">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #0a0d13;
+    --bg-raised: #10141c;
+    --bg-card: #131826;
+    --border: #232a3a;
+    --border-soft: #1b2130;
+    --text: #e7ebf3;
+    --text-dim: #97a2b8;
+    --text-faint: #5c6579;
+    --good: #34d399;
+    --good-bg: rgba(52, 211, 153, 0.12);
+    --warn: #fbbf24;
+    --warn-bg: rgba(251, 191, 36, 0.12);
+    --bad: #fb5468;
+    --bad-bg: rgba(251, 84, 104, 0.14);
+    --neutral: #7a8496;
+    --neutral-bg: rgba(122, 132, 150, 0.12);
+    --accent: #5b8def;
+    --up: #34d399;
+    --down: #fb5468;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
   body {
-    background: #0b0d10; color: #d7dde3;
-    font-family: ui-monospace, "SF Mono", Consolas, monospace;
-    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    margin: 0; padding: 0 0 40px 0;
+    font-size: 14px;
   }
-  header {
-    background: #3a0a0a; border: 2px solid #ff4d4d; color: #ffdede;
-    padding: 12px 16px; margin-bottom: 20px; text-align: center;
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 0 20px; }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    background: var(--bg-raised);
   }
-  header .title { font-size: 1.3em; font-weight: bold; letter-spacing: 0.05em; }
-  header .banner { font-size: 1.6em; font-weight: bold; margin-top: 6px; }
-  .grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 16px;
+  .topbar .identity { display: flex; align-items: baseline; gap: 10px; }
+  .topbar .brand { font-size: 1.25em; font-weight: 700; letter-spacing: 0.02em; }
+  .topbar .subtitle { color: var(--text-dim); font-size: 0.9em; }
+  .topbar .badges { display: flex; gap: 8px; align-items: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 999px; font-size: 0.78em;
+    font-weight: 700; letter-spacing: 0.04em; border: 1px solid transparent;
   }
-  .panel {
-    border: 1px solid #2a2f36; border-radius: 6px; padding: 14px 16px;
-    background: #12151a;
+  .pill-demo { background: var(--neutral-bg); color: var(--text-dim); border-color: var(--border); }
+  .pill-readonly { background: rgba(91, 141, 239, 0.14); color: var(--accent); border-color: rgba(91, 141, 239, 0.3); }
+  .pill-exec-disabled {
+    background: var(--bad-bg); color: var(--bad); border-color: rgba(251, 84, 104, 0.45);
+    font-size: 0.85em; padding: 6px 14px;
   }
-  .panel h2 {
-    margin: 0 0 10px 0; font-size: 0.95em; text-transform: uppercase;
-    letter-spacing: 0.05em; color: #8ea0b5;
+
+  /* ---- Layout ---- */
+  .section { margin-top: 22px; }
+  .section-title {
+    font-size: 0.75em; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint);
+    text-transform: uppercase; margin: 0 0 10px 2px;
   }
-  .row { display: flex; justify-content: space-between; padding: 3px 0; gap: 12px; }
-  .row .k { color: #8ea0b5; }
-  .row .v { text-align: right; word-break: break-word; }
-  .ok { color: #58d68d; }
-  .warn { color: #f4d03f; }
-  .bad { color: #ff6b6b; }
-  .muted { color: #5a6472; font-style: italic; }
-  footer { margin-top: 20px; color: #5a6472; font-size: 0.85em; text-align: center; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-hero { display: grid; grid-template-columns: 300px 1fr; gap: 14px; }
+  @media (max-width: 1000px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-hero { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px;
+  }
+
+  /* ---- Row 1: status cards ---- */
+  .status-card .label {
+    font-size: 0.72em; font-weight: 700; letter-spacing: 0.07em; color: var(--text-faint);
+    text-transform: uppercase;
+  }
+  .status-card .state {
+    display: flex; align-items: center; gap: 8px; margin-top: 8px;
+    font-size: 1.35em; font-weight: 700;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.good { background: var(--good); box-shadow: 0 0 8px rgba(52, 211, 153, 0.6); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 8px rgba(251, 191, 36, 0.6); }
+  .dot.bad { background: var(--bad); box-shadow: 0 0 8px rgba(251, 84, 104, 0.6); }
+  .dot.neutral { background: var(--neutral); }
+  .state.good { color: var(--good); }
+  .state.warn { color: var(--warn); }
+  .state.bad { color: var(--bad); }
+  .state.neutral { color: var(--text-dim); }
+  .status-card .sub { margin-top: 6px; color: var(--text-dim); font-size: 0.85em; }
+
+  /* ---- Row 2: hero ---- */
+  .hero-price .symbol { font-size: 0.85em; color: var(--text-dim); letter-spacing: 0.04em; }
+  .hero-price .quote { display: flex; gap: 18px; margin-top: 8px; align-items: baseline; }
+  .hero-price .side-label { font-size: 0.68em; color: var(--text-faint); letter-spacing: 0.08em; }
+  .hero-price .price { font-size: 1.9em; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hero-price .bid .price { color: var(--down); }
+  .hero-price .ask .price { color: var(--up); }
+  .hero-price .meta { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; color: var(--text-dim); }
+  .hero-price .meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .chart-card { display: flex; flex-direction: column; }
+  .chart-card .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .chart-card .chart-head .title { font-size: 0.8em; color: var(--text-dim); }
+  .chart-card svg { width: 100%; height: 260px; display: block; }
+  .chart-wrap { position: relative; }
+
+  /* ---- F-046: historical/offline treatment — never let old data pass as live ---- */
+  .historical-banner {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 12px; padding: 8px 12px; border-radius: 8px;
+    font-size: 0.76em; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    background: var(--warn-bg); color: var(--warn); border: 1px solid rgba(251, 191, 36, 0.35);
+  }
+  .historical-banner.bad { background: var(--bad-bg); color: var(--bad); border-color: rgba(251, 84, 104, 0.4); }
+  .historical-banner .detail { font-weight: 400; text-transform: none; color: var(--text-dim); letter-spacing: 0; }
+  .chart-overlay-label {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 0.8em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-dim); background: rgba(10, 13, 19, 0.6); padding: 7px 16px;
+    border-radius: 6px; border: 1px solid var(--border-soft); pointer-events: none;
+  }
+  .empty {
+    color: var(--text-faint); font-style: normal; font-size: 0.9em;
+    display: flex; align-items: center; justify-content: center; height: 220px;
+    border: 1px dashed var(--border-soft); border-radius: 8px;
+  }
+
+  /* ---- key/value rows used in several panels ---- */
+  .kv { display: flex; justify-content: space-between; padding: 5px 0; gap: 12px; }
+  .kv:not(:last-child) { border-bottom: 1px solid var(--border-soft); }
+  .kv .k { color: var(--text-dim); }
+  .kv .v { text-align: right; font-variant-numeric: tabular-nums; word-break: break-word; }
+  .v.good { color: var(--good); } .v.warn { color: var(--warn); } .v.bad { color: var(--bad); }
+  .panel-title { font-size: 0.78em; font-weight: 700; letter-spacing: 0.05em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
+  .muted { color: var(--text-faint); }
+  .na { color: var(--text-faint); font-style: italic; }
+
+  /* ---- Row 4: decision pipeline ---- */
+  .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 1000px) { .pipeline { grid-template-columns: 1fr 1fr; } }
+  .pipeline-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; height: 100%;
+  }
+  .pipeline-card .stage-name { font-size: 0.72em; font-weight: 700; letter-spacing: 0.06em; color: var(--text-faint); text-transform: uppercase; }
+  .pipeline-card .stage-verdict { margin-top: 8px; font-size: 1.1em; font-weight: 700; }
+  .pipeline-card .stage-detail { margin-top: 6px; font-size: 0.82em; color: var(--text-dim); }
+  .pipeline-banner {
+    margin-top: 10px; padding: 8px 12px; border-radius: 8px; font-size: 0.78em;
+    background: var(--neutral-bg); color: var(--text-dim); border: 1px solid var(--border-soft);
+  }
+
+  /* ---- Row 5: activity timeline ---- */
+  table.timeline { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  table.timeline th {
+    text-align: left; color: var(--text-faint); font-weight: 700; font-size: 0.75em;
+    letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 10px; border-bottom: 1px solid var(--border);
+  }
+  table.timeline td { padding: 8px 10px; border-bottom: 1px solid var(--border-soft); font-variant-numeric: tabular-nums; }
+  table.timeline tr:last-child td { border-bottom: none; }
+
+  footer { margin-top: 28px; color: var(--text-faint); font-size: 0.78em; text-align: center; }
+
+  /* ---- Full-page unavailable state ---- */
+  .fatal {
+    max-width: 640px; margin: 80px auto; text-align: center; padding: 28px;
+    border: 1px solid rgba(251, 84, 104, 0.4); border-radius: var(--radius); background: var(--bad-bg);
+  }
+  .fatal h1 { color: var(--bad); font-size: 1.3em; margin: 0 0 10px 0; }
+  .fatal p { color: var(--text-dim); font-size: 0.9em; }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="title">CRUMBLR — {{ state.environment | upper }} / READ ONLY</div>
-  <div class="banner">EXECUTION DISABLED</div>
-</header>
-
-<div class="grid">
-
-  <div class="panel">
-    <h2>MT5 connectivity / LiveReader health</h2>
-    {% if state.reader_health %}
-    <div class="row"><span class="k">status</span>
-      <span class="v {% if state.reader_health.status == 'HEALTHY' %}ok{% elif state.reader_health.status == 'STALE' %}warn{% else %}bad{% endif %}">
-        {{ state.reader_health.status }}
-      </span></div>
-    <div class="row"><span class="k">connected</span><span class="v">{{ state.reader_health.connected }}</span></div>
-    <div class="row"><span class="k">reconnect count</span><span class="v">{{ state.reader_health.reconnect_count }}</span></div>
-    <div class="row"><span class="k">consecutive failures</span><span class="v">{{ state.reader_health.consecutive_failures }}</span></div>
-    <div class="row"><span class="k">last tick at (UTC)</span><span class="v">{{ state.reader_health.last_tick_at_utc or "—" }}</span></div>
-    <div class="row"><span class="k">last bar at (UTC)</span><span class="v">{{ state.reader_health.last_bar_at_utc or "—" }}</span></div>
-    <div class="row"><span class="k">last reconnect (UTC)</span><span class="v">{{ state.reader_health.last_reconnect_at_utc or "—" }}</span></div>
-    <div class="row"><span class="k">spec changes</span><span class="v">{{ state.reader_health.spec_changes }}</span></div>
-    <div class="row"><span class="k">last gateway error</span>
-      <span class="v {% if state.reader_health.last_error %}bad{% endif %}">{{ state.reader_health.last_error or "none" }}</span></div>
-    {% if state.reader_health.detail %}
-    <div class="row"><span class="k">detail</span><span class="v">{{ state.reader_health.detail }}</span></div>
-    {% endif %}
-    {% else %}
-    <div class="muted">No LiveReader health snapshot found yet — the reader has not run, or
-      the dashboard was not pointed at its --json output file.</div>
-    {% endif %}
+<div class="topbar">
+  <div class="identity">
+    <span class="brand">CRUMBLR</span>
+    <span class="subtitle">EUR/USD Autonomous Trading Platform</span>
   </div>
-
-  <div class="panel">
-    <h2>Broker / account</h2>
-    <div class="row"><span class="k">expected server</span><span class="v">{{ state.expected_broker_server }}</span></div>
-    <div class="row"><span class="k">expected currency</span><span class="v">{{ state.expected_currency or "—" }}</span></div>
-    <div class="row"><span class="k">canonical symbol</span><span class="v">{{ state.canonical_symbol }}</span></div>
-    <div class="row"><span class="k">timeframe</span><span class="v">{{ state.timeframe }}</span></div>
-    <div class="row"><span class="k">account mode / login</span><span class="v muted">not shown — read-only boundary</span></div>
+  <div class="badges">
+    <span class="pill pill-demo">{{ state.environment_badge_label if state else "—" }}</span>
+    <span class="pill pill-readonly">READ ONLY</span>
+    <span class="pill pill-exec-disabled">⛔ EXECUTION DISABLED</span>
   </div>
-
-  <div class="panel">
-    <h2>Market data</h2>
-    {% if state.latest_tick %}
-    <div class="row"><span class="k">bid / ask</span><span class="v">{{ state.latest_tick.bid }} / {{ state.latest_tick.ask }}</span></div>
-    <div class="row"><span class="k">spread</span><span class="v">{{ state.latest_tick.spread }}</span></div>
-    <div class="row"><span class="k">last tick event time (UTC)</span><span class="v">{{ state.latest_tick.event_time_utc }}</span></div>
-    <div class="row"><span class="k">last tick age</span><span class="v">{{ state.generated_at_utc - state.latest_tick.received_time_utc }}</span></div>
-    <div class="row"><span class="k">tick quality</span><span class="v">{{ state.latest_tick.data_quality.value }}</span></div>
-    {% else %}
-    <div class="muted">No ticks stored yet for {{ state.canonical_symbol }}.</div>
-    {% endif %}
-    <div class="row"><span class="k">total ticks stored</span><span class="v">{{ state.tick_count }}</span></div>
-  </div>
-
-  <div class="panel">
-    <h2>Current closed {{ state.timeframe }} bar</h2>
-    {% if state.latest_bar %}
-    <div class="row"><span class="k">open time (UTC)</span><span class="v">{{ state.latest_bar.bar.open_time_utc }}</span></div>
-    <div class="row"><span class="k">O / H / L / C</span>
-      <span class="v">{{ state.latest_bar.bar.open }} / {{ state.latest_bar.bar.high }} / {{ state.latest_bar.bar.low }} / {{ state.latest_bar.bar.close }}</span></div>
-    <div class="row"><span class="k">tick volume</span><span class="v">{{ state.latest_bar.bar.tick_volume }}</span></div>
-    <div class="row"><span class="k">data quality</span>
-      <span class="v {% if state.latest_bar.data_quality.value == 'GOOD' %}ok{% else %}warn{% endif %}">{{ state.latest_bar.data_quality.value }}</span></div>
-    <div class="row"><span class="k">anomalies</span><span class="v">{{ state.latest_bar.anomalies | join(", ") if state.latest_bar.anomalies else "none" }}</span></div>
-    {% else %}
-    <div class="muted">No {{ state.timeframe }} bars stored yet for {{ state.canonical_symbol }}.</div>
-    {% endif %}
-    <div class="row"><span class="k">total bars stored</span><span class="v">{{ state.bar_count }}</span></div>
-  </div>
-
-  <div class="panel">
-    <h2>HALT state</h2>
-    <div class="row"><span class="k">state</span>
-      <span class="v {% if state.halt.state.value == 'RUNNING' %}ok{% elif state.halt.state.value == 'HALTED' %}bad{% else %}warn{% endif %}">
-        {{ state.halt.state.value }}
-      </span></div>
-    <div class="row"><span class="k">reason codes</span><span class="v">{{ state.halt.reason_codes | join(", ") if state.halt.reason_codes else "—" }}</span></div>
-    <div class="row"><span class="k">tripped by</span><span class="v">{{ state.halt.tripped_by or "—" }}</span></div>
-    <div class="row"><span class="k">detail</span><span class="v">{{ state.halt.detail or "—" }}</span></div>
-    <div class="row"><span class="k">recorded (UTC)</span><span class="v">{{ state.halt.recorded_at_utc }}</span></div>
-  </div>
-
-  <div class="panel">
-    <h2>Latest decisions</h2>
-    <div class="row"><span class="k">Signal</span>
-      <span class="v">{{ state.latest_signal.summary if state.latest_signal else "none yet" }}</span></div>
-    <div class="row"><span class="k">RiskDecision</span>
-      <span class="v">{{ state.latest_risk_decision.summary if state.latest_risk_decision else "none yet" }}</span></div>
-    <div class="row"><span class="k">SupervisorDecision</span>
-      <span class="v">{{ state.latest_supervisor_decision.summary if state.latest_supervisor_decision else "none yet" }}</span></div>
-    <div class="row"><span class="k">uncalibrated supervisor checks</span>
-      <span class="v {% if state.uncalibrated_supervisor_checks %}warn{% endif %}">
-        {{ state.uncalibrated_supervisor_checks | join(", ") if state.uncalibrated_supervisor_checks else "none" }}
-      </span></div>
-  </div>
-
 </div>
 
-<footer>
-  Generated {{ state.generated_at_utc }} UTC · refreshes every 5s · read-only — no MetaTrader5
-  import, no credentials, no order path reachable from this page.
-</footer>
+<div class="wrap">
+
+{% if database_error %}
+
+  <div class="fatal">
+    <h1>DATABASE UNAVAILABLE</h1>
+    <p>The dashboard could not reach PostgreSQL. This is not "no data yet" —
+       the platform's own persisted state could not be read at all.</p>
+    <p class="muted">{{ database_error }}</p>
+  </div>
+
+{% else %}
+
+  <!-- Row 1: status cards -->
+  <div class="section">
+    <div class="grid-4">
+      <div class="card status-card">
+        <div class="label">MT5</div>
+        <div class="state {{ state.mt5_connectivity | state_class }}" id="mt5-state">
+          <span class="dot {{ state.mt5_connectivity | state_class }}" id="mt5-dot"></span>
+          <span id="mt5-text">{{ state.mt5_connectivity }}</span>
+        </div>
+        <div class="sub" id="mt5-sub">
+          {% if state.reader_health and state.reader_health.last_reconnect_at_utc %}
+            Last reconnect {{ state.reader_health.last_reconnect_at_utc }}
+          {% else %}
+            No reconnect recorded yet
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card status-card">
+        <div class="label">Data feed</div>
+        <div class="state {{ state.data_feed_state | state_class }}" id="feed-state">
+          <span class="dot {{ state.data_feed_state | state_class }}" id="feed-dot"></span>
+          <span id="feed-text">{{ state.data_feed_state }}</span>
+        </div>
+        <div class="sub" id="feed-sub">
+          {% if state.latest_tick %}
+            Last tick {{ (state.generated_at_utc - state.latest_tick.received_time_utc) | age }} ago
+          {% else %}
+            No ticks stored yet
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card status-card">
+        <div class="label">Safety</div>
+        <div class="state {{ state.halt.state.value | state_class }}" id="safety-state">
+          <span class="dot {{ state.halt.state.value | state_class }}" id="safety-dot"></span>
+          <span id="safety-text">{{ state.halt.state.value }}</span>
+        </div>
+        <div class="sub" id="safety-sub">{{ state.halt.detail or "—" }}</div>
+      </div>
+
+      <div class="card status-card">
+        <div class="label">Milestone</div>
+        <div class="state good">
+          <span class="dot good"></span>
+          {{ state.milestone_label }}
+        </div>
+        <div class="sub">Read-only — no order path exists</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 2: EUR/USD hero -->
+  <div class="section">
+    <div class="grid-hero">
+      <div class="card hero-price">
+        <div class="symbol">{{ state.canonical_symbol }}</div>
+        <div class="historical-banner {{ 'bad' if state.data_feed_state in ('DOWN', 'UNKNOWN') else '' }}"
+             id="hero-historical-banner"
+             {% if state.data_feed_state == 'HEALTHY' %}style="display:none;"{% endif %}>
+          <span>Historical data — no active live data session</span>
+          {% if state.latest_tick %}
+          <span class="detail">· last live tick <b id="hero-historical-age">{{ (state.generated_at_utc - state.latest_tick.received_time_utc) | age }}</b> ago</span>
+          {% endif %}
+        </div>
+        <div id="hero-body">
+          {% if state.latest_tick %}
+          <div class="quote">
+            <div class="bid"><div class="side-label">BID</div><div class="price" id="hero-bid">{{ state.latest_tick.bid }}</div></div>
+            <div class="ask"><div class="side-label">ASK</div><div class="price" id="hero-ask">{{ state.latest_tick.ask }}</div></div>
+          </div>
+          <div class="meta">
+            <div>Spread: <b id="hero-spread">{{ state.latest_tick.spread }}</b></div>
+            <div>Last tick: <b id="hero-tickage">{{ (state.generated_at_utc - state.latest_tick.received_time_utc) | age }} ago</b></div>
+            <div>Event time (UTC): <b id="hero-eventtime">{{ state.latest_tick.event_time_utc }}</b></div>
+            <div>Quality: <b class="{{ state.latest_tick.data_quality.value | state_class }}" id="hero-quality">{{ state.latest_tick.data_quality.value }}</b></div>
+          </div>
+          {% else %}
+          <div class="empty" style="height:120px;margin-top:10px;">No ticks stored yet</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="chart-head">
+          <div class="title" id="chart-title">{{ state.timeframe }} — last {{ state.recent_bars | length }} closed bars</div>
+          <div class="title muted">source: PostgreSQL (persisted, not live MT5)</div>
+        </div>
+        {% if state.recent_bars %}
+        <div class="chart-wrap">
+          <svg id="candles" viewBox="0 0 1000 260" preserveAspectRatio="none"></svg>
+          <div class="chart-overlay-label" id="chart-historical-overlay"
+               {% if state.data_feed_state == 'HEALTHY' %}style="display:none;"{% endif %}>
+            No active live data session
+          </div>
+        </div>
+        {% else %}
+        <div class="empty" id="chart-empty">No {{ state.timeframe }} bars stored yet</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 3: operating health -->
+  <div class="section">
+    <div class="section-title">Operating health</div>
+    <div class="grid-3">
+      <div class="card">
+        <div class="panel-title">Connection</div>
+        <div class="kv"><span class="k">Server</span><span class="v">{{ state.expected_broker_server }}</span></div>
+        <div class="kv"><span class="k">Reconnects</span><span class="v" id="conn-reconnects">{{ state.reader_health.reconnect_count if state.reader_health else "—" }}</span></div>
+        <div class="kv"><span class="k">Broker clock offset</span><span class="v na">NOT AVAILABLE</span></div>
+        <div class="kv"><span class="k">Last gateway error</span>
+          <span class="v {% if state.reader_health and state.reader_health.last_error %}bad{% endif %}" id="conn-error">
+            {{ state.reader_health.last_error if (state.reader_health and state.reader_health.last_error) else "none" }}
+          </span></div>
+      </div>
+
+      <div class="card">
+        <div class="panel-title">Data integrity</div>
+        <div class="kv"><span class="k">Tick quality</span>
+          <span class="v {{ (state.latest_tick.data_quality.value if state.latest_tick else '') | state_class }}" id="di-quality">
+            {{ state.latest_tick.data_quality.value if state.latest_tick else "—" }}
+          </span></div>
+        <div class="kv"><span class="k">Latest tick age</span>
+          <span class="v" id="di-tickage">{{ ((state.generated_at_utc - state.latest_tick.received_time_utc) | age ~ " ago") if state.latest_tick else "—" }}</span></div>
+        <div class="kv"><span class="k">{{ state.timeframe }} gaps (visible window)</span>
+          <span class="v {% if state.bar_gap_count > 0 %}warn{% else %}good{% endif %}">{{ state.bar_gap_count }}</span></div>
+        <div class="kv"><span class="k">Bar anomalies (visible window)</span>
+          <span class="v {% if state.bar_anomaly_count > 0 %}warn{% else %}good{% endif %}">{{ state.bar_anomaly_count }}</span></div>
+        <div class="kv"><span class="k">Ticks stored (total)</span><span class="v" id="di-tickcount">{{ state.tick_count }}</span></div>
+        <div class="kv"><span class="k">Bars stored (total)</span><span class="v" id="di-barcount">{{ state.bar_count }}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="panel-title">Account context</div>
+        <div class="kv"><span class="k">Server</span><span class="v">{{ state.expected_broker_server }}</span></div>
+        <div class="kv"><span class="k">Entity</span><span class="v na">NOT AVAILABLE</span></div>
+        <div class="kv"><span class="k">Margin mode</span><span class="v na">NOT AVAILABLE</span></div>
+        <div class="kv"><span class="k">Currency</span><span class="v">{{ state.expected_currency or "NOT AVAILABLE" }}</span></div>
+        <div class="kv"><span class="k">Leverage</span><span class="v">{{ ("1:" ~ state.expected_leverage) if state.expected_leverage else "NOT AVAILABLE" }}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 4: decision pipeline -->
+  <div class="section">
+    <div class="section-title">Decision pipeline — latest replay window</div>
+    <div class="pipeline">
+      <div class="pipeline-card">
+        <div class="stage-name">Trading agent</div>
+        {% if state.latest_signal %}
+        <div class="stage-verdict">{{ state.latest_signal.summary }}</div>
+        <div class="stage-detail">{{ state.latest_signal.occurred_at_utc }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO_TRADE</div>
+        <div class="stage-detail">no signal recorded</div>
+        {% endif %}
+      </div>
+
+      <div class="pipeline-card">
+        <div class="stage-name">Risk engine</div>
+        {% if state.latest_risk_decision %}
+        <div class="stage-verdict">{{ state.latest_risk_decision.summary }}</div>
+        <div class="stage-detail">{{ state.latest_risk_decision.reason_codes | join(", ") if state.latest_risk_decision.reason_codes else "—" }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO ACTION</div>
+        <div class="stage-detail">no decision recorded</div>
+        {% endif %}
+      </div>
+
+      <div class="pipeline-card">
+        <div class="stage-name">Supervisor</div>
+        {% if state.latest_supervisor_decision %}
+        <div class="stage-verdict">{{ state.latest_supervisor_decision.summary }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO ACTION</div>
+        {% endif %}
+        <div class="stage-detail">
+          uncalibrated: {{ state.uncalibrated_supervisor_checks | join(", ") if state.uncalibrated_supervisor_checks else "none" }}
+        </div>
+      </div>
+
+      <div class="pipeline-card">
+        <div class="stage-name">Execution</div>
+        <div class="stage-verdict bad">DISABLED</div>
+        <div class="stage-detail">no order path exists in this build</div>
+      </div>
+    </div>
+    <div class="pipeline-banner">
+      {{ state.decision_pipeline_label }}
+      {% if state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision %}
+        — {{ (state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision).environment | upper }}
+        via <code>{{ (state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision).source }}</code>,
+        not connected to the live MT5 feed shown above
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Row 5: activity timeline -->
+  <div class="section">
+    <div class="section-title">Recent journal activity</div>
+    <div class="card">
+      {% if state.recent_events %}
+      <table class="timeline">
+        <thead><tr><th>Time (UTC)</th><th>Component</th><th>Event</th><th>Result</th></tr></thead>
+        <tbody>
+        {% for event in state.recent_events %}
+          <tr>
+            <td>{{ event.occurred_at_utc }}</td>
+            <td>{{ event.component }}</td>
+            <td>{{ event.event_type }}</td>
+            <td>{{ event.summary }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No recent journal events</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <footer>
+    Generated <span id="footer-time">{{ state.generated_at_utc }}</span> UTC · refreshes every 5s (price/health only) · read-only —
+    no MetaTrader5 import, no credentials, no order path reachable from this page.
+  </footer>
+
+{% endif %}
+</div>
+
+{% if state_json %}
+<script id="state-data" type="application/json">{{ state_json | tojson }}</script>
+<script>
+(function () {
+  var ns = "http://www.w3.org/2000/svg";
+
+  function setText(id, value) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function setClass(id, base, cls) {
+    var el = document.getElementById(id);
+    if (el) el.className = base + " " + cls;
+  }
+
+  // Mirrors app.py's state_class() — kept intentionally tiny and duplicated
+  // rather than fetched, so a refresh never depends on a second request.
+  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1 };
+  var WARN = { STALE: 1, UNCALIBRATED: 1, DEGRADED: 1 };
+  function stateClass(value) {
+    var v = (value || "").toUpperCase();
+    if (GOOD[v]) return "good";
+    if (WARN[v]) return "warn";
+    return "bad"; // DISCONNECTED, HALTED, UNKNOWN, MISMATCHED, DOWN, UNHEALTHY — and any surprise value
+  }
+
+  // Mirrors app.py's format_age() so a polled refresh reads the same as the
+  // server-rendered page — "16h 48m", never a raw minute count past an hour.
+  function formatAge(seconds) {
+    seconds = Math.max(0, seconds);
+    if (seconds < 60) return seconds.toFixed(1) + "s";
+    var minutes = Math.floor(seconds / 60);
+    var secs = Math.floor(seconds % 60);
+    if (minutes < 60) return minutes + "m " + secs + "s";
+    var hours = Math.floor(minutes / 60);
+    var mins = minutes % 60;
+    return hours + "h " + mins + "m";
+  }
+
+  function drawCandles(svg, bars) {
+    svg.innerHTML = "";
+    if (!bars || bars.length === 0) return;
+    var W = 1000, H = 260, padTop = 10, padBottom = 10;
+    var highs = bars.map(function (b) { return parseFloat(b.high); });
+    var lows = bars.map(function (b) { return parseFloat(b.low); });
+    var max = Math.max.apply(null, highs);
+    var min = Math.min.apply(null, lows);
+    var range = (max - min) || 1;
+    var slot = W / bars.length;
+    var bodyWidth = Math.max(2, slot * 0.6);
+
+    function y(price) { return padTop + (max - price) / range * (H - padTop - padBottom); }
+
+    bars.forEach(function (bar, i) {
+      var x = i * slot + slot / 2;
+      var open = parseFloat(bar.open), close = parseFloat(bar.close);
+      var high = parseFloat(bar.high), low = parseFloat(bar.low);
+      var color = close >= open ? "#34d399" : "#fb5468";
+
+      var wick = document.createElementNS(ns, "line");
+      wick.setAttribute("x1", x); wick.setAttribute("x2", x);
+      wick.setAttribute("y1", y(high)); wick.setAttribute("y2", y(low));
+      wick.setAttribute("stroke", color); wick.setAttribute("stroke-width", "1");
+      svg.appendChild(wick);
+
+      var bodyTop = y(Math.max(open, close));
+      var bodyHeight = Math.max(1, Math.abs(y(open) - y(close)));
+      var rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", x - bodyWidth / 2);
+      rect.setAttribute("y", bodyTop);
+      rect.setAttribute("width", bodyWidth);
+      rect.setAttribute("height", bodyHeight);
+      rect.setAttribute("fill", color);
+      svg.appendChild(rect);
+    });
+  }
+
+  function applyState(state) {
+    setClass("mt5-state", "state", stateClass(state.mt5_connectivity));
+    setClass("mt5-dot", "dot", stateClass(state.mt5_connectivity));
+    setText("mt5-text", state.mt5_connectivity);
+
+    setClass("feed-state", "state", stateClass(state.data_feed_state));
+    setClass("feed-dot", "dot", stateClass(state.data_feed_state));
+    setText("feed-text", state.data_feed_state);
+
+    var haltState = state.halt ? state.halt.state : "UNKNOWN";
+    setClass("safety-state", "state", stateClass(haltState));
+    setClass("safety-dot", "dot", stateClass(haltState));
+    setText("safety-text", haltState);
+    setText("safety-sub", (state.halt && state.halt.detail) || "—");
+
+    if (state.latest_tick) {
+      setText("hero-bid", state.latest_tick.bid);
+      setText("hero-ask", state.latest_tick.ask);
+      setText("hero-spread", state.latest_tick.spread);
+      setText("hero-eventtime", state.latest_tick.event_time_utc);
+      setText("hero-quality", state.latest_tick.data_quality);
+      setClass("hero-quality", "", stateClass(state.latest_tick.data_quality));
+      setText("di-quality", state.latest_tick.data_quality);
+      setClass("di-quality", "v", stateClass(state.latest_tick.data_quality));
+
+      var ageMs = Date.parse(state.generated_at_utc) - Date.parse(state.latest_tick.event_time_utc);
+      var ageS = Math.max(0, ageMs / 1000);
+      var ageText = formatAge(ageS) + " ago";
+      setText("hero-tickage", ageText);
+      setText("di-tickage", ageText);
+      setText("hero-historical-age", formatAge(ageS));
+      var feedSub = document.getElementById("feed-sub");
+      if (feedSub) feedSub.textContent = "Last tick " + ageText;
+    }
+
+    // F-046: historical/offline treatment tracks data_feed_state on every
+    // poll, not only the first render — a session that goes stale between
+    // refreshes must not keep showing a "live" chart/hero.
+    var isLive = state.data_feed_state === "HEALTHY";
+    var isUnsafe = state.data_feed_state === "DOWN" || state.data_feed_state === "UNKNOWN";
+    var heroBanner = document.getElementById("hero-historical-banner");
+    if (heroBanner) {
+      heroBanner.style.display = isLive ? "none" : "flex";
+      heroBanner.className = "historical-banner" + (isUnsafe ? " bad" : "");
+    }
+    var chartOverlay = document.getElementById("chart-historical-overlay");
+    if (chartOverlay) chartOverlay.style.display = isLive ? "none" : "flex";
+
+    setText("di-tickcount", state.tick_count);
+    setText("di-barcount", state.bar_count);
+    setText("conn-reconnects", state.reader_health ? state.reader_health.reconnect_count : "—");
+    var connError = document.getElementById("conn-error");
+    if (connError) {
+      var err = (state.reader_health && state.reader_health.last_error) || "none";
+      connError.textContent = err;
+      connError.className = "v" + (err !== "none" ? " bad" : "");
+    }
+
+    setText("footer-time", state.generated_at_utc);
+
+    var svg = document.getElementById("candles");
+    if (svg && state.recent_bars) drawCandles(svg, state.recent_bars);
+  }
+
+  function bootstrap() {
+    var el = document.getElementById("state-data");
+    if (!el) return;
+    try { return JSON.parse(el.textContent); } catch (e) { return null; }
+  }
+
+  var initial = bootstrap();
+  var candlesEl = document.getElementById("candles");
+  if (initial && candlesEl) drawCandles(candlesEl, initial.recent_bars);
+
+  function poll() {
+    fetch("/api/state")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { if (data) applyState(data); })
+      .catch(function () { /* a failed poll keeps showing the last-known state, not an error banner */ });
+  }
+
+  setInterval(poll, 5000);
+})();
+</script>
+{% endif %}
 
 </body>
 </html>

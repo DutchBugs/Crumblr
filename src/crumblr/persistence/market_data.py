@@ -306,6 +306,29 @@ class MarketDataStore:
             rows = connection.execute(statement).mappings().all()
         return tuple(MarketBar.model_validate(row["payload"]) for row in rows)
 
+    def recent_bars(
+        self, *, canonical_symbol: str, timeframe: str, limit: int
+    ) -> tuple[MarketBar, ...]:
+        """The most recent `limit` bars, oldest first — for charting.
+
+        `read_bars(limit=N)` gives the *oldest* N (it orders ascending for
+        replay). This asks the database for the newest N by ordering
+        descending, then reverses in Python so a chart can iterate the
+        result left-to-right without its own bookkeeping.
+        """
+        statement = (
+            select(market_bars.c.payload)
+            .where(
+                market_bars.c.canonical_symbol == canonical_symbol,
+                market_bars.c.timeframe == timeframe,
+            )
+            .order_by(desc(market_bars.c.open_time_utc), desc(market_bars.c.sequence))
+            .limit(limit)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).scalars().all()
+        return tuple(reversed([MarketBar.model_validate(row) for row in rows]))
+
     def latest_bar(self, *, canonical_symbol: str, timeframe: str) -> MarketBar | None:
         """The most recent bar, or `None` — see `latest_tick` for why this
 
