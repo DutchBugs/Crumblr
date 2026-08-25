@@ -134,7 +134,9 @@ itself requires, and what is local project policy on top of it.
 
 Recorded separately so the specification's own gates stay legible.
 
-- [ ] domain contracts reviewed by a human — implemented and tested; awaiting review
+- [ ] domain contracts reviewed by a human — implemented and tested;
+      package assembled 2026-08-25 (`review/domain_contracts.md`); awaiting
+      the human review itself
 - [x] durable safety state and fail-closed startup — added after review 1.0 F-003
 - [x] status semantics separate maturity from qualification — review 1.0 F-001
 
@@ -913,10 +915,21 @@ Next engineering steps once unblocked:
 **O-006 (review 1.15 §3/§12): the critical path from here to one gated DEMO**
 **canary order — CI/M0 first, nothing else jumps the queue:**
 
-- [ ] Phase 1 — close M0 administratively: run CI on a runner and record the
-      result; provide the domain-contract package for reviewer/human
-      approval (review 1.12 §9, repeated by review 1.15 §11: "M0 has been
-      open long enough").
+- [x] ~~Phase 1a — provide the domain-contract package for reviewer/human
+      approval~~ — done 2026-08-25: `review/domain_contracts.md` covers all
+      twelve named contracts against the review's own checklist
+      (immutability, extra-field rejection, Decimal/time semantics,
+      ownership boundaries, execution permissions, risk/supervisor
+      separation, agent-controlled fields). Awaiting the human review this
+      package exists to support — a document existing is not the same
+      claim as a document being approved
+- [ ] Phase 1b — run CI on a runner and record the result (review 1.12 §9,
+      repeated through review 1.16 §11: "no longer allowed to drift"). Two
+      commits have pushed to `main` since the workflow was written
+      (`2ce40d5`, `f67f341`), which should have triggered it automatically,
+      but this session has no `gh` CLI or other way to read the Actions
+      tab — the result needs a human (or a session with that access) to
+      check and record
 - [x] ~~Phase 2a — broker truth: F-047 durable `broker_account_snapshots` /
       `broker_position_snapshots` / `broker_pending_order_snapshots`~~ — done
       2026-08-25. Balance **and** equity (plus profit), all `Decimal`;
@@ -4263,6 +4276,71 @@ reconciliation per review 1.16's own order.
 - Run CI on a runner and record the result; provide the domain-contract
   package for reviewer/human approval to close M0 (Phase 1, unchanged).
 - Build F-048's live/shadow decision orchestrator (review 1.16 §9).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-fifth entry) — domain-contract package assembled (Phase 1a); CI status needs a human check
+
+**Verdict: `review/domain_contracts.md` now exists, covering all twelve**
+**contracts review 1.14 §13 named against its own checklist. CI's actual**
+**result could not be checked this entry — no `gh` CLI or Actions access.**
+
+Continuing review 1.16's required order after F-052/F-050/reconciliation
+(twenty-fourth entry), per the user's direction this session ("focus on
+CI/domain contracts").
+
+**Domain-contract package.** `review/domain_contracts.md` documents, for
+each of the twelve contracts (`MarketSnapshot`, `Bar`, `InstrumentSpec`,
+`TradeIntent`, `RiskDecision`, `SupervisorDecision`, `ApprovedOrder`,
+`ExecutionResult`, `AccountState`, `PositionState`, `Incident`,
+`DecisionCapsule`): the cross-cutting guarantees every `Contract` subclass
+gets structurally (frozen, extra-field-forbidding, exact-Decimal, UTC-only —
+§1); which package constructs which contract and which are still unbuilt
+(`ApprovedOrder`/`ExecutionResult`, correctly, since no execution path
+exists — §2); exactly which `TradeIntent` fields are agent-controlled and
+which are structurally absent (lot size, final approval, order submission,
+execution/credential access, HALT/risk-policy state — §3, matching review
+1.15 §8's boundary list field-for-field); why nothing today can cause an
+order to be sent (§4); how `RiskDecision`/`SupervisorDecision` stay
+independently constructed with neither able to alter the other's verdict,
+and how reconciliation status is read, not set, by the Supervisor (§5). Read
+directly from the current `domain/models.py`, not written from memory or
+build.md's description of what it should contain — line references are
+cited per contract so a reviewer can check the claim against the actual
+code rather than trusting the summary.
+
+**CI.** The workflow (`.github/workflows/ci.yml`) triggers on push to
+`main` and looks correct: ruff/mypy/pytest against a real PostgreSQL
+service on Linux, a separate Windows job for the gateway's fake-terminal
+tests (MT5 only ships Windows wheels), and a `gitleaks` secret scan. Two
+commits have pushed to `main` this session (`2ce40d5`, `f67f341`), which
+should have triggered it automatically — but this environment has no `gh`
+CLI, no cached GitHub API token usable for a read-only status check, and no
+other way to read the Actions tab. Explicitly not claiming CI passed or
+ran; the workflow being well-formed is not the same claim as it having
+executed successfully, and review 1.14 §13's own instruction not to mark
+something approved merely because the supporting artifact exists applies
+here too.
+
+**Evidence.** No code changed this entry — `ruff`/`mypy`/`pytest` status is
+unchanged from the twenty-fourth entry (820 passed, 3 skipped, 114 mypy
+source files).
+
+**Problems found.** None — a documentation entry.
+
+**Decision.** Domain-contract package (Phase 1a) complete and ready for
+human review. CI (Phase 1b) cannot be confirmed from this session; recorded
+honestly as blocked on tooling access rather than silently left unmentioned.
+
+**Next**
+
+- A human (or a session with `gh`/GitHub Actions access) checks the Actions
+  tab for both recent runs and records the result here.
+- The domain-contract package awaits actual human review — its existence
+  does not close M0 on its own.
+- F-048 (live/shadow decision orchestrator) is the next code-shaped piece
+  of the critical path once M0 closes, per review 1.16 §9.
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---
