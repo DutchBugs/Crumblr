@@ -43,7 +43,9 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
+from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
 from crumblr.config import AccountGuardConfig
+from crumblr.domain.enums import Environment, SnapshotCompleteness
 from crumblr.domain.models import InstrumentSpec, MarketBar, MarketTick
 from crumblr.domain.timeutils import UtcDatetime, age_ms, utc_now
 from crumblr.mt5_gateway.client import (
@@ -79,6 +81,16 @@ class MarketDataSink(Protocol):
     def record_bars(self, bars: Sequence[MarketBar]) -> int: ...
 
 
+class BrokerStateSink(Protocol):
+    """The slice of `persistence.broker_state.BrokerStateStore` this reader
+
+    uses — see `MarketDataSink` above for why this is a narrow protocol
+    rather than the concrete store.
+    """
+
+    def record(self, observation: BrokerStateObservation) -> None: ...
+
+
 DEFAULT_TICK_LOOKBACK = timedelta(minutes=5)
 """How far back the very first tick read reaches. Every read after that uses
 the timestamp of the newest tick actually stored as its cursor."""
@@ -90,6 +102,20 @@ Deliberately larger than one: `MarketDataStore.record_bars` is idempotent on
 `bar_id` and raises on a genuine conflict, so re-fetching a small trailing
 window is how a bar that was still forming on the last poll gets its final
 values without needing separate "closed" vs. "forming" logic here.
+"""
+
+DEFAULT_BROKER_STATE_INTERVAL = timedelta(seconds=60)
+"""How often broker state (F-047) is captured between reconnects.
+
+Review 1.15 §5 lists "connect, reconnect, each live decision window,
+immediately before/after order submission, after a reconciliation mismatch"
+as capture points — none of the decision/execution ones exist yet (F-048,
+M5), so today this reader only satisfies "connect/reconnect" (every
+`_reconnect()` call) and the review's explicit allowance for "a periodic
+observation cycle" in between. Decoupled from `poll_interval` (market-data
+cadence) rather than captured every poll: broker state changes far less
+often than ticks do, and a snapshot every 5 seconds would mostly record
+"nothing changed" rows for no benefit reconciliation needs.
 """
 
 
@@ -147,6 +173,63 @@ class ReaderHealth:
         }
 
 
+@dataclass(frozen=True)
+class BrokerStateHealth:
+    """Freshness of the durably captured broker account/position book.
+
+    Review 1.16 F-050: kept as its own type rather than folded into
+    `ReaderHealth`/`ReaderStatus`. Fresh EUR/USD ticks and a stale, missing
+    or incomplete account snapshot are different facts — a `ReaderStatus`
+    of `HEALTHY` says nothing about whether the platform actually knows its
+    own balance or position book right now, and a live decision or an
+    eventual order must be able to see both independently rather than one
+    hiding behind the other.
+    """
+
+    last_snapshot_at_utc: UtcDatetime | None = None
+    position_set_state: SnapshotCompleteness | None = None
+    pending_order_set_state: SnapshotCompleteness | None = None
+    last_error: str | None = None
+
+    def age(self, *, now: UtcDatetime) -> timedelta | None:
+        """How long ago the last successful capture happened, or `None` if
+
+        none ever succeeded."""
+        if self.last_snapshot_at_utc is None:
+            return None
+        return now - self.last_snapshot_at_utc
+
+    def is_usable(self, *, now: UtcDatetime, max_age: timedelta) -> bool:
+        """Review 1.16 F-050 §3's rule, as a predicate: a broker-state
+
+        observation may inform a real decision only if it exists, is no
+        older than `max_age`, and both collections are confirmed
+        `COMPLETE` — never partially trusted. Reconciliation (once built)
+        maps a `False` here directly to `UNKNOWN`, per the same section.
+        """
+        age = self.age(now=now)
+        if age is None or age > max_age:
+            return False
+        return (
+            self.position_set_state is SnapshotCompleteness.COMPLETE
+            and self.pending_order_set_state is SnapshotCompleteness.COMPLETE
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "last_snapshot_at_utc": (
+                self.last_snapshot_at_utc.isoformat() if self.last_snapshot_at_utc else None
+            ),
+            "position_set_state": (
+                self.position_set_state.value if self.position_set_state else None
+            ),
+            "pending_order_set_state": (
+                self.pending_order_set_state.value if self.pending_order_set_state else None
+            ),
+            "last_error": self.last_error,
+        }
+
+
 class LiveReader:
     """Reads real ticks and M5 bars from MT5, forever, until told to stop.
 
@@ -174,6 +257,9 @@ class LiveReader:
         stale_after: timedelta = timedelta(seconds=60),
         reconnect_backoff: timedelta = timedelta(seconds=5),
         max_reconnect_backoff: timedelta = timedelta(minutes=5),
+        environment: Environment = Environment.PAPER,
+        broker_state_store: BrokerStateSink | None = None,
+        broker_state_interval: timedelta = DEFAULT_BROKER_STATE_INTERVAL,
         clock: Callable[[], UtcDatetime] = utc_now,
         sleep: Callable[[float], None] = _time.sleep,
     ) -> None:
@@ -192,6 +278,9 @@ class LiveReader:
         self._stale_after = stale_after
         self._reconnect_backoff = reconnect_backoff
         self._max_reconnect_backoff = max_reconnect_backoff
+        self._environment = environment
+        self._broker_state_store = broker_state_store
+        self._broker_state_interval = broker_state_interval
         self._clock = clock
         self._sleep = sleep
 
@@ -199,11 +288,18 @@ class LiveReader:
         self._spec: InstrumentSpec | None = None
         self._expected_margin_mode: int | None = None
         self._last_tick_at: UtcDatetime | None = None
+        self._last_broker_state_at: UtcDatetime | None = None
         self._health = ReaderHealth(status=ReaderStatus.DISCONNECTED, connected=False)
+        self._broker_state_health = BrokerStateHealth()
 
     @property
     def health(self) -> ReaderHealth:
         return self._health
+
+    @property
+    def broker_state_health(self) -> BrokerStateHealth:
+        """F-050: separate from `health` — see `BrokerStateHealth`."""
+        return self._broker_state_health
 
     # ------------------------------------------------------------------ #
     # The loop
@@ -415,6 +511,7 @@ class LiveReader:
             spec_version=spec.spec_version,
             reconnect_count=self._health.reconnect_count,
         )
+        self._capture_broker_state(gateway)
         return self._health
 
     def _read_margin_mode(self) -> int | None:
@@ -487,6 +584,59 @@ class LiveReader:
             last_tick_at_utc=last_tick_at,
             last_bar_at_utc=last_bar_at,
             consecutive_failures=0,
+            last_error=None,
+        )
+
+        broker_state_interval_ms = self._broker_state_interval.total_seconds() * 1000
+        if (
+            self._last_broker_state_at is None
+            or age_ms(self._last_broker_state_at, now=now) >= broker_state_interval_ms
+        ):
+            self._capture_broker_state(gateway)
+
+    # ------------------------------------------------------------------ #
+    # Broker state (F-047)
+    # ------------------------------------------------------------------ #
+
+    def _capture_broker_state(self, gateway: ReadOnlyMt5Gateway) -> None:
+        """Capture and persist one broker-state observation, best-effort.
+
+        Never lets a broker-state failure affect `self._health` — ticks/bars
+        are the reader's primary claim (`ReaderStatus`), and a dashboard
+        panel or reconciliation input that is temporarily unavailable is a
+        different, smaller problem than the market-data feed being down.
+        `self._broker_state_health` (F-050) tracks this outcome separately:
+        a failure updates its `last_error` but leaves the last successful
+        snapshot's fields alone, so `BrokerStateHealth.is_usable()` degrades
+        through the passage of time (the snapshot ages past `max_age`), not
+        through this method erasing what it last knew. Skipped entirely
+        when no store was configured, so existing callers that never opted
+        into F-047 see no behavioural change.
+        """
+        if self._broker_state_store is None:
+            return
+        try:
+            observation = capture_broker_state(
+                gateway,
+                environment=self._environment,
+                canonical_symbol=self._canonical_symbol,
+                clock=self._clock,
+            )
+            self._broker_state_store.record(observation)
+        except (Mt5CallFailedError, Mt5UnavailableError, AccountGuardError) as error:
+            # AccountGuardError here means the account changed state between
+            # this poll and the last full `_reconnect()` — worth logging, but
+            # `_reconnect()` is what re-verifies and (if warranted) marks the
+            # reader UNHEALTHY; broker-state capture is not the place to
+            # duplicate that decision, only to skip cleanly when it applies.
+            _log.warning("live_reader.broker_state_capture_failed", error=str(error))
+            self._broker_state_health = replace(self._broker_state_health, last_error=str(error))
+            return
+        self._last_broker_state_at = self._clock()
+        self._broker_state_health = BrokerStateHealth(
+            last_snapshot_at_utc=observation.account.observed_at_utc,
+            position_set_state=observation.account.position_set_state,
+            pending_order_set_state=observation.account.pending_order_set_state,
             last_error=None,
         )
 

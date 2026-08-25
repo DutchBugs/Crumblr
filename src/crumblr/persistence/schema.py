@@ -18,10 +18,12 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Date,
     DateTime,
+    ForeignKey,
     Identity,
     Index,
     Integer,
@@ -253,6 +255,116 @@ instrument_specs = Table(
 """Broker symbol specifications, keyed by content hash (build.md §7)."""
 
 
+broker_account_snapshots = Table(
+    "broker_account_snapshots",
+    metadata,
+    Column("snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    _utc_column("observed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("environment", String(16), nullable=False),
+    Column("server", String(128), nullable=False),
+    # Never the raw MT5 login (review 1.15 F-047) — a non-reversible
+    # fingerprint, the same one AccountState.login_hash computes.
+    Column("account_ref", String(32), nullable=False),
+    Column("currency", String(8), nullable=False),
+    Column("leverage", Integer, nullable=False),
+    Column("margin_mode", String(32), nullable=True),
+    Column("balance", Numeric, nullable=False),
+    Column("equity", Numeric, nullable=False),
+    Column("profit", Numeric, nullable=False),
+    Column("margin", Numeric, nullable=False),
+    Column("margin_free", Numeric, nullable=False),
+    Column("margin_level", Numeric, nullable=True),
+    Column("account_trade_allowed", Boolean, nullable=False),
+    Column("terminal_trade_allowed", Boolean, nullable=True),
+    # F-047 "complete-set semantics": COMPLETE/FAILED/UNKNOWN, never a bare
+    # row count that would make "0 positions" indistinguishable from "the
+    # positions query failed".
+    Column("position_set_state", String(16), nullable=False),
+    Column("pending_order_set_state", String(16), nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_broker_account_snapshots_ref_time", "account_ref", "observed_at_utc"),
+)
+"""One row per broker-state observation (review 1.15 F-047). The account
+
+state is never held only in memory again: every read `LiveReader` takes at
+connect, reconnect and its periodic broker-state interval is durably
+recorded here, with the positions/pending orders observed in the same
+capture tied to it by `snapshot_id`."""
+
+
+broker_position_snapshots = Table(
+    "broker_position_snapshots",
+    metadata,
+    # Content-derived from (snapshot_id, ticket), the same identity
+    # discipline as every other content-addressed row in this schema —
+    # re-recording the same capture is a no-op rather than a duplicate.
+    Column("row_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "snapshot_id",
+        UUID(as_uuid=True),
+        ForeignKey("broker_account_snapshots.snapshot_id"),
+        nullable=False,
+    ),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    _utc_column("observed_at_utc", nullable=False),
+    Column("ticket", BigInteger, nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    Column("broker_symbol", String(64), nullable=False),
+    Column("side", String(8), nullable=False),
+    Column("volume", Numeric, nullable=False),
+    _utc_column("opened_at_utc", nullable=False),
+    Column("open_price", Numeric, nullable=False),
+    Column("current_price", Numeric, nullable=True),
+    Column("stop_loss_price", Numeric, nullable=True),
+    Column("take_profit_price", Numeric, nullable=True),
+    Column("profit", Numeric, nullable=False),
+    Column("swap", Numeric, nullable=False),
+    Column("magic", BigInteger, nullable=True),
+    Column("comment", Text, nullable=True),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_broker_position_snapshots_snapshot", "snapshot_id"),
+    Index("ix_broker_position_snapshots_symbol_time", "canonical_symbol", "observed_at_utc"),
+)
+"""Every open position observed in a broker-state snapshot. A row here only
+
+ever exists when its parent's `position_set_state` is `COMPLETE` — a
+`FAILED`/`UNKNOWN` snapshot with no child rows means "unknown", never
+"confirmed flat"."""
+
+
+broker_pending_order_snapshots = Table(
+    "broker_pending_order_snapshots",
+    metadata,
+    Column("row_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "snapshot_id",
+        UUID(as_uuid=True),
+        ForeignKey("broker_account_snapshots.snapshot_id"),
+        nullable=False,
+    ),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    _utc_column("observed_at_utc", nullable=False),
+    Column("order_id", BigInteger, nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    Column("broker_symbol", String(64), nullable=False),
+    Column("order_type", String(32), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("volume", Numeric, nullable=False),
+    Column("price", Numeric, nullable=False),
+    Column("stop_loss_price", Numeric, nullable=True),
+    Column("take_profit_price", Numeric, nullable=True),
+    _utc_column("expires_at_utc", nullable=True),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_broker_pending_order_snapshots_snapshot", "snapshot_id"),
+)
+"""Every pending order observed in a broker-state snapshot (review 1.15
+
+F-047 §5): a flat position book can still carry future exposure through a
+pending order, so that fact must not be invisible to reconciliation."""
+
+
 APPEND_ONLY_TABLES: tuple[str, ...] = (
     "events",
     "decision_capsules",
@@ -262,6 +374,9 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "market_bars",
     "config_versions",
     "instrument_specs",
+    "broker_account_snapshots",
+    "broker_position_snapshots",
+    "broker_pending_order_snapshots",
 )
 """Tables the application role may only insert into and read from."""
 
@@ -284,6 +399,9 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "risk_session_states",
             "market_ticks",
             "market_bars",
+            "broker_account_snapshots",
+            "broker_position_snapshots",
+            "broker_pending_order_snapshots",
         )
     ]
     return tuple(statements)

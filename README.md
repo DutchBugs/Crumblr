@@ -212,7 +212,13 @@ EUR/USD ticks and M5 bars, reconnecting and fully revalidating the account,
 symbol, instrument spec and broker-clock offset on every reconnect, and
 persists everything to PostgreSQL. Real-terminal-validated 2026-08-24 (M1
 PASSED, `review/feedback.1.12.md`) — a clean 30-minute run and two deliberate
-terminal interruptions, both recovered automatically.
+terminal interruptions, both recovered automatically. Since 2026-08-25
+(review 1.15 F-047) it also durably captures the broker's own account
+balance/equity/margin and open positions/pending orders — on every
+reconnect and then every `--broker-state-interval` seconds (default 60) —
+rather than holding that state only in memory; see `review/DEVIATIONS.md`
+D-044 for which capture triggers this satisfies today and which need the
+live decision pipeline (F-048) or reconciliation to exist first.
 
 ```powershell
 $env:CRUMBLR_DATABASE_URL = "postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_soak"

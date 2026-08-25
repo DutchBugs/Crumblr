@@ -21,6 +21,7 @@ Two rules from owner decision O-001 shape the rest:
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -33,12 +34,16 @@ from crumblr.domain.models import (
     Bar,
     InstrumentSpec,
     MarketTick,
+    PendingOrderState,
     PositionState,
 )
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.pipeline import BarBuildResult, interval_for, normalize_bars
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module, mask_login
 from crumblr.mt5_gateway.enums import (
+    ACCOUNT_MARGIN_MODES,
+    ORDER_STATES,
+    ORDER_TYPES,
     SYMBOL_TRADE_MODES,
     decode_enum,
     decode_filling_modes,
@@ -99,6 +104,14 @@ class SymbolNotFoundError(RuntimeError):
 
 class ClockOffsetUnavailableError(RuntimeError):
     """The broker-clock offset could not be established from a trustworthy tick."""
+
+
+@dataclass(frozen=True)
+class AccountExtras:
+    """`account_info()` fields not carried by `AccountState`. See `account_extras()`."""
+
+    profit: Decimal
+    margin_mode: str | None
 
 
 def _to_decimal(value: object, field: str) -> Decimal:
@@ -187,7 +200,36 @@ class ReadOnlyMt5Gateway:
     def account(self) -> AccountState:
         """Read the account, then verify it is the expected one."""
         info = self._client.checked("account_info", self._client.module.account_info())
-        state = AccountState(
+        state = self._account_state_from(info)
+        self._verify_account(state)
+        return state
+
+    def account_with_extras(self) -> tuple[AccountState, AccountExtras]:
+        """`account()` plus the fields it does not carry, from one read.
+
+        Review 1.16 F-052: `application/broker_state.py`'s durable snapshot
+        originally called `account()` and a separate `account_extras()` in
+        sequence — two `account_info()` reads that could straddle a real
+        change at the broker (a fill landing between them), producing one
+        stored row that combined `balance`/`equity` from one moment with
+        `profit`/`margin_mode` from another — a snapshot that never existed
+        as such at the broker. One `account_info()` call now derives both
+        halves from the same raw observation, so what gets persisted is
+        guaranteed internally consistent.
+
+        `profit`/`margin_mode` stay off `AccountState` itself deliberately
+        (review/DEVIATIONS.md): that contract is what the account guard and
+        risk engine act on, and those fields are not (yet) among what they
+        need. Widening it would touch every existing caller and test for a
+        need only the snapshot path has.
+        """
+        info = self._client.checked("account_info", self._client.module.account_info())
+        state = self._account_state_from(info)
+        self._verify_account(state)
+        return state, self._account_extras_from(info)
+
+    def _account_state_from(self, info: Any) -> AccountState:
+        return AccountState(
             login=int(info.login),
             server=str(info.server),
             currency=str(info.currency),
@@ -207,8 +249,16 @@ class ReadOnlyMt5Gateway:
             leverage=int(info.leverage),
             observed_at_utc=self._clock(),
         )
-        self._verify_account(state)
-        return state
+
+    def _account_extras_from(self, info: Any) -> AccountExtras:
+        margin_mode = getattr(info, "margin_mode", None)
+        decoded_margin_mode = (
+            decode_enum(int(margin_mode), ACCOUNT_MARGIN_MODES) if margin_mode is not None else None
+        )
+        return AccountExtras(
+            profit=_to_decimal(info.profit, "profit"),
+            margin_mode=decoded_margin_mode,
+        )
 
     def _verify_account(self, state: AccountState) -> None:
         """Refuse an account that does not match configuration.
@@ -404,6 +454,11 @@ class ReadOnlyMt5Gateway:
                 side=(Side.BUY if int(position.type) == MT5_POSITION_TYPE_BUY else Side.SELL),
                 volume=_to_decimal(position.volume, "volume"),
                 open_price=_to_decimal(position.price_open, "price_open"),
+                current_price=(
+                    _to_decimal(position.price_current, "price_current")
+                    if getattr(position, "price_current", None)
+                    else None
+                ),
                 stop_loss_price=(_to_decimal(position.sl, "sl") if position.sl else None),
                 take_profit_price=(_to_decimal(position.tp, "tp") if position.tp else None),
                 opened_at_utc=self._to_utc(int(position.time)),
@@ -413,6 +468,39 @@ class ReadOnlyMt5Gateway:
                 observed_at_utc=observed,
             )
             for position in raw
+        )
+
+    def pending_orders(self) -> tuple[PendingOrderState, ...]:
+        """Read pending (not-yet-filled) orders — the same fail-vs-empty
+
+        distinction as `positions()`, for the same reason: `orders_get`
+        returning `None` is ambiguous between "no pending orders" and "the
+        call failed", and only `last_error()` tells them apart.
+        """
+        raw = self._client.module.orders_get()
+        if raw is None:
+            code, message = self._client.module.last_error()
+            if code != 1:
+                raise Mt5CallFailedError("orders_get", code, message)
+            return ()
+
+        observed = self._clock()
+        return tuple(
+            PendingOrderState(
+                order_id=int(order.ticket),
+                broker_symbol=str(order.symbol),
+                order_type=decode_enum(int(order.type), ORDER_TYPES),
+                state=decode_enum(int(order.state), ORDER_STATES),
+                volume=_to_decimal(order.volume_current, "volume_current"),
+                price=_to_decimal(order.price_open, "price_open"),
+                stop_loss_price=(_to_decimal(order.sl, "sl") if order.sl else None),
+                take_profit_price=(_to_decimal(order.tp, "tp") if order.tp else None),
+                expires_at_utc=(
+                    self._to_utc(int(order.time_expiration)) if order.time_expiration else None
+                ),
+                observed_at_utc=observed,
+            )
+            for order in raw
         )
 
     def ticks(

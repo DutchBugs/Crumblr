@@ -21,12 +21,16 @@ from crumblr.domain.enums import (
     RiskVerdict,
     SessionState,
     Side,
+    SnapshotCompleteness,
     SupervisorVerdict,
 )
 from crumblr.domain.models import (
     AccountState,
     ApprovedOrder,
     Bar,
+    BrokerAccountSnapshot,
+    BrokerPendingOrderSnapshot,
+    BrokerPositionSnapshot,
     Incident,
     InstrumentSpec,
     MarketSnapshot,
@@ -207,6 +211,78 @@ def make_account_state(**overrides: Any) -> AccountState:
     }
     fields.update(overrides)
     return AccountState(**fields)
+
+
+def make_broker_account_snapshot(**overrides: Any) -> BrokerAccountSnapshot:
+    fields: dict[str, Any] = {
+        "snapshot_id": uuid4(),
+        "observed_at_utc": FIXED_NOW,
+        "recorded_at_utc": FIXED_NOW,
+        "environment": Environment.PAPER,
+        "server": "DemoBroker-Demo",
+        "account_ref": "abc123def4567890",
+        "currency": "EUR",
+        "leverage": 30,
+        "margin_mode": "RETAIL_HEDGING",
+        "balance": Decimal("10000"),
+        "equity": Decimal("10012.5"),
+        "profit": Decimal("12.5"),
+        "margin": Decimal("120"),
+        "margin_free": Decimal("9892.5"),
+        "margin_level": Decimal("8343.75"),
+        "account_trade_allowed": True,
+        "terminal_trade_allowed": True,
+        "position_set_state": SnapshotCompleteness.COMPLETE,
+        "pending_order_set_state": SnapshotCompleteness.COMPLETE,
+    }
+    fields.update(overrides)
+    return BrokerAccountSnapshot(**fields)
+
+
+def make_broker_position_snapshot(
+    snapshot_id: UUID | None = None, **overrides: Any
+) -> BrokerPositionSnapshot:
+    fields: dict[str, Any] = {
+        "snapshot_id": snapshot_id or uuid4(),
+        "observed_at_utc": FIXED_NOW,
+        "ticket": 123_456,
+        "canonical_symbol": "EUR/USD",
+        "broker_symbol": "EURUSD",
+        "side": Side.BUY,
+        "volume": Decimal("0.05"),
+        "opened_at_utc": FIXED_NOW,
+        "open_price": Decimal("1.08512"),
+        "current_price": Decimal("1.08600"),
+        "stop_loss_price": Decimal("1.08012"),
+        "take_profit_price": Decimal("1.09512"),
+        "profit": Decimal("12.5"),
+        "swap": Decimal("-0.35"),
+        "magic": None,
+        "comment": None,
+    }
+    fields.update(overrides)
+    return BrokerPositionSnapshot(**fields)
+
+
+def make_broker_pending_order_snapshot(
+    snapshot_id: UUID | None = None, **overrides: Any
+) -> BrokerPendingOrderSnapshot:
+    fields: dict[str, Any] = {
+        "snapshot_id": snapshot_id or uuid4(),
+        "observed_at_utc": FIXED_NOW,
+        "order_id": 654_321,
+        "canonical_symbol": "EUR/USD",
+        "broker_symbol": "EURUSD",
+        "order_type": "BUY_LIMIT",
+        "state": "PLACED",
+        "volume": Decimal("0.05"),
+        "price": Decimal("1.08000"),
+        "stop_loss_price": Decimal("1.07500"),
+        "take_profit_price": Decimal("1.09000"),
+        "expires_at_utc": None,
+    }
+    fields.update(overrides)
+    return BrokerPendingOrderSnapshot(**fields)
 
 
 def paper_config_payload() -> dict[str, Any]:

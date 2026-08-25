@@ -255,3 +255,20 @@ class IncidentSeverity(StrEnum):
     SEV_1 = "SEV-1"
     SEV_2 = "SEV-2"
     SEV_3 = "SEV-3"
+
+
+class SnapshotCompleteness(StrEnum):
+    """Whether a broker-state collection query actually completed (review
+
+    1.15 F-047, §5 "Complete-set semantics"). MT5's own `positions_get()` and
+    `orders_get()` return `None` both when the book is genuinely empty and
+    when the call failed — the gateway already resolves that ambiguity
+    before this type is ever assigned (an empty tuple only ever means the
+    former; a failure raises). This type exists so that resolution survives
+    into persistence instead of being flattened back into a bare row count,
+    where "0 positions" and "positions unknown" would look identical again.
+    """
+
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"

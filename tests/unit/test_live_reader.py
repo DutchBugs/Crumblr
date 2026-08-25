@@ -20,8 +20,9 @@ from typing import Any
 
 import pytest
 
-from crumblr.application.live_reader import LiveReader, ReaderStatus
+from crumblr.application.live_reader import BrokerStateHealth, LiveReader, ReaderStatus
 from crumblr.config import AccountGuardConfig
+from crumblr.domain.enums import SnapshotCompleteness
 from crumblr.domain.models import MarketBar, MarketTick
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 
@@ -55,6 +56,7 @@ def account_info(**overrides: Any) -> SimpleNamespace:
         "margin_free": 10_000.0,
         "margin_level": 0.0,
         "leverage": 30,
+        "profit": 0.0,
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -133,6 +135,8 @@ class ScriptedMt5:
         self.symbols: tuple[str, ...] = ("EURUSD",)
         self.tick_rows: tuple[Any, ...] | None = ()
         self.bar_rows: tuple[Any, ...] | None = ()
+        self.positions: tuple[Any, ...] | None = ()
+        self.orders: tuple[Any, ...] | None = ()
         self.error: tuple[int, str] = (1, "Success")
         self.account_reads = 0
         self.shutdown_calls = 0
@@ -180,11 +184,11 @@ class ScriptedMt5:
     def copy_rates_from_pos(self, *_a: Any, **_k: Any) -> tuple[Any, ...] | None:
         return self.bar_rows
 
-    def positions_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...]:
-        return ()
+    def positions_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...] | None:
+        return self.positions
 
-    def orders_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...]:
-        return ()
+    def orders_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...] | None:
+        return self.orders
 
 
 class RecordingSink:
@@ -201,6 +205,16 @@ class RecordingSink:
     def record_bars(self, bars: Any) -> int:
         self.bars.extend(bars)
         return len(bars)
+
+
+class RecordingBrokerStateSink:
+    """Stands in for `BrokerStateStore` — no PostgreSQL required."""
+
+    def __init__(self) -> None:
+        self.observations: list[Any] = []
+
+    def record(self, observation: Any) -> None:
+        self.observations.append(observation)
 
 
 class FakeClock:
@@ -259,6 +273,213 @@ class TestFirstConnect:
 
         assert health.status is ReaderStatus.DISCONNECTED
         assert health.connected is False
+
+
+class TestBrokerStateHealthIsUsable:
+    """Review 1.16 F-050 §3's rule, as a predicate: usable only if present,
+
+    fresh enough, and both collections are confirmed `COMPLETE`.
+    """
+
+    MAX_AGE = timedelta(seconds=60)
+
+    def test_no_snapshot_yet_is_not_usable(self) -> None:
+        health = BrokerStateHealth()
+        assert health.age(now=NOW) is None
+        assert health.is_usable(now=NOW, max_age=self.MAX_AGE) is False
+
+    def test_a_fresh_complete_snapshot_is_usable(self) -> None:
+        health = BrokerStateHealth(
+            last_snapshot_at_utc=NOW,
+            position_set_state=SnapshotCompleteness.COMPLETE,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        assert health.is_usable(now=NOW + timedelta(seconds=5), max_age=self.MAX_AGE) is True
+
+    def test_a_snapshot_older_than_max_age_is_not_usable(self) -> None:
+        health = BrokerStateHealth(
+            last_snapshot_at_utc=NOW,
+            position_set_state=SnapshotCompleteness.COMPLETE,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        assert health.is_usable(now=NOW + timedelta(seconds=61), max_age=self.MAX_AGE) is False
+
+    def test_a_failed_position_set_is_not_usable_even_if_fresh(self) -> None:
+        health = BrokerStateHealth(
+            last_snapshot_at_utc=NOW,
+            position_set_state=SnapshotCompleteness.FAILED,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        assert health.is_usable(now=NOW, max_age=self.MAX_AGE) is False
+
+    def test_an_unknown_pending_order_set_is_not_usable_even_if_fresh(self) -> None:
+        health = BrokerStateHealth(
+            last_snapshot_at_utc=NOW,
+            position_set_state=SnapshotCompleteness.COMPLETE,
+            pending_order_set_state=SnapshotCompleteness.UNKNOWN,
+        )
+        assert health.is_usable(now=NOW, max_age=self.MAX_AGE) is False
+
+    def test_age_is_the_elapsed_time_since_the_snapshot(self) -> None:
+        health = BrokerStateHealth(last_snapshot_at_utc=NOW)
+        assert health.age(now=NOW + timedelta(seconds=30)) == timedelta(seconds=30)
+
+
+class TestBrokerStateCapture:
+    """Review 1.15 F-047: broker state is captured on reconnect and then
+
+    periodically, entirely opt-in (`broker_state_store=None` by default —
+    every test above this class proves that path is unaffected), and never
+    lets a capture failure affect the reader's own `ReaderStatus`.
+    """
+
+    def test_disabled_by_default_nothing_is_captured(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+
+        health = reader(fake, sink, clock).poll_once()
+
+        assert health.status is ReaderStatus.HEALTHY
+
+    def test_a_successful_reconnect_captures_broker_state_once(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+
+        reader(fake, sink, clock, broker_state_store=broker_sink).poll_once()
+
+        assert len(broker_sink.observations) == 1
+        assert broker_sink.observations[0].account.snapshot_id is not None
+
+    def test_not_recaptured_before_the_interval_elapses(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+        live_reader = reader(
+            fake,
+            sink,
+            clock,
+            broker_state_store=broker_sink,
+            broker_state_interval=timedelta(seconds=60),
+        )
+
+        live_reader.poll_once()
+        clock.advance(10)
+        fake.tick_rows = (tick_row(time=1_767_000_310, time_msc=1_767_000_310_000),)
+        live_reader.poll_once()
+
+        assert len(broker_sink.observations) == 1
+
+    def test_recaptured_after_the_interval_elapses(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+        live_reader = reader(
+            fake,
+            sink,
+            clock,
+            broker_state_store=broker_sink,
+            broker_state_interval=timedelta(seconds=60),
+        )
+
+        live_reader.poll_once()
+        clock.advance(61)
+        fake.tick_rows = (tick_row(time=1_767_000_361, time_msc=1_767_000_361_000),)
+        live_reader.poll_once()
+
+        assert len(broker_sink.observations) == 2
+
+    def test_a_successful_capture_populates_broker_state_health(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+
+        live_reader = reader(fake, sink, clock, broker_state_store=broker_sink)
+        live_reader.poll_once()
+
+        health = live_reader.broker_state_health
+        assert health.last_snapshot_at_utc == NOW
+        assert health.position_set_state is SnapshotCompleteness.COMPLETE
+        assert health.pending_order_set_state is SnapshotCompleteness.COMPLETE
+        assert health.last_error is None
+        assert health.is_usable(now=NOW, max_age=timedelta(seconds=60)) is True
+
+    def test_broker_state_health_stays_unusable_when_disabled(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+
+        live_reader = reader(fake, sink, clock)
+        live_reader.poll_once()
+
+        broker_health = live_reader.broker_state_health
+        assert broker_health.is_usable(now=NOW, max_age=timedelta(seconds=60)) is False
+
+    def test_a_capture_failure_records_the_error_without_erasing_prior_state(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+        live_reader = reader(fake, sink, clock, broker_state_store=broker_sink)
+        live_reader.poll_once()
+        first_snapshot_at = live_reader.broker_state_health.last_snapshot_at_utc
+
+        # The reader is already connected, so this second poll's only
+        # `account_info()` call is the periodic capture's own — no
+        # `_reconnect()` guard call precedes it, unlike the first poll.
+        def failing_account_info() -> SimpleNamespace | None:
+            return None
+
+        fake.error = (-10004, "No IPC connection")
+        fake.account_info = failing_account_info  # type: ignore[method-assign,assignment]
+        clock.advance(61)
+        fake.tick_rows = (tick_row(time=1_767_000_361, time_msc=1_767_000_361_000),)
+        live_reader.poll_once()
+
+        health = live_reader.broker_state_health
+        assert health.last_error is not None
+        assert health.last_snapshot_at_utc == first_snapshot_at
+
+    def test_a_capture_failure_does_not_affect_reader_health(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        fake.error = (-10004, "No IPC connection")
+        calls = {"n": 0}
+        original_account_info = fake.account_info
+
+        def flaky_account_info() -> SimpleNamespace | None:
+            calls["n"] += 1
+            return original_account_info() if calls["n"] == 1 else None
+
+        fake.account_info = flaky_account_info  # type: ignore[method-assign,assignment]
+        sink = RecordingSink()
+        broker_sink = RecordingBrokerStateSink()
+        clock = FakeClock(NOW)
+
+        health = reader(fake, sink, clock, broker_state_store=broker_sink).poll_once()
+
+        assert health.status is ReaderStatus.HEALTHY
+        assert broker_sink.observations == []
 
 
 class TestScenario1NormalReconnect:

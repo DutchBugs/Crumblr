@@ -189,21 +189,21 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-25 — review 1.15 processed: dashboard/
-                foundation polish declared substantially complete;
-                engineering reprioritized onto the M5 critical path
-                (O-006). Three new findings opened: F-047 (durable
-                broker account/position/pending-order snapshots),
-                F-048 (live/shadow decision orchestrator attaching the
-                Trading Agent to real MT5 data, execution disabled),
-                F-049 (multi-gated execution enablement). Not yet
-                implemented this pass — trackers updated, engineering
-                not started pending direction on committing/pushing
-                the pending review-1.13/1.14 work first
-Next objective: Phase 1 of review 1.15 §12 — run CI on a runner and record
-                the result; provide domain contracts for reviewer/human
-                approval to close M0. Then F-047 broker-state
-                persistence and read-only reconciliation (Phase 2)
+Last meaningful update: 2026-08-25 — review 1.16 processed: F-052 (one
+                coherent `account_info()` read per broker snapshot) and
+                F-050 (`BrokerStateHealth`, separate from `ReaderStatus`)
+                fixed/built same day; read-only reconciliation v0 built
+                (`application/reconciliation.py`, `scripts/reconcile.py`)
+                — MATCHED/MISMATCHED/UNKNOWN against the F-047 snapshots,
+                fail-closed exactly per the review's rule table. F-051
+                (real-terminal verification) remains open — no MT5 host
+                available this session
+Next objective: F-051 on the next Windows/MT5 session (verify F-047/F-052
+                and a real flat-account reconciliation → MATCHED); run CI
+                on a runner and record the result; provide domain
+                contracts for reviewer/human approval to close M0
+                (Phase 1, still open in parallel); F-048 live/shadow
+                decision orchestrator next
 ```
 
 ## Scope
@@ -245,14 +245,14 @@ Next objective: Phase 1 of review 1.15 §12 — run CI on a runner and record
 - [x] `pyproject.toml`
 - [x] dependency lockfile — `uv.lock`, CI installs with `--locked`
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
-- [x] strict typing — mypy `strict`, clean over 106 source files
+- [x] strict typing — mypy `strict`, clean over 114 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 757 total (property/replay/chaos suites plus unit and
+- [x] tests — 823 total (property/replay/chaos suites plus unit and
       integration, the latter needing a real PostgreSQL and skipping loudly
-      without one); 754 passed, 3 skipped (platform-dependent, explained) on
-      the Windows host with PostgreSQL up, 2026-08-25 (review 1.14 pass:
-      F-045/F-046 fixed and tested, F-044 heading refined, F-033 closed a
-      fifth time)
+      without one); 820 passed, 3 skipped (platform-dependent, explained) on
+      the Windows host with PostgreSQL up, 2026-08-25 (review 1.16 pass:
+      F-052/F-050 fixed/built, reconciliation v0 shipped — see §13
+      twenty-fourth entry)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
@@ -777,6 +777,9 @@ Use this for architectural or risk decisions.
 | 2026-08-24 | The soak database is reset only via `alembic downgrade base` -> `upgrade head`, never `bootstrap_schema()`/`create_all` against a hand-dropped database | Review F-041: the third Phase A attempt's own recovery mixed the two paths — tables dropped by hand, then rebuilt with `create_all` while `alembic_version` still claimed head, so a later `alembic upgrade head` believed the database already current and did nothing. `tests/integration/test_migrations.py` already proves the downgrade/upgrade round trip leaves nothing behind; `scripts/reset_soak_database.py` is that same proven pair, run deliberately, refusing to run against a URL without "soak" in it and requiring `--yes` | Leaving the reset as an unrepeatable manual recovery; a script that wraps `drop_schema()`+`bootstrap_schema()` for speed, reintroducing the same drift | Reviewer (F-041) |
 | 2026-08-24 | Dashboard v0 built as FastAPI + server-rendered Jinja2 HTML, its own `src/crumblr/dashboard/` package rather than inside `api/` | Asked the user directly (AskUserQuestion) rather than picking a stack silently, since a new dependency and a long-lived architectural surface are the kind of decision worth pausing for. FastAPI chosen over Streamlit (heavier dependency, framework-owned process model, less natural to keep strictly read-only) and over stdlib `http.server` (zero dependencies but hand-rolled HTML across several panels grows awkward). Kept out of `api/` because build.md §21 already earmarks that package for "authenticated operator functions" — the opposite of what v0 must be — so the read-only boundary is a physically separate package, not a convention inside one meant to eventually hold mutation | Streamlit; stdlib `http.server`; building inside `api/` | User |
 | 2026-08-25 | Dashboard v0's live refresh is a small vanilla-JS poller against `GET /api/state` that updates only the fast-moving fields (price, tick age, the three headline status badges, tick/bar counts, the chart); slower-moving panels (connection detail, account context, decision pipeline, activity timeline) stay accurate as of the last full page load rather than being live-bound | Review 1.13 §10 prefers "5-second refresh/poll for state without full-page flicker" but explicitly forbids building a JavaScript application framework merely for polish, and restricts any JS polling to `GET /api/state` only (no mutation endpoint). A full DOM-diffing/templating layer in JS would duplicate the Jinja rendering logic — a second place the same bug could be introduced — for panels that in practice change on the order of minutes (reconnects, decisions, journal events), not seconds. Scoping the live JS binding to only the fields where "stale-looking" is a real F-043 risk (price/health) keeps the JS small, auditable, and free of a second rendering engine | A full client-side rendering framework; a meta-refresh full-page reload (simpler but produces the flicker the review explicitly wants avoided); fetching and swapping the full `/` HTML via JS (equally correct, more bytes per poll, and not `GET /api/state` as the review specifies) | Reviewer (review 1.13 §10) |
+| 2026-08-25 | One `account_info()` read per `BrokerAccountSnapshot`, not two | Review 1.16 F-052: the original `capture_broker_state` called `gateway.account()` then a separate `gateway.account_extras()` — two reads that could straddle a real change at the broker (a fill, a swap charge) between them, producing a stored row that never existed as such at the broker. `ReadOnlyMt5Gateway.account_with_extras()` derives `AccountState` and `AccountExtras` from one raw `account_info()` response instead | Two reads with separate observation timestamps, presented as one snapshot anyway (the review's own "alternative design", rejected as more complex for no benefit at this stage) | Reviewer (F-052) |
+| 2026-08-25 | Broker-state freshness (`BrokerStateHealth`) is a type separate from `ReaderStatus`/`ReaderHealth`, not a field added to either | Review 1.16 F-050: fresh EUR/USD ticks and a stale/missing/incomplete account snapshot are different facts, and folding them into one status would let one hide the other the moment a live decision or an order needs to see both independently. `is_usable(now, max_age)` gives reconciliation a direct predicate for the review's own missing/stale/incomplete → UNKNOWN rule | Adding `broker_state_status` fields onto `ReaderHealth` | Reviewer (F-050) |
+| 2026-08-25 | Reconciliation v0 reads only the durable F-047 snapshots, never a live MT5 call, and expected state is `ExpectedState.flat()` (zero positions, zero pending orders) until an execution path exists | Review 1.15 §14/1.16 §7-8: comparing the latest MT5 snapshot against itself ("MT5 to MT5") would detect nothing; expected state must eventually come from the platform's own durable order/position history once `order_send` exists, never from what MT5 last reported. `UNKNOWN` (missing/stale/incomplete observation) is structurally distinct from `MISMATCHED` (a real disagreement) and neither is ever silently upgraded to `MATCHED` | Deriving "expected" from the same MT5 read being reconciled; treating a stale/incomplete snapshot as good enough to reconcile against | Reviewer (review 1.16 §7-8) |
 | 2026-08-25 | **O-006**: the next promotion target is a controlled MT5 **DEMO** account autonomous canary order — real decisioning, real order submission, real demo fills, zero live-money exposure — not a live account, not strategy validation from a handful of trades | Review 1.15 §3 interprets the owner's direction toward "daadwerkelijk getrade kan worden" concretely, so "autonomous trading" cannot later be read as authorizing more than this. Reprioritizes engineering away from dashboard/foundation polish (both now substantially closed) onto the M5 critical path: CI/M0 closure → F-047 durable broker-state persistence → read-only reconciliation → F-048 live shadow decision pipeline (execution stays disabled) → execution-safety work (F-049) → `feedback.2.0` → one gated canary order | Owner (relayed via reviewer, review 1.15 §3/§12) |
 
 ---
@@ -914,13 +917,30 @@ Next engineering steps once unblocked:
       result; provide the domain-contract package for reviewer/human
       approval (review 1.12 §9, repeated by review 1.15 §11: "M0 has been
       open long enough").
-- [ ] Phase 2 — broker truth: F-047 durable `broker_account_snapshots` /
-      `broker_position_snapshots` / `broker_pending_order_snapshots` (balance
-      **and** equity, both `Decimal`; explicit `COMPLETE`/`UNKNOWN`/`FAILED`
-      set-completeness, never conflating "empty" with "failed"); then
-      read-only reconciliation (`MATCHED`/`MISMATCHED`/`UNKNOWN`,
-      `MISMATCHED`/`UNKNOWN` → HALT) built from those snapshots (review 1.15
-      §5/§10).
+- [x] ~~Phase 2a — broker truth: F-047 durable `broker_account_snapshots` /
+      `broker_position_snapshots` / `broker_pending_order_snapshots`~~ — done
+      2026-08-25. Balance **and** equity (plus profit), all `Decimal`;
+      `SnapshotCompleteness` (`COMPLETE`/`FAILED`/`UNKNOWN`) never conflates
+      "empty" with "failed"; `LiveReader` captures on reconnect and every
+      `broker_state_interval`. `scripts/mt5_live_reader.py` wired in. Capture
+      triggers needing F-048/M5/reconciliation to exist first are recorded as
+      `review/DEVIATIONS.md` D-044, not silently skipped
+- [x] ~~Phase 2b — read-only reconciliation~~ — done 2026-08-25.
+      `application/reconciliation.py::reconcile()` + `scripts/reconcile.py`,
+      built from the F-047 snapshots. Fail-closed exactly per review 1.16
+      §7's table (`UNKNOWN` never upgraded to `MATCHED`). Expected state is
+      `ExpectedState.flat()` (no execution path exists yet); once one does,
+      expected state must come from the platform's own order/position
+      history, not from MT5 again (review 1.16 §8) — not yet wired into the
+      Supervisor's `reconciliation_status` (that is F-048's job, since no
+      live decision loop exists to call it from yet)
+- [x] ~~F-052 (review 1.16 §5)~~ — done 2026-08-25 alongside the above:
+      `account_with_extras()` reads the broker account once, not twice, per
+      snapshot
+- [x] ~~F-050 (review 1.16 §3)~~ — done 2026-08-25: `BrokerStateHealth`,
+      kept separate from `ReaderStatus`
+- [ ] F-051 (review 1.16 §4) — real-terminal verification of F-047/F-052/
+      reconciliation. Still blocked on MT5 host access
 - [ ] Phase 3 — attach the agent: F-048 live/shadow decision orchestrator —
       real closed M5 bar → features → Trading Agent → intent-time Risk →
       Supervisor → persist → dashboard, **execution stays disabled**. Close
@@ -4007,6 +4027,242 @@ unchanged from the twenty-first entry (754 passed, 3 skipped).
   domain-contract package for reviewer/human approval (review 1.15 §11).
 - Phase 2: implement F-047 broker-state snapshots, then read-only
   reconciliation (review 1.15 §5/§10).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-third entry) — F-047: durable broker account/position/pending-order snapshots
+
+**Verdict: broker account balance/equity/margin and open positions/pending**
+**orders are now durably captured on every `LiveReader` reconnect and**
+**periodically, never held only in memory. Review 1.15 §12 Phase 2a done.**
+
+Processed per the review's own required order (§16): with the tracker work
+committed/pushed (unblocking Phase 1/CI, still to be run) and the user's
+explicit direction to start F-047 next, this entry builds the persistence
+layer review 1.15 §5 specifies before touching reconciliation itself —
+reconciliation needs something real to compare against.
+
+**Domain layer.** `SnapshotCompleteness` (`COMPLETE`/`FAILED`/`UNKNOWN`,
+`domain/enums.py`) carries the gateway's existing `positions_get(None)`/
+`orders_get(None)` fail-vs-empty distinction into persistence — a failed
+collection stores zero child rows and says so explicitly, rather than being
+indistinguishable from a confirmed-flat book. Three new contracts in
+`domain/models.py`: `BrokerAccountSnapshot`, `BrokerPositionSnapshot`,
+`BrokerPendingOrderSnapshot` — deliberately separate from the existing
+`AccountState`/`PositionState` (the live reads the account guard and risk
+engine act on for one request), so neither of those contracts' shape or
+existing callers/tests were touched. `BrokerAccountSnapshot.account_ref` is
+the same non-reversible fingerprint `AccountState.login_hash` already
+computes — never the raw MT5 login, per build.md §21.
+
+**Gateway.** Two additions to `mt5_gateway/readonly.py`, both following the
+`positions()` fail-vs-empty pattern already established: `pending_orders()`
+(new — `orders_get`, decoded via new `ORDER_TYPES`/`ORDER_STATES` tables in
+`mt5_gateway/enums.py`, documented-not-yet-observed the same way
+`filling_mode`/`trade_mode` were before D-037's first contact, since no
+pending order has ever been placed against the real account) and
+`account_extras()` (a second `account_info()` read for `profit`/
+`margin_mode`, kept off `AccountState` rather than widening that contract).
+`PositionState` gained an optional `current_price` field (from MT5's
+`price_current`), populated defensively so a fake terminal without it still
+reads as `None` rather than crashing.
+
+**Composition.** `application/broker_state.py::capture_broker_state` reads
+the account, its extras, terminal health, positions and pending orders
+through the gateway's own public methods only (no reaching into gateway
+internals) and assembles one `BrokerStateObservation`. Positions and pending
+orders are read independently, each in its own `try`/`except` — one failing
+must not discard the other or falsely report it as empty. An account-read
+failure is not caught here: there is no snapshot worth recording without it,
+the same fail-closed treatment every other gateway call in this codebase
+gets.
+
+**Persistence.** Three append-only tables (`persistence/schema.py`):
+`broker_account_snapshots` (parent, one row per observation, carries
+`position_set_state`/`pending_order_set_state`) and
+`broker_position_snapshots`/`broker_pending_order_snapshots` (children,
+FK'd to the parent's `snapshot_id`, content-derived `row_id` from
+`(snapshot_id, ticket|order_id)` so a re-capture collapses rather than
+duplicating — the same identity discipline `market_ticks`/`market_bars`
+already use). Migration `f3a8c1d9b2e4` added by hand, matching `schema.py`
+column-for-column;
+`test_migrations.py::test_create_all_and_the_migration_produce_the_same_schema`
+confirms they agree. `persistence/broker_state.py::BrokerStateStore` writes
+the parent + children in one transaction and reads them back
+(`latest_account_snapshot`, `positions_for`, `pending_orders_for`,
+`record_count`).
+
+**Wiring.** `LiveReader` gained `broker_state_store: BrokerStateSink | None`
+(a narrow Protocol, same testability reasoning as `MarketDataSink`),
+`environment`, and `broker_state_interval` (default 60s) — all optional,
+`None` by default, so every existing caller and test that never opted in is
+unaffected. Capture happens at the end of every successful `_reconnect()`
+and again in `_read_and_persist()` once `broker_state_interval` has elapsed
+since the last one. A capture failure is caught, logged, and never touches
+`ReaderStatus` — ticks/bars are the reader's primary claim; broker state is
+a smaller, separate one. `scripts/mt5_live_reader.py` wired in for real
+runs, with a new `--broker-state-interval` flag.
+
+**What this deliberately does not do.** Review 1.15 §5 names six capture
+triggers; only "connect", "reconnect" and the explicit "periodic
+observation cycle" allowance are wired. "Each live decision window",
+"before/after order submission" and "after a reconciliation mismatch"
+cannot be implemented yet — none of the things they name (a live decision
+pipeline, an order path, a reconciliation service) exist in this codebase.
+Recorded as `review/DEVIATIONS.md` D-044 rather than silently narrowed;
+should close as F-048/M5/reconciliation land, not widen further on its own.
+Reconciliation itself (comparing these snapshots against expected state) is
+explicitly the next piece, not attempted this entry.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 110 source files
+pytest                — 786 passed, 3 skipped, 0 failed
+                         (up from 754 — 32 new tests: 18 gateway
+                         (pending orders + account extras + current_price),
+                         8 capture-composition, 5 LiveReader wiring,
+                         6 persistence/store, migration parity reused)
+```
+
+**Problems found.** None during this entry's implementation — no manual
+real-terminal verification was possible or attempted (no MT5 host available
+this session); `pending_orders()`/`account_extras()` remain unit-tested
+against a fake terminal only, the same REPLAY-TESTED-not-yet-MT5-INTEGRATED
+status every other capability starts at.
+
+**Decision.** F-047 closed (SHIPPED). Reconciliation (Phase 2b), CI (Phase
+1), the domain-contract package (Phase 1) and F-048 (Phase 3) remain open —
+not attempted this entry, in the order review 1.15 §12 sets out.
+
+**Next**
+
+- Build read-only reconciliation against the F-047 snapshots (review 1.15
+  §10, Phase 2b).
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (Phase 1, still open).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-25 (twenty-fourth entry) — review 1.16 processed: F-052/F-050 fixed, reconciliation v0 shipped
+
+**Verdict: F-047 reconfirmed IMPLEMENTED/PERSISTENCE-TESTED with real-MT5**
+**validation still pending (F-051, blocked on host access). The one real**
+**defect the review found (F-052, two account reads per snapshot) is fixed.**
+**F-050 (BrokerStateHealth) built. Read-only reconciliation v0 shipped.**
+
+Processed per the review's own required order (§16): fix F-052 first (a
+genuine data-integrity bug in last entry's own work), then F-050, then
+reconciliation — CI/domain-contracts (Phase 1) remain open in parallel, not
+attempted this entry, consistent with every prior entry's honest accounting
+of what was and was not done.
+
+**F-052 — one coherent account observation per snapshot.**
+`capture_broker_state` originally called `gateway.account()` then a
+separate `gateway.account_extras()` — two `account_info()` reads that could
+straddle a real change at the broker (a fill, a swap charge) between them,
+so one stored `BrokerAccountSnapshot` could combine `balance`/`equity` from
+one moment with `profit`/`margin_mode` from another moment — a snapshot
+that never existed as such at the broker. Fixed per the review's own
+preferred design: `ReadOnlyMt5Gateway.account_with_extras()` makes one
+`account_info()` call and derives both halves from the same raw response
+(`_account_state_from`/`_account_extras_from`, factored out of the old
+`account()`/`account_extras()` bodies so `account()` itself is unchanged
+for every other caller). The standalone `account_extras()` method is
+retired — nothing else used it.
+`tests/unit/test_mt5_readonly_gateway.py::TestAccountWithExtras::test_only_one_account_info_call_is_made`
+asserts the fix directly, via a new call-counter on the fake terminal.
+
+**F-050 — `BrokerStateHealth`, kept separate from `ReaderStatus`.** Review
+§3's own words: "A system can have fresh EUR/USD ticks + stale
+balance/positions/pending orders and must not treat that as a safe trading
+state." `application/live_reader.py::BrokerStateHealth` is a new dataclass
+(`last_snapshot_at_utc`, `position_set_state`, `pending_order_set_state`,
+`last_error`), exposed as `LiveReader.broker_state_health`, tracked
+alongside but never merged into `ReaderHealth`. Its `is_usable(now,
+max_age)` method encodes the review's exact rule — missing, stale, or
+either collection not `COMPLETE` → not usable — as a predicate reconciliation
+calls directly rather than re-deriving. A capture failure updates
+`last_error` only; the last successful snapshot's fields are left alone, so
+usability degrades through the passage of time, not through the failure
+erasing what was last known. Written to the JSON health snapshot under its
+own `broker_state` key (`scripts/mt5_live_reader.py`), never folded into
+`ReaderHealth`'s payload, per the review's explicit "do not overload
+`ReaderStatus`". The one piece of F-050 deliberately not attempted: a fresh
+synchronous broker-state read immediately before an order. No execution
+path exists to need it yet.
+
+**Reconciliation v0.** `application/reconciliation.py::reconcile()` compares
+the latest F-047 snapshot against `ExpectedState` and returns
+`MATCHED`/`MISMATCHED`/`UNKNOWN`, implementing review 1.16 §7's fail-closed
+table exactly: missing/stale/incomplete observation → `UNKNOWN`; wrong
+account/server/currency/leverage, an unexpected or missing position/pending
+order → `MISMATCHED`; everything agreeing → `MATCHED`. `UNKNOWN` is never
+upgraded to `MATCHED` by construction — each `UNKNOWN` branch returns
+immediately, before any mismatch check runs. `ExpectedState.flat()` is the
+only correct expectation before an execution path exists (review §8): zero
+positions, zero pending orders — building it from anything else today would
+be inventing expected state nobody has approved. When `AccountGuardConfig
+.expected_login` is configured, account identity itself is checked via the
+same fingerprint `AccountState.login_hash`/`BrokerAccountSnapshot
+.account_ref` already use, not only server/currency/leverage. Reads only
+PostgreSQL through a narrow `BrokerStateSource` Protocol (implemented by
+`persistence.broker_state.BrokerStateStore` as-is, no store changes
+needed) — never MT5, never the live gateway. `scripts/reconcile.py` is a
+new read-only, database-only CLI, smoke-tested against the real
+`crumblr_soak` database (migrated to the new schema for this) — correctly
+reports `UNKNOWN` ("no broker-state snapshot has ever been captured"),
+since no live capture has run against that database yet.
+
+**Known v0 gap, recorded rather than hidden** (`review/DEVIATIONS.md`
+D-045): reconciliation does not compare the EUR/USD instrument spec, because
+`instrument_specs` still has no producer (`LiveReader` only holds a spec in
+memory for `spec_changed` detection). Account identity, server/currency/
+leverage, and every observed position's/pending order's symbol are
+compared; contract-size/volume-step/digits drift is not, yet.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — all files formatted
+mypy                  — no issues, 114 source files
+pytest                — 820 passed, 3 skipped, 0 failed
+                         (up from 786 — 34 new tests: gateway
+                         account_with_extras (6), broker-state-health (6),
+                         reconciliation unit (19), reconciliation
+                         integration (3))
+```
+
+Manually verified: applied migration `f3a8c1d9b2e4` to the real
+`crumblr_soak` database (previously only exercised via `bootstrap_schema()`
+in tests) and ran `scripts/reconcile.py` against it — correct `UNKNOWN`
+result with the right reason, confirming the script's database-only read
+path works end to end.
+
+**Problems found.** None beyond the F-052 defect this entry exists to fix.
+No regressions in the existing 786 tests.
+
+**Decision.** F-052 and F-050 closed (SHIPPED). Reconciliation v0 shipped.
+F-051 (real-terminal verification of all of F-047/F-052/reconciliation)
+remains open — this session had no MT5 host available, the same limitation
+noted in the twenty-third entry. CI (Phase 1) and the domain-contract
+package (Phase 1) remain open, not attempted this entry. F-048 (live/shadow
+decision orchestrator) remains open, correctly sequenced after
+reconciliation per review 1.16's own order.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session: verify F-047/F-052 against the
+  real terminal, and run `scripts/reconcile.py` against a real flat demo
+  account to confirm `MATCHED` (review 1.16 §16 steps 4-8).
+- Run CI on a runner and record the result; provide the domain-contract
+  package for reviewer/human approval to close M0 (Phase 1, unchanged).
+- Build F-048's live/shadow decision orchestrator (review 1.16 §9).
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---

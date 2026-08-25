@@ -29,6 +29,7 @@ from crumblr.domain.enums import (
     RiskVerdict,
     SessionState,
     Side,
+    SnapshotCompleteness,
     StreamAnomaly,
     SupervisorVerdict,
 )
@@ -619,6 +620,7 @@ class PositionState(Contract):
     side: Side
     volume: Volume
     open_price: Price
+    current_price: Price | None = None
     stop_loss_price: Price | None = None
     take_profit_price: Price | None = None
     opened_at_utc: UtcDatetime
@@ -632,6 +634,134 @@ class PositionState(Contract):
         if self.side is Side.FLAT:
             raise ValueError("an open position cannot have side FLAT")
         return self
+
+
+# --------------------------------------------------------------------------- #
+# Broker-state snapshots (review 1.15 F-047)
+# --------------------------------------------------------------------------- #
+
+# `AccountState`/`PositionState` above are the *live* reads the account guard
+# and (eventually) the risk engine act on for one request; they are never
+# durably stored. The contracts below are the audit-shaped record of the same
+# observation — never held only in memory — and never carry the raw MT5
+# login: `account_ref` is the same non-reversible fingerprint
+# `AccountState.login_hash` already computes, so a snapshot and the account it
+# was observed from can be correlated without persisting the credential-shaped
+# value itself.
+
+
+class BrokerAccountSnapshot(Contract):
+    """A durable observation of the broker's own account/margin state.
+
+    `position_set_state`/`pending_order_set_state` carry forward the
+    fail-vs-empty distinction the gateway's `positions()`/`pending_orders()`
+    already make (an empty tuple only ever means a genuinely flat book; a
+    failed query raises) — see `SnapshotCompleteness`. Child rows in
+    `broker_position_snapshots`/`broker_pending_order_snapshots` only ever
+    exist when the matching state is `COMPLETE`; a `FAILED`/`UNKNOWN` state
+    with no child rows means what it says, not "confirmed empty".
+    """
+
+    snapshot_id: UUID
+    observed_at_utc: UtcDatetime
+    recorded_at_utc: UtcDatetime
+    environment: Environment
+    server: Annotated[str, Field(min_length=1, max_length=128)]
+    account_ref: str
+    currency: Annotated[str, Field(min_length=3, max_length=8)]
+    leverage: int = Field(gt=0)
+    margin_mode: str | None = None
+
+    balance: ExactDecimal
+    equity: ExactDecimal
+    profit: ExactDecimal
+    margin: ExactDecimal = Field(ge=ZERO)
+    margin_free: ExactDecimal
+    margin_level: ExactDecimal | None = None
+
+    account_trade_allowed: bool
+    terminal_trade_allowed: bool | None = None
+
+    position_set_state: SnapshotCompleteness
+    pending_order_set_state: SnapshotCompleteness
+
+
+class BrokerPositionSnapshot(Contract):
+    """One open position as observed in a broker-state snapshot.
+
+    Tied to its parent `BrokerAccountSnapshot` by `snapshot_id` — the two are
+    always written in the same observation, so `snapshot_id` is enough to
+    reconstruct "everything the broker reported at this moment" without a
+    separate grouping timestamp that could drift from it.
+    """
+
+    snapshot_id: UUID
+    observed_at_utc: UtcDatetime
+    ticket: int
+    canonical_symbol: str
+    broker_symbol: Symbol
+    side: Side
+    volume: Volume
+    opened_at_utc: UtcDatetime
+    open_price: Price
+    current_price: Price | None = None
+    stop_loss_price: Price | None = None
+    take_profit_price: Price | None = None
+    profit: ExactDecimal
+    swap: ExactDecimal
+    magic: int | None = None
+    comment: Annotated[str, Field(max_length=256)] | None = None
+
+    @model_validator(mode="after")
+    def _check_side(self) -> Self:
+        if self.side is Side.FLAT:
+            raise ValueError("an open position cannot have side FLAT")
+        return self
+
+
+class BrokerPendingOrderSnapshot(Contract):
+    """One pending (not-yet-filled) broker order observed in a snapshot.
+
+    A flat position book can still carry future exposure through a pending
+    order — this exists so that fact is not invisible to reconciliation.
+    `order_type`/`state` are decoded MT5 enum names (`mt5_gateway.enums
+    .ORDER_TYPES`/`ORDER_STATES`), not this platform's own `EntryType`/
+    `OrderState` — those describe an `ApprovedOrder` this platform submitted,
+    which a broker-observed pending order need not be.
+    """
+
+    snapshot_id: UUID
+    observed_at_utc: UtcDatetime
+    order_id: int
+    canonical_symbol: str
+    broker_symbol: Symbol
+    order_type: str
+    state: str
+    volume: Volume
+    price: Price
+    stop_loss_price: Price | None = None
+    take_profit_price: Price | None = None
+    expires_at_utc: UtcDatetime | None = None
+
+
+class PendingOrderState(Contract):
+    """A pending broker order as read for one request — see `PositionState`
+
+    for why this is not what gets persisted (`BrokerPendingOrderSnapshot` is).
+    `order_type`/`state` are decoded MT5 enum names, not this platform's own
+    `EntryType`/`OrderState`.
+    """
+
+    order_id: int
+    broker_symbol: Symbol
+    order_type: str
+    state: str
+    volume: Volume
+    price: Price
+    stop_loss_price: Price | None = None
+    take_profit_price: Price | None = None
+    expires_at_utc: UtcDatetime | None = None
+    observed_at_utc: UtcDatetime
 
 
 class Incident(Contract):

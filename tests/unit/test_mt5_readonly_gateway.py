@@ -65,6 +65,8 @@ def account_info(**overrides: Any) -> SimpleNamespace:
         "margin_free": 9_892.5,
         "margin_level": 8343.75,
         "leverage": 30,
+        "profit": 12.5,
+        "margin_mode": 2,  # ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -116,15 +118,18 @@ class FakeMt5:
         symbols: tuple[str, ...] = ("EURUSD",),
         account: SimpleNamespace | None = None,
         positions: tuple[SimpleNamespace, ...] | None = (),
+        orders: tuple[SimpleNamespace, ...] | None = (),
         error: tuple[int, str] = (1, "Success"),
     ) -> None:
         self._symbols = symbols
         self._account = account if account is not None else account_info()
         self._positions = positions
+        self._orders = orders
         self._error = error
         self.selected: list[str] = []
         self.shutdown_calls = 0
         self.login_calls: list[dict[str, Any]] = []
+        self.account_info_calls = 0
         self.initialize_ok = True
         self.login_ok = True
 
@@ -148,6 +153,7 @@ class FakeMt5:
         return SimpleNamespace(connected=True, trade_allowed=True, ping_last=32)
 
     def account_info(self) -> SimpleNamespace | None:
+        self.account_info_calls += 1
         return self._account
 
     def symbols_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
@@ -172,8 +178,8 @@ class FakeMt5:
     def positions_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...] | None:
         return self._positions
 
-    def orders_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
-        return ()
+    def orders_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...] | None:
+        return self._orders
 
 
 FAKE_NOW = datetime.fromtimestamp(1_767_000_000, tz=UTC)
@@ -550,6 +556,124 @@ class TestPositions:
     def test_a_none_result_with_success_reads_as_flat(self) -> None:
         """MT5 returns None with RES_S_OK when the book is genuinely empty."""
         assert gateway(FakeMt5(positions=None, error=(1, "Success"))).positions() == ()
+
+    def test_the_current_price_is_read_when_present(self) -> None:
+        positions = gateway(FakeMt5(positions=(a_position(price_current=1.08600),))).positions()
+        assert positions[0].current_price == Decimal("1.08600")
+
+    def test_a_missing_current_price_is_none_not_a_crash(self) -> None:
+        """`a_position()` does not set `price_current` — an older/partial fake terminal."""
+        positions = gateway(FakeMt5(positions=(a_position(),))).positions()
+        assert positions[0].current_price is None
+
+
+# --------------------------------------------------------------------------- #
+# Account with extras — review 1.15 F-047 (profit, margin mode), review 1.16
+# F-052 (one account_info() read, not two, per snapshot)
+# --------------------------------------------------------------------------- #
+
+
+class TestAccountWithExtras:
+    def test_profit_and_margin_mode_are_read(self) -> None:
+        _state, extras = gateway(FakeMt5()).account_with_extras()
+        assert extras.profit == Decimal("12.5")
+        assert extras.margin_mode == "RETAIL_HEDGING"
+
+    def test_it_returns_the_same_account_state_as_account(self) -> None:
+        fake = FakeMt5()
+        state, _extras = gateway(fake).account_with_extras()
+        assert state == gateway(fake).account()
+
+    def test_it_verifies_the_account_the_same_way_account_does(self) -> None:
+        """A live account must still be refused, not just leave `extras` unread."""
+        fake = FakeMt5(account=account_info(trade_mode=2))
+        with pytest.raises(AccountGuardError, match="not a demo account"):
+            gateway(fake).account_with_extras()
+
+    def test_only_one_account_info_call_is_made(self) -> None:
+        """The defect review 1.16 F-052 found: two reads could straddle a
+
+        real change at the broker. One call for one snapshot, always.
+        """
+        fake = FakeMt5()
+        gateway(fake).account_with_extras()
+        assert fake.account_info_calls == 1
+
+    def test_an_unrecognised_margin_mode_is_visible_not_guessed(self) -> None:
+        fake = FakeMt5(account=account_info(margin_mode=99))
+        _state, extras = gateway(fake).account_with_extras()
+        assert extras.margin_mode == "UNKNOWN(99)"
+
+    def test_a_missing_margin_mode_is_none(self) -> None:
+        fake = FakeMt5(account=account_info(margin_mode=None))
+        _state, extras = gateway(fake).account_with_extras()
+        assert extras.margin_mode is None
+
+    def test_a_failed_call_raises(self) -> None:
+        fake = FakeMt5(error=(-10004, "No IPC connection"))
+        fake.account_info = lambda: None  # type: ignore[method-assign]
+        with pytest.raises(Mt5CallFailedError, match="No IPC connection"):
+            gateway(fake).account_with_extras()
+
+
+# --------------------------------------------------------------------------- #
+# Pending orders — review 1.15 F-047
+# --------------------------------------------------------------------------- #
+
+
+def a_pending_order(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "ticket": 654_321,
+        "symbol": "EURUSD.a",
+        "type": 2,  # ORDER_TYPE_BUY_LIMIT
+        "state": 1,  # ORDER_STATE_PLACED
+        "volume_current": 0.05,
+        "price_open": 1.08000,
+        "sl": 1.07500,
+        "tp": 1.09000,
+        "time_expiration": 0,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+class TestPendingOrders:
+    def test_an_empty_book_reads_as_no_pending_orders(self) -> None:
+        assert gateway(FakeMt5(orders=())).pending_orders() == ()
+
+    def test_a_pending_order_is_read_and_decoded(self) -> None:
+        orders = gateway(FakeMt5(orders=(a_pending_order(),))).pending_orders()
+        assert len(orders) == 1
+        order = orders[0]
+        assert order.order_id == 654_321
+        assert order.broker_symbol == "EURUSD.a"
+        assert order.order_type == "BUY_LIMIT"
+        assert order.state == "PLACED"
+        assert order.volume == Decimal("0.05")
+        assert order.price == Decimal("1.08000")
+        assert order.stop_loss_price == Decimal("1.07500")
+        assert order.take_profit_price == Decimal("1.09000")
+
+    def test_an_unrecognised_order_type_is_visible_not_guessed(self) -> None:
+        orders = gateway(FakeMt5(orders=(a_pending_order(type=77),))).pending_orders()
+        assert orders[0].order_type == "UNKNOWN(77)"
+
+    def test_no_expiration_reads_as_none(self) -> None:
+        orders = gateway(FakeMt5(orders=(a_pending_order(time_expiration=0),))).pending_orders()
+        assert orders[0].expires_at_utc is None
+
+    def test_an_absent_stop_is_none_not_zero(self) -> None:
+        orders = gateway(FakeMt5(orders=(a_pending_order(sl=0.0, tp=0.0),))).pending_orders()
+        assert orders[0].stop_loss_price is None
+        assert orders[0].take_profit_price is None
+
+    def test_a_failed_call_raises_rather_than_reading_as_empty(self) -> None:
+        fake = FakeMt5(orders=None, error=(-10004, "No IPC connection"))
+        with pytest.raises(Mt5CallFailedError, match="No IPC connection"):
+            gateway(fake).pending_orders()
+
+    def test_a_none_result_with_success_reads_as_no_pending_orders(self) -> None:
+        assert gateway(FakeMt5(orders=None, error=(1, "Success"))).pending_orders() == ()
 
 
 # --------------------------------------------------------------------------- #

@@ -34,7 +34,12 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from crumblr.application.live_reader import LiveReader, ReaderHealth, ReaderStatus
+from crumblr.application.live_reader import (
+    BrokerStateHealth,
+    LiveReader,
+    ReaderHealth,
+    ReaderStatus,
+)
 from crumblr.config import load_config
 from crumblr.domain.enums import Environment
 from crumblr.mt5_gateway.client import (
@@ -42,23 +47,32 @@ from crumblr.mt5_gateway.client import (
     Mt5Client,
     read_credentials,
 )
+from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, DEFAULT_TEST_URL, create_db_engine
 from crumblr.persistence.market_data import MarketDataStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _write_health_snapshot(path: Path, health: ReaderHealth) -> None:
+def _write_health_snapshot(
+    path: Path, health: ReaderHealth, broker_state_health: BrokerStateHealth
+) -> None:
     """Write the snapshot atomically, so a concurrent reader never sees a
 
     half-written file — `os.replace` is atomic on both POSIX and Windows.
+    Review 1.16 F-050: broker-state health is nested under its own key
+    rather than merged into `ReaderHealth`'s payload — two concepts, not one
+    overloaded status.
     """
+    payload = {**health.to_payload(), "broker_state": broker_state_health.to_payload()}
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(health.to_payload(), indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 
-def _print_status(iteration: int, health: ReaderHealth) -> None:
+def _print_status(
+    iteration: int, health: ReaderHealth, broker_state_health: BrokerStateHealth
+) -> None:
     print(
         f"  [{iteration:>4}] {health.status.value:<12} "
         f"connected={health.connected!s:<5} "
@@ -67,6 +81,15 @@ def _print_status(iteration: int, health: ReaderHealth) -> None:
         f"last_tick={health.last_tick_at_utc.isoformat() if health.last_tick_at_utc else '-'} "
         f"last_bar={health.last_bar_at_utc.isoformat() if health.last_bar_at_utc else '-'}"
         + (f"  -- {health.detail}" if health.detail else "")
+    )
+    snapshot_at = broker_state_health.last_snapshot_at_utc
+    positions_state = broker_state_health.position_set_state
+    pending_orders_state = broker_state_health.pending_order_set_state
+    print(
+        f"         broker_state last_snapshot={snapshot_at.isoformat() if snapshot_at else '-'} "
+        f"positions={positions_state.value if positions_state else '-'} "
+        f"pending_orders={pending_orders_state.value if pending_orders_state else '-'}"
+        + (f"  -- {broker_state_health.last_error}" if broker_state_health.last_error else "")
     )
 
 
@@ -96,6 +119,17 @@ def main() -> int:
         help="stop after roughly this many seconds (converted to --max-iterations)",
     )
     parser.add_argument("--environment", default=Environment.PAPER.value)
+    parser.add_argument(
+        "--broker-state-interval",
+        type=float,
+        default=60.0,
+        help=(
+            "seconds between broker-state captures (review 1.15 F-047) — account "
+            "balance/equity/margin and open positions/pending orders, persisted "
+            "durably rather than held only in memory. Also captured on every "
+            "reconnect regardless of this interval"
+        ),
+    )
     parser.add_argument(
         "--json",
         type=Path,
@@ -135,6 +169,7 @@ def main() -> int:
 
     engine = create_db_engine(database_url)
     store = MarketDataStore(engine)
+    broker_state_store = BrokerStateStore(engine)
     reader = LiveReader(
         Mt5Client(),
         credentials,
@@ -145,6 +180,9 @@ def main() -> int:
         poll_interval=timedelta(seconds=args.poll_interval),
         stale_after=timedelta(seconds=args.stale_after),
         terminal_path=os.environ.get("CRUMBLR_MT5_TERMINAL_PATH") or None,
+        environment=Environment(args.environment),
+        broker_state_store=broker_state_store,
+        broker_state_interval=timedelta(seconds=args.broker_state_interval),
     )
 
     print("\n" + "=" * 78)
@@ -165,9 +203,9 @@ def main() -> int:
     try:
         while max_iterations is None or iteration < max_iterations:
             health = reader.poll_once()
-            _print_status(iteration, health)
+            _print_status(iteration, health, reader.broker_state_health)
             if args.json is not None:
-                _write_health_snapshot(args.json, health)
+                _write_health_snapshot(args.json, health, reader.broker_state_health)
             if health.status is ReaderStatus.UNHEALTHY:
                 print(
                     "\n  UNHEALTHY — this does not clear itself. Investigate, then call "
@@ -186,15 +224,19 @@ def main() -> int:
         print("\n  Interrupted — stopping.\n")
 
     final = reader.health
+    final_broker_state = reader.broker_state_health
     print("\n" + "-" * 78)
     print("  Final health")
     print("-" * 78)
     for key, value in final.to_payload().items():
         print(f"    {key:<24} {value}")
+    print("  broker_state:")
+    for key, value in final_broker_state.to_payload().items():
+        print(f"    {key:<24} {value}")
     print()
 
     if args.json is not None:
-        _write_health_snapshot(args.json, final)
+        _write_health_snapshot(args.json, final, final_broker_state)
         print(f"  Health snapshot written to {args.json}\n")
 
     engine.dispose()

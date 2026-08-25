@@ -36,6 +36,39 @@ SYMBOL_TRADE_MODES = {
 SYMBOL_FILLING_FLAGS = ((1, "FOK"), (2, "IOC"), (4, "BOC"))
 """`SYMBOL_FILLING_*` — a bitmask, not a value. A symbol may allow several."""
 
+ORDER_TYPES = {
+    0: "BUY",
+    1: "SELL",
+    2: "BUY_LIMIT",
+    3: "SELL_LIMIT",
+    4: "BUY_STOP",
+    5: "SELL_STOP",
+    6: "BUY_STOP_LIMIT",
+    7: "SELL_STOP_LIMIT",
+    8: "CLOSE_BY",
+}
+"""`ORDER_TYPE_*`. Documented, not yet observed — no pending order has ever
+
+been placed against the real account (v1 does not submit them). Kept
+alongside the confirmed tables rather than only in the MT5 docs so
+`decode_enum`'s `UNKNOWN(n)` fallback, not a guess, is what a real pending
+order gets until one is actually seen, the same discipline D-037 held before
+first contact confirmed `filling_mode`/`trade_mode`."""
+
+ORDER_STATES = {
+    0: "STARTED",
+    1: "PLACED",
+    2: "CANCELED",
+    3: "PARTIAL",
+    4: "FILLED",
+    5: "REJECTED",
+    6: "EXPIRED",
+    7: "REQUEST_ADD",
+    8: "REQUEST_MODIFY",
+    9: "REQUEST_CANCEL",
+}
+"""`ORDER_STATE_*`. Documented, not yet observed — see `ORDER_TYPES`."""
+
 
 def decode_filling_modes(mask: int) -> tuple[str, ...]:
     """Decode `symbol_info.filling_mode`, a bitmask of allowed fill types."""

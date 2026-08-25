@@ -11,7 +11,7 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-24 (M1 first-contact runbook; Windows host available).
+Last updated 2026-08-25 (D-045: reconciliation v0 scope, review 1.16 §7).
 
 ---
 
@@ -782,6 +782,61 @@ mean anything should start here.
   would quietly erase the boundary this deviation exists to keep visible
 - **Gate affected:** M8 (not attempted — this is v0, not the milestone).
   Does not affect M1/M2, which this dashboard reads from but does not gate
+
+### D-044 — Broker-state capture only satisfies two of review 1.15 §5's six triggers
+- **Status:** PROVISIONAL — will widen as F-048 lands
+- **Spec:** review 1.15 §5 ("When to capture broker state") names six
+  triggers: connect, reconnect, each live decision window, immediately
+  before/after order submission, and after a reconciliation mismatch, plus
+  allows "a periodic observation cycle" between decisions
+- **Original gap:** nothing durably recorded the broker's own account,
+  position or pending-order state at all — see F-047 in
+  `review/FEEDBACK.md`
+- **Current state:** `application/broker_state.py::capture_broker_state`
+  composes one snapshot from `ReadOnlyMt5Gateway`; `LiveReader` calls it at
+  the end of every successful `_reconnect()` and again on a configurable
+  periodic interval (`broker_state_interval`, default 60s) inside
+  `_read_and_persist`. That satisfies "connect", "reconnect" and the
+  explicit periodic-cycle allowance
+- **Remaining gap:** "each live decision window", "immediately before/after
+  order submission" and "after a reconciliation mismatch" cannot be
+  implemented yet because none of the things they name exist in this
+  codebase — there is no live decision pipeline (F-048), no order
+  submission path (M5), and no reconciliation service (review 1.15 §10).
+  Wiring capture calls into code that does not exist would be dead code
+  with no way to test it meaningfully
+- **Watch for:** F-048's live/shadow decision orchestrator should call
+  `capture_broker_state` once per decision window it evaluates, and the
+  eventual execution adapter should call it immediately before and after
+  every `order_send`, once those exist — this deviation should close, not
+  widen, as those land
+- **Gate affected:** none directly. A prerequisite for reconciliation
+  (review 1.15 §10) and the first demo order (F-049), neither of which this
+  entry claims to satisfy on its own
+
+### D-045 — Reconciliation v0 does not compare the instrument spec
+- **Status:** PROVISIONAL — close once `instrument_specs` has a producer
+- **Spec:** review 1.16 §7 lists "EUR/USD symbol/spec" among what
+  reconciliation v0 must compare
+- **Original gap:** `instrument_specs` (the table) has never had a producer
+  — `LiveReader` observes a real `InstrumentSpec` on every reconnect but only
+  holds it in memory for `spec_changed` detection, never persists it (see
+  the Data checklist in `status.md` §3)
+- **Current state:** `application/reconciliation.py::reconcile` compares
+  account identity/server/currency/leverage and every observed position's/
+  pending order's `canonical_symbol` against what is expected, but has no
+  durable instrument-spec observation to compare digits/point/volume-step/
+  contract-size drift against
+- **Remaining gap:** a broker-side instrument spec change (a symbol's
+  volume step, contract size or stops level changing) would not be caught
+  by reconciliation today, only by `LiveReader`'s own in-memory
+  `spec_changed` flag, which is not persisted and not currently read by
+  anything outside `ReaderHealth.spec_changes`
+- **Watch for:** the day `instrument_specs` gets a real producer, add a
+  spec-version comparison to `reconcile()` alongside the account/position
+  checks it already makes
+- **Gate affected:** none directly. A refinement reconciliation needs before
+  M5 treats it as complete, not a blocker to the v0 that exists now
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
