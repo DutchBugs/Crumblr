@@ -2,10 +2,15 @@
 
 Autonomous EUR/USD trading platform on MetaTrader 5.
 
-**Current gate: M1 PASSED (MT5-INTEGRATED, read-only) · M2 PASSED · M0/M3
-otherwise a working end-to-end prototype against simulated market data. No
+**Current gate: M1 PASSED (MT5-INTEGRATED, read-only) · M2 PASSED · M0 open
+only on CI confirmation + human contract review · M5 NO-GO.** Real EUR/USD
+market data now reaches the Trading Agent, Risk Engine and Supervisor
+end to end (`LiveDecisionOrchestrator`) — but that path, and the broker
+account/position snapshots and reconciliation feeding it, have so far only
+run against a scripted fake MT5 terminal, not the real one. No
 order-submission path exists anywhere in the code, and no live trading is
-permitted.** See [status.md](status.md) for the live picture and
+permitted. See [status.md](status.md) for the live picture,
+[HANDOVER.md](HANDOVER.md) for how to pick this up cold, and
 [build.md](build.md) for the architecture and risk specification.
 
 ## See it run
@@ -230,6 +235,36 @@ never the shared test database) — see `.env.example` for why, and
 `scripts/reset_soak_database.py` for how to reset that database without
 drifting `alembic_version` out of sync with it (F-041).
 
+## Live/shadow decision pipeline — real data, execution unreachable
+
+```powershell
+$env:CRUMBLR_DATABASE_URL = "postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_soak"
+uv run python scripts/live_decision.py
+```
+
+Since 2026-08-25 (F-048), `LiveDecisionOrchestrator` closes the gap between
+`LiveReader`'s real MT5 data and the actual decision pipeline: a real closed
+M5 bar (read from `MarketDataStore`) drives the same Trading Agent, the same
+intent-time Risk Engine, and the same Supervisor replay uses — fed real
+broker equity/positions (F-047) and a real reconciliation status
+(`application/reconciliation.py`) instead of a simulated broker. It then
+**stops**: no `ApprovedOrder` is ever constructed, and there is no
+`order_check`/`order_send` call anywhere in the process's call graph,
+checked structurally by a test rather than by intent alone. It prints an
+"EXECUTION DISABLED" banner on every run as a reminder.
+
+`scripts/reconcile.py` is the one-shot companion: compares the latest
+durable broker-state snapshot (F-047) against the platform's expected state
+(currently `ExpectedState.flat()` — no execution path exists yet to expect
+anything else), returning `MATCHED`/`MISMATCHED`/`UNKNOWN`, the last never
+silently upgraded to the first.
+
+**Not yet real-terminal-validated.** Both of the above, and the broker-state
+capture/reconciliation feeding them, have only ever run against
+`FakeMt5`/`ScriptedMt5` and a synthetic bar series through real PostgreSQL —
+see `HANDOVER.md` §4 for exactly what is and is not proven, and F-051 in
+`review/FEEDBACK.md` for the open real-terminal checkpoint.
+
 ## Dashboard v0 — read only
 
 ```bash
@@ -269,25 +304,40 @@ config/            environment configuration (base + per-environment overlay)
 scripts/
   run_replay.py       the runnable prototype
   mt5_probe.py        M1 first contact — one-shot, read-only
-  mt5_live_reader.py  M1 continuous read — real ticks/bars, reconnect+revalidate
+  mt5_live_reader.py  M1 continuous read — real ticks/bars, broker-state,
+                       instrument spec; reconnect+revalidate
+  live_decision.py    F-048 — live/shadow decision loop, execution disabled
+  reconcile.py        one-shot broker-state vs. expected-state check
   run_dashboard.py    Dashboard v0 — read-only status page
   reset_soak_database.py  deliberate, all-Alembic soak-database reset (F-041)
 src/crumblr/
-  domain/          contracts, events, enums, money, hashing — no I/O, no SDKs
+  domain/          contracts, events, enums, money, hashing — no I/O, no SDKs.
+                   Includes BrokerAccountSnapshot/BrokerPositionSnapshot/
+                   BrokerPendingOrderSnapshot and SnapshotCompleteness/
+                   ReconciliationStatus (COMPLETE/FAILED/UNKNOWN,
+                   MATCHED/MISMATCHED/UNKNOWN)
   market_data/     synthetic generator with fault injection; normalisation (M2)
   mt5_gateway/     BrokerPort, simulated broker, and the read-only M1 adapter
+                   (account_with_extras(), pending_orders())
   risk/            sizing, pre-trade policies, kill switch, equity ledger,
                    durable safety state, restart-safe risk sessions
   trading_agent/   ICT primitives (structure, imbalance, liquidity, sessions),
                    the ict_v1 entry model, and the baseline_v1 benchmark
   evaluator/       supervisor pre-trade policy; post-trade and drift at M7
-  persistence/     PostgreSQL schema, event journal, capsule store, safety and
-                   risk-session stores
+  persistence/     PostgreSQL schema, event journal, capsule store, market
+                   store, broker-state store, instrument-spec store, safety
+                   and risk-session stores
   backtest/        cost and fill models                   (M3, remaining)
-  application/     orchestration of the §3 transaction flow, the recorder that
-                   journals it, and reconstruction of a run from the journal
+  application/     orchestration.py — the replay §3 transaction flow;
+                   recording.py/bootstrap.py/reconstruction.py; live_reader.py
+                   (M1 — observes + persists real MT5 state); broker_state.py
+                   (F-047 — one gateway read -> a durable snapshot);
+                   reconciliation.py (observed vs. expected broker state);
+                   live_decision.py (F-048 — LiveDecisionOrchestrator: real
+                   bar -> Trading Agent -> Risk -> Supervisor -> persist,
+                   execution structurally unreachable)
   dashboard/       Dashboard v0 — read-only FastAPI app, outside the broker
-                   execution boundary (review 1.9 F-035)
+                   execution boundary (review 1.9 F-035), visual scope frozen
   api/             control API — authenticated operator functions (M8, not built)
   observability/   logging, metrics, tracing
 tests/             unit, property, replay, integration, chaos
@@ -308,10 +358,16 @@ tests/             unit, property, replay, integration, chaos
 | Raw tick/bar storage and the bar pipeline | Working, and real-terminal-validated: 30 clean minutes produced 2,920 real ticks and 17 real M5 bars, all `GOOD` quality, zero gaps |
 | Schema migrations, backup and restore | Working; no backup *schedule* yet. A dedicated, all-Alembic soak-database reset exists (`scripts/reset_soak_database.py`, F-041) |
 | One EUR/USD exposure, intraday entry cut-off | Enforced by the risk engine |
+| Durable broker account/position/pending-order snapshots (F-047) | Working, unit/integration-tested — **not yet real-terminal-validated** (F-051) |
+| Broker-state freshness as its own health concept (F-050) | Working, same validation status as above |
+| Read-only reconciliation v0 | Working — compares durable broker snapshots against an expected (pre-execution: flat) state; instrument-spec comparison not yet built (F-053); **not yet real-terminal-validated** |
+| Live/shadow decision pipeline (F-048) | Working — real closed M5 bar reaches the Trading Agent, Risk Engine and Supervisor; execution structurally unreachable; **not yet real-terminal-validated** |
+| Durable decision-window idempotence | Not started — process-memory only today; harmless before an execution path exists, required before one (F-054) |
 | Automatic flatten at the session boundary | Not started — detection halts instead (M5, ADR-004) |
 | Feature *values* in storage | Not started — only their hash and version (D-031) |
 | Post-trade evaluation, drift monitor | Not started |
-| Dashboard v0 | Working — read-only status page (`scripts/run_dashboard.py`), see above. Not the full build.md §22/M8 dashboard (D-043) |
-| Control API, manual HALT/FLATTEN from a UI, reconciliation | Not started |
+| Dashboard v0 | Working — read-only status page (`scripts/run_dashboard.py`), see above. Visual scope frozen; broker-state/reconciliation/decision-pipeline panels not yet added (waiting on F-051) |
+| Control API, manual HALT/FLATTEN from a UI | Not started |
+| Execution adapter, `order_check`/`order_send` | Not started, correctly — M5 is NO-GO |
 
 `notebooks/` is research only. Production strategy logic lives in tested modules.

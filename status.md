@@ -1,8 +1,8 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.4  
-**Last updated:** 2026-08-24  
+**Status document version:** 1.5  
+**Last updated:** 2026-08-26  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -72,7 +72,11 @@ LIVE-CANARY
 ## Overall health
 
 ```text
-Engineering health:   AMBER   (lint/types/tests green locally; CI never executed)
+Engineering health:   AMBER   (lint/types/tests green locally, 836 passed/3
+                                explained skips as of 2026-08-25; CI still
+                                never confirmed executed on a runner — review
+                                1.17 §11 now treats this as a pure evidence-
+                                retrieval task, not an engineering blocker)
 Safety-state health:  AMBER   (fail-closed, durable, and now recovered on the
                                 normal path; not yet broker-validated)
 Trading health:       GREY    (ict_v1 runs on synthetic data only — no evidence)
@@ -191,23 +195,31 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-25 — F-048 shipped: real closed M5 bars now
-                reach the Trading Agent, the intent-time Risk Engine and
-                the Supervisor through a new, deliberately separate
-                `LiveDecisionOrchestrator` — execution stays structurally
-                unreachable. Closed a dependency discovered mid-build
-                (durable `InstrumentSpec` persistence, D-045) before F-048
-                could size against real specs. Domain-contract package
-                assembled for reviewer approval (Phase 1a). CI status
-                (Phase 1b) and F-051 (real-terminal verification of
-                F-047/F-052/F-048) both still need a Windows/MT5 session
-                or GitHub Actions access this environment does not have
-Next objective: F-051 on the next Windows/MT5 session (verify F-047/F-052
-                against the real terminal, and a real flat-account
-                reconciliation → MATCHED, and a real live decision through
-                F-048 end to end); run CI on a runner and record the
-                result; close D-031 (feature-value persistence) before
-                calling any live-shadow evidence audit-quality
+Last meaningful update: 2026-08-26 — review 1.17 processed: F-050/F-052
+                reconfirmed CLOSED, F-051 reconfirmed OPEN (now a single
+                twelve-step real-terminal checklist covering F-047,
+                reconciliation and F-048 together), two new findings opened
+                (F-053 — reconciliation must compare the instrument spec now
+                that it has a producer; F-054 — live-decision idempotence
+                must be durable before an execution service is attached).
+                A tracker bookkeeping bug (F-052 recorded twice, once
+                CLOSED and once a stale OPEN duplicate) found and fixed
+                while processing the review. Both new findings deferred
+                this session in favour of a documentation/handover pass —
+                HANDOVER.md rewritten against current state, README.md's
+                implemented-work table and layout section brought current,
+                for the incoming second developer
+Next objective: F-051 on the next Windows/MT5 session (the twelve-step
+                checklist in `feedback.1.17.md` §6: real broker snapshot →
+                flat reconciliation MATCHED → one real closed-M5 decision
+                through F-048, end to end); run CI on a runner and record
+                the result; supply `review/domain_contracts.md` unchanged
+                for the human/reviewer approval it has never actually
+                received (review 1.17 §10); then F-053 (instrument-spec
+                reconciliation) and F-054 (durable decision idempotence) as
+                the next concrete engineering tasks; close D-031
+                (feature-value persistence) before calling any live-shadow
+                evidence audit-quality
 ```
 
 ## Scope
@@ -955,8 +967,10 @@ Next engineering steps once unblocked:
       snapshot
 - [x] ~~F-050 (review 1.16 §3)~~ — done 2026-08-25: `BrokerStateHealth`,
       kept separate from `ReaderStatus`
-- [ ] F-051 (review 1.16 §4) — real-terminal verification of F-047/F-052/
-      reconciliation. Still blocked on MT5 host access
+- [ ] F-051 (review 1.16 §4, reconfirmed/expanded review 1.17 §6) —
+      real-terminal verification of F-047/F-052/reconciliation/F-048
+      together, as one twelve-step checklist. Still blocked on MT5 host
+      access
 - [x] ~~Phase 3 — attach the agent: F-048 live/shadow decision
       orchestrator~~ — done 2026-08-25.
       `application/live_decision.py::LiveDecisionOrchestrator`, a class
@@ -976,8 +990,28 @@ Next engineering steps once unblocked:
       Dashboard integration not attempted — review 1.16 §12 says wait for
       real-MT5 validation first
 - [ ] Not yet attempted — dashboard integration for broker state/
-      reconciliation/decision-pipeline data (review 1.16 §12), correctly
-      deferred until F-051 (real-terminal validation) succeeds
+      reconciliation/decision-pipeline data (review 1.16 §12, reconfirmed
+      review 1.17 §15 with a concrete field list: balance, equity, open
+      P/L, free margin, open positions, pending orders, broker-state age,
+      reconciliation status, live/shadow pipeline), correctly deferred
+      until F-051 (real-terminal validation) succeeds. Review 1.17 §15 is
+      explicit: no further visual redesign, operational data only
+- [ ] F-053 (review 1.17 §7) — reconciliation must compare the semantic
+      instrument specification (broker symbol, digits, point, tick size,
+      contract size, volume min/max/step, stops level, freeze level, trade
+      mode, filling capability), not only account/position identity.
+      Unblocked by F-048's `InstrumentSpecStore` (closes the `D-045`
+      "watch for" condition); not blocked on an MT5 host. Deferred
+      2026-08-26 — this session's focus was a documentation/handover pass
+- [ ] F-054 (review 1.17 §8) — `LiveDecisionOrchestrator`'s
+      `seen_decision_hashes` must become durable before an execution
+      service exists, so a restart can never turn one closed M5 window
+      into two independently executable order proposals. Not blocked on
+      an MT5 host. Deferred 2026-08-26 alongside F-053
+- [ ] Supply `review/domain_contracts.md` unchanged for actual reviewer
+      inspection (review 1.17 §10) — the package existing was never the
+      same claim as it being reviewed, and the reviewer states plainly it
+      has not yet been given the file
 - [ ] Phase 4 — execution safety: separate execution-capable MT5 adapter,
       `order_check`, ADR-001 execution-time risk revalidation, automatic
       intraday flatten, terminal/account execution guard (review 1.15 §12
@@ -996,9 +1030,10 @@ Next engineering steps once unblocked:
       reconciliation → SL presence → closure → audit trail), **not** as
       evidence the strategy is profitable (review 1.15 §13/§14/§16).
 
-Next regular review triggers on a meaningful package per review 1.15 §17 —
-CI+M0 closure, and/or broker-state persistence + reconciliation, and/or live
-shadow Agent decisions on real data — not after one small change.
+Next regular review (`feedback.1.18.md`) triggers on a meaningful package per
+review 1.17 §19 — F-051 real Pepperstone validation, plus a real shadow Agent
+decision, plus the CI result, plus `review/domain_contracts.md` actually
+supplied — arriving together, not after one small change.
 
 ---
 
@@ -4495,6 +4530,129 @@ review specifies.
   awaits human review (both Phase 1, unchanged).
 - Close D-031 (feature-value persistence) before calling any live-shadow
   evidence audit-quality (review 1.16 §10).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-26 (twenty-seventh entry) — review 1.17 processed; HANDOVER.md and README.md brought current for an incoming second developer
+
+**Verdict: F-050/F-052 reconfirmed CLOSED, F-051 reconfirmed OPEN (now one**
+**twelve-step real-terminal checklist), two new findings opened (F-053**
+**instrument-spec reconciliation, F-054 durable decision idempotence), both**
+**deliberately deferred this session. The owner asked, separately, for a**
+**thorough documentation pass so a new developer joining the project does**
+**not have to reconstruct the project's current state from the update log**
+**by hand — that is the bulk of this entry's work.**
+
+`review/feedback.1.17.md` arrived reviewing the state after F-048 (twenty-
+sixth entry). Its verdict: **GO — reconciliation and the live-shadow Agent**
+**are now built; prove them against real MT5 next.** M1/M2 remain PASSED;
+M0 stays open only on CI and actual human/reviewer contract approval; M5
+remains NO-GO but execution engineering may be *prepared* once F-051's
+real-terminal checkpoint lands.
+
+**Findings processed, per `CLAUDE.md` §1:**
+
+- **F-050, F-052** — reconfirmed CLOSED, no new work required (review 1.17
+  §§2-3 read the existing evidence and agree with it).
+- **F-051** — reconfirmed OPEN. Review 1.17 §6 folds it into a single
+  twelve-step sequence that also exercises reconciliation and F-048 end to
+  end on the real terminal, rather than three separate verification passes.
+  Still blocked on Windows/MT5 host access, which this session does not
+  have — same reason as every prior processing of this finding.
+- **F-053** (new) — reconciliation must compare the semantic instrument
+  specification now that `instrument_specs` has a real producer (F-048).
+  This is exactly the condition `review/DEVIATIONS.md` D-045 already named
+  as its own "watch for" trigger. **Not built this session** — see below.
+- **F-054** (new) — `LiveDecisionOrchestrator`'s `seen_decision_hashes`
+  must become durable before any execution service is attached, so a
+  restart can never turn one closed M5 window into two independently
+  executable order proposals. This is D-046 point 3's "watch for", now
+  formalized with a required invariant. **Not built this session** — see
+  below.
+- **CI** and the **domain-contract human review** — both reconfirmed as
+  pending evidence this session cannot produce (no `gh`/Actions access; no
+  ability to make a human read a file). Review 1.17 §11 is explicit these
+  are no longer engineering blockers, just retrieval/approval tasks.
+
+**A tracker bookkeeping bug found and fixed while doing this.**
+`review/FEEDBACK.md`'s finding register had **F-052 recorded twice** — once
+correctly updated to CLOSED/SHIPPED when the fix shipped 2026-08-25 (F-052
+was originally added as its own row when opened, then a second CLOSED row
+was appended alongside F-050 rather than the original row being edited in
+place), leaving a stale OPEN/PENDING duplicate sitting later in the same
+table. Nothing downstream ever silently trusted the wrong one — F-052 is
+correctly listed CLOSED in the "Reviews received" verdict summaries and in
+every update-log entry since — but a table that disagrees with itself about
+one finding's status is exactly the kind of drift this tracker exists to
+prevent. Fixed by removing the stale duplicate and adding a note to the
+remaining row explaining what happened and why, rather than silently
+deleting the evidence that a mistake occurred.
+
+**Why F-053/F-054 were deferred rather than built.** Both are legitimate,
+unblocked engineering work — neither needs an MT5 host or a human decision,
+unlike F-051/CI/contract-review. They were deferred anyway because the
+owner's message this session asked explicitly and specifically for a
+thorough documentation/handover pass ahead of a second developer joining,
+and doing that properly (see below) was already a full session's worth of
+work on its own. Recorded here, with reasons, rather than silently skipped
+— per `CLAUDE.md` §1's "explicitly answered with a reason for not acting."
+Both are queued as the next concrete engineering tasks in §12 above.
+
+**Documentation pass — the actual ask this session.** A second developer is
+expected to join soon. `HANDOVER.md` (written 2026-08-18, last rewritten
+2026-08-24) still described the project from *before* MT5 first contact —
+account creation as the next blocking step, M1 as "code written, never
+run", no mention of Phase A/B, M1 PASSED, Dashboard v0, F-047 broker-state
+persistence, reconciliation, or F-048's live-shadow decision pipeline. Read
+today, it would have sent a new developer toward work that already
+happened and left them unaware of the actual next step (F-051). Rewritten
+in full against the current state: gate status, milestone tracker, the
+code map (now including `application/broker_state.py`,
+`application/reconciliation.py`, `application/live_decision.py`,
+`persistence/broker_state.py`, `persistence/instrument_specs.py`,
+`scripts/reconcile.py`, `scripts/live_decision.py`, `dashboard/`), the
+real-terminal runbook superseded by what Phase A/B actually proved, the
+review-loop pointer updated from "`feedback.1.7.md` is due" to
+"`feedback.1.18.md` is due", and the traps/pitfalls section kept (still
+accurate) with new entries for the live-decision-pipeline boundary and the
+broker-state/market-data health split (F-050). `README.md`'s "what is
+implemented" table and package-layout section were similarly stale —
+reconciliation read "Not started" after it had shipped a session earlier —
+and are now current.
+
+**Evidence.**
+
+```text
+Documents changed: review/FEEDBACK.md, review/DEVIATIONS.md, status.md,
+                    HANDOVER.md, README.md
+No source code changed this entry — no quality-gate re-run required beyond
+what the prior (twenty-sixth) entry already recorded: 836 passed, 3
+skipped, mypy clean over 120 files, ruff clean.
+```
+
+**Problems found.** The F-052 tracker duplication (above) — a real, if
+low-stakes, documentation-integrity bug, found only because this session
+read the finding register closely enough to notice two rows sharing an ID.
+
+**Decision.** F-053 and F-054 stay OPEN, explicitly deferred with reason,
+not silently narrowed. HANDOVER.md and README.md are now safe to hand to a
+new developer as a starting point; status.md's top sections were spot-
+checked against this update rather than rewritten wholesale, since §13's
+append-only log is the source of truth for history and rewriting it would
+destroy exactly what makes it trustworthy.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session — the twelve-step checklist,
+  `feedback.1.17.md` §6.
+- F-053 and F-054 as the next concrete engineering tasks, neither blocked
+  on anything this environment lacks.
+- Run CI on a runner and record the result; supply
+  `review/domain_contracts.md` unchanged for actual reviewer inspection —
+  both still pure evidence/approval tasks, not engineering.
+- Close D-031 (feature-value persistence) before calling any live-shadow
+  evidence audit-quality (review 1.17 §9, reconfirming review 1.16 §10).
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---

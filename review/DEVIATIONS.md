@@ -11,7 +11,10 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-25 (D-046: `LiveDecisionOrchestrator` v0, review 1.16 §9).
+Last updated 2026-08-26 (D-045/D-046 cross-referenced to review 1.17's F-053/
+F-054, which formalize their "watch for" conditions; no new deviation
+entries — review 1.17's findings are engineering work, tracked in
+`review/FEEDBACK.md`, not departures from `build.md`).
 
 ---
 
@@ -834,9 +837,18 @@ mean anything should start here.
   anything outside `ReaderHealth.spec_changes`
 - **Watch for:** the day `instrument_specs` gets a real producer, add a
   spec-version comparison to `reconcile()` alongside the account/position
-  checks it already makes
+  checks it already makes — **that day arrived 2026-08-25 with F-048**
+  (`persistence/instrument_specs.py` + `LiveReader` wiring). Review 1.17 §7
+  formalizes this exact gap as **F-053** (`review/FEEDBACK.md`), naming the
+  specific stable fields to compare (broker symbol, digits, point, tick
+  size, contract size, volume min/max/step, stops level, freeze level,
+  trade mode, filling capability) and repeating F-039's instruction not to
+  use `tick_value` as a change trigger. Not yet built — deferred 2026-08-26
+  in favour of a documentation/handover pass; queued as the next concrete
+  engineering task
 - **Gate affected:** none directly. A refinement reconciliation needs before
-  M5 treats it as complete, not a blocker to the v0 that exists now
+  M5 treats it as complete, not a blocker to the v0 that exists now.
+  Review 1.17 §7: must be complete before `feedback.2.0`
 
 ### D-046 — `LiveDecisionOrchestrator` v0 has three narrower-than-eventual behaviours
 - **Status:** PROVISIONAL — each closes on its own schedule, noted below
@@ -874,7 +886,13 @@ mean anything should start here.
   `_account_state_from_snapshot` before setting `expected_login`. (2) and
   (3) become real gaps only once an execution adapter exists (M5) — at that
   point rate limiting and duplicate-order protection must be durable, not
-  process-lifetime
+  process-lifetime. **Review 1.17 §8 formalizes (3) as F-054**
+  (`review/FEEDBACK.md`), framed as **critical before first order** rather
+  than before M5 itself: the invariant required is `same strategy + same
+  config + same canonical symbol + same closed M5 window + same
+  feature/input identity → same logical decision identity`, held across
+  restart/reconnect/crash recovery, connecting to the eventual durable
+  `order_request_id`. Not yet built — deferred 2026-08-26 alongside F-053
 - **Gate affected:** none directly. A prerequisite for evidence-quality
   live-shadow decisions and, later, M5 — not itself claiming to be either
 
