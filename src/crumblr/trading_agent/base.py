@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from crumblr.domain.enums import Regime, Side
@@ -46,7 +46,17 @@ class StrategyDecision:
 
 @runtime_checkable
 class FeatureEvidence(Protocol):
-    """What a strategy must be able to say about the inputs it acted on."""
+    """What a strategy must be able to say about the inputs it acted on.
+
+    `model_dump` is part of this contract, not an implementation detail
+    every strategy happens to share: D-031 requires the actual values a
+    decision was made from to be durably recorded, not only their hash and
+    version, and `application.recording.RunRecorder.record_features` reads
+    every strategy's evidence through this one Protocol regardless of which
+    concrete `Contract` subclass a given strategy returns (`FeatureSnapshot`
+    for `baseline_v1`, `IctFeatureSnapshot` for `ict_v1`, each with its own,
+    different fields).
+    """
 
     @property
     def feature_snapshot_id(self) -> UUID: ...
@@ -59,6 +69,11 @@ class FeatureEvidence(Protocol):
 
     @property
     def regime(self) -> Regime: ...
+
+    @property
+    def symbol(self) -> str: ...
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)

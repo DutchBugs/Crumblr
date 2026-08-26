@@ -33,6 +33,7 @@ from crumblr.application.live_decision import LiveDecisionOrchestrator
 from crumblr.config import load_config
 from crumblr.domain.enums import Environment
 from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.decision_window import PostgresDecisionWindowStore
 from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, DEFAULT_TEST_URL
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.market_data import MarketDataStore
@@ -82,6 +83,7 @@ def main() -> int:
         recorder=runtime.recorder,
         kill_switch=runtime.kill_switch,
         session_store=runtime.session_store,
+        decision_window_store=PostgresDecisionWindowStore(runtime.engine),
         canonical_symbol=args.canonical_symbol,
         timeframe=args.timeframe,
     )

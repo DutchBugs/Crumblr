@@ -41,16 +41,18 @@ about intent, it is where the code actually stops.
 
 **Known v0 gaps, recorded rather than hidden:**
 
-- D-031 (feature-value persistence) is not closed by this module — every
-  `DecisionCapsule` still carries `feature_values_hash`, not the values
-  themselves. Review 1.16 §10 explicitly allows "a first wiring test" before
-  that closes; it is what this module is.
 - `orders_in_last_hour` is always `0` — no order path exists to count, and
   reporting a real count would imply one does.
-- `seen_decision_hashes` (duplicate-intent detection) is tracked only for
-  this process's lifetime, not persisted — a restart losing that memory
-  produces a duplicate *audit row*, never a duplicate order, since none can
-  be submitted.
+- Decision-window idempotence (which bar window was last decided, and which
+  `TradeIntent` hashes the risk engine's duplicate-protection check has
+  seen) is durable as of F-054 (review 1.17 §8) — restored from
+  `DecisionWindowStore` on construction and re-saved as `decide_once()`
+  progresses, so a restart cannot re-decide an already-decided window from
+  a blank slate. See `application/decision_window.py`.
+- D-031 (feature-value persistence) is closed as of review 1.17 §9 / review
+  1.18 §8: `self._recorder.record_features(features)` durably stores the
+  full `FeatureEvidence` payload, not only its hash, for every window that
+  has features at all. See `persistence/features.py`.
 """
 
 from __future__ import annotations
@@ -62,7 +64,13 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from crumblr.application.reconciliation import BrokerStateSource, ExpectedState, reconcile
+from crumblr.application.decision_window import DecisionWindowState, DecisionWindowStore
+from crumblr.application.reconciliation import (
+    BrokerStateSource,
+    ExpectedState,
+    InstrumentSpecSource,
+    reconcile,
+)
 from crumblr.application.recording import RunRecorder
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
@@ -118,12 +126,6 @@ class MarketDataSource(Protocol):
         self, *, canonical_symbol: str, timeframe: str, limit: int
     ) -> tuple[MarketBar, ...]: ...
     def latest_tick(self, *, canonical_symbol: str) -> MarketTick | None: ...
-
-
-class InstrumentSpecSource(Protocol):
-    """The slice of `persistence.instrument_specs.InstrumentSpecStore` this reads."""
-
-    def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,7 @@ class LiveDecisionOrchestrator:
         recorder: RunRecorder,
         kill_switch: KillSwitch,
         session_store: RiskSessionStore,
+        decision_window_store: DecisionWindowStore,
         canonical_symbol: str = "EUR/USD",
         timeframe: str = "M5",
         clock: Callable[[], UtcDatetime] = utc_now,
@@ -246,6 +249,7 @@ class LiveDecisionOrchestrator:
         self._recorder = recorder
         self._kill_switch = kill_switch
         self._session_store = session_store
+        self._decision_window_store = decision_window_store
         self._canonical_symbol = canonical_symbol
         self._timeframe = timeframe
         self._clock = clock
@@ -282,8 +286,25 @@ class LiveDecisionOrchestrator:
 
         self._ledger: EquityLedger | None = None
         self._current_trading_day: date | None = None
-        self._seen_hashes: set[str] = set()
-        self._last_decided_open_time: datetime | None = None
+
+        # F-054: restore what a previous process lifetime (or an earlier
+        # connection this same process made) had already decided, so a
+        # restart cannot re-decide an already-decided window from a blank
+        # slate. `config.config_version` is part of the key on purpose —
+        # a config change is a genuinely new logical-decision space (review
+        # 1.17 §8's own invariant), so starting fresh in that case is
+        # correct, not a gap.
+        restored = decision_window_store.load_latest(
+            canonical_symbol=canonical_symbol,
+            strategy_id=self._strategy.strategy_id,
+            config_version=config.config_version,
+        )
+        self._seen_hashes: set[str] = (
+            set(restored.seen_decision_hashes) if restored is not None else set()
+        )
+        self._last_decided_open_time: datetime | None = (
+            restored.last_decided_open_time_utc if restored is not None else None
+        )
 
     def decide_once(self) -> LiveDecisionOutcome:
         """Evaluate the newest closed real bar, if it has not been judged yet.
@@ -347,6 +368,11 @@ class LiveDecisionOrchestrator:
             tick, history=history, spec=spec, timeframe=self._timeframe
         )
         self._last_decided_open_time = latest_open_time
+        # Durable the instant the window is claimed, not only once a full
+        # decision goes through (F-054): an early skip below (too little
+        # feature history) must still not re-attempt this same window after
+        # a restart, the same as a full decision would not.
+        self._save_decision_window(now)
 
         outcome = self._strategy.evaluate(
             snapshot,
@@ -364,6 +390,7 @@ class LiveDecisionOrchestrator:
         features = outcome.features
         decision = outcome.decision
 
+        self._recorder.record_features(features)
         self._recorder.record(
             SignalGenerated(
                 signal_id=uuid5(
@@ -399,7 +426,12 @@ class LiveDecisionOrchestrator:
             source="trading_agent",
         )
 
-        reconciliation_result = reconcile(self._broker_state, self._expectation, now=now)
+        reconciliation_result = reconcile(
+            self._broker_state,
+            self._expectation,
+            instrument_specs=self._instrument_specs,
+            now=now,
+        )
         portfolio = policies.PortfolioState(
             account=_account_state_from_snapshot(
                 account_snapshot, is_demo=self._config.account_guard.require_demo_account
@@ -446,6 +478,7 @@ class LiveDecisionOrchestrator:
             self._trip(supervisor_decision.reason_codes, "supervisor", now, snapshot.snapshot_id)
 
         self._seen_hashes.add(intent.decision_hash)
+        self._save_decision_window(now)
         capsule = self._seal(
             snapshot, spec, features, intent, risk_decision, supervisor_decision, positions
         )
@@ -453,6 +486,28 @@ class LiveDecisionOrchestrator:
         return LiveDecisionOutcome(capsule=capsule)
 
     # ------------------------------------------------------------------ #
+
+    def _save_decision_window(self, now: UtcDatetime) -> None:
+        """Persist what a restart must not be allowed to forget (F-054).
+
+        Called twice per decided window, not once: right after
+        `_last_decided_open_time` is claimed (so an early skip still
+        durably marks the window handled) and again after a new decision
+        hash is added (so the risk engine's duplicate-protection check
+        survives a restart too). `_last_decided_open_time` cannot be `None`
+        here — this is only ever called after it has just been set.
+        """
+        assert self._last_decided_open_time is not None
+        self._decision_window_store.save(
+            DecisionWindowState(
+                canonical_symbol=self._canonical_symbol,
+                strategy_id=self._strategy.strategy_id,
+                config_version=self._config.config_version,
+                last_decided_open_time_utc=self._last_decided_open_time,
+                seen_decision_hashes=frozenset(self._seen_hashes),
+                recorded_at_utc=now,
+            )
+        )
 
     def _skip(self, reason: str) -> LiveDecisionOutcome:
         _log.info("live_decision.skipped", reason=reason)

@@ -29,6 +29,7 @@ from crumblr.domain.enums import Environment
 from crumblr.domain.timeutils import utc_now
 from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, create_db_engine, database_url
+from crumblr.persistence.instrument_specs import InstrumentSpecStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,11 +60,13 @@ def main() -> int:
     config = load_config(Environment(args.environment), config_dir=REPO_ROOT / "config")
     engine = create_db_engine(url)
     store = BrokerStateStore(engine)
+    specs = InstrumentSpecStore(engine)
     expectation = ExpectedState.flat(config.account_guard, canonical_symbol=args.canonical_symbol)
 
     result = reconcile(
         store,
         expectation,
+        instrument_specs=specs,
         now=utc_now(),
         max_snapshot_age=timedelta(seconds=args.max_snapshot_age),
     )

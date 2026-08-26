@@ -1,7 +1,7 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.5  
+**Status document version:** 1.6  
 **Last updated:** 2026-08-26  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
@@ -195,31 +195,25 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-26 — review 1.17 processed: F-050/F-052
-                reconfirmed CLOSED, F-051 reconfirmed OPEN (now a single
-                twelve-step real-terminal checklist covering F-047,
-                reconciliation and F-048 together), two new findings opened
-                (F-053 — reconciliation must compare the instrument spec now
-                that it has a producer; F-054 — live-decision idempotence
-                must be durable before an execution service is attached).
-                A tracker bookkeeping bug (F-052 recorded twice, once
-                CLOSED and once a stale OPEN duplicate) found and fixed
-                while processing the review. Both new findings deferred
-                this session in favour of a documentation/handover pass —
-                HANDOVER.md rewritten against current state, README.md's
-                implemented-work table and layout section brought current,
-                for the incoming second developer
-Next objective: F-051 on the next Windows/MT5 session (the twelve-step
-                checklist in `feedback.1.17.md` §6: real broker snapshot →
-                flat reconciliation MATCHED → one real closed-M5 decision
+Last meaningful update: 2026-08-26 — review 1.18 processed: F-033 reopened
+                a sixth time (four current-state contradictions in this
+                file, found because it is now positioned as onboarding
+                truth for a second developer) and closed again the same
+                day. F-053 (reconciliation now compares the instrument
+                spec), F-054 (durable live-decision idempotence) and D-031
+                (feature-value persistence) all built and shipped the same
+                day, per review 1.18's explicit "build now, do not defer"
+                instructions for the first two. Full quality gate clean
+                (ruff/mypy/pytest), determinism reproven, real-soak smoke
+                test clean
+Next objective: F-051 on the next Windows/MT5 session (the checklist in
+                `feedback.1.17.md` §6/`feedback.1.18.md` §5: real broker
+                snapshot → flat reconciliation MATCHED, now including the
+                instrument-spec comparison → one real closed-M5 decision
                 through F-048, end to end); run CI on a runner and record
                 the result; supply `review/domain_contracts.md` unchanged
                 for the human/reviewer approval it has never actually
-                received (review 1.17 §10); then F-053 (instrument-spec
-                reconciliation) and F-054 (durable decision idempotence) as
-                the next concrete engineering tasks; close D-031
-                (feature-value persistence) before calling any live-shadow
-                evidence audit-quality
+                received (review 1.17 §10/1.18 §9)
 ```
 
 ## Scope
@@ -250,7 +244,7 @@ Next objective: F-051 on the next Windows/MT5 session (the twelve-step
 | M5 Paper execution | SPECIFIED | **NO-GO** | Twelve prerequisites open — see `review/feedback.1.0.md` §6 |
 | M6 Trading Agent | REPLAY-TESTED | FEATURE FREEZE | `ict_v1` + `baseline_v1`; next step is evidence, not concepts |
 | M7 Evaluator / Supervisor | UNIT-TESTED | SAFETY WORK ONLY | Layer 1. Two of its seven checks now report themselves as **not in force** rather than passing (F-024); post-trade and drift not started |
-| M8 Dashboard | IMPLEMENTED (v0.1, read-only, visually redesigned) | NOT PASSED | Dashboard v0 built 2026-08-24 — read-only status page + JSON endpoint (`scripts/run_dashboard.py`, `src/crumblr/dashboard/`), deliberately scoped to review 1.12 §8's minimum screen, not the full build.md §22/M8 spec (D-043). Visually rebuilt 2026-08-25 (review 1.13 §§4-10, F-042/F-043/F-044) into a dark ops-console layout with an EUR/USD candlestick chart, decision pipeline and activity timeline. Review 1.14 **accepted the visual direction** and closed two follow-on findings the same day: F-045 (the `PAPER` badge misread as an active campaign — now `DEMO DATA`) and F-046 (stale/missing data must look visibly non-live — historical banner + chart overlay). **Visual scope frozen** (review 1.14 §10, reconfirmed review 1.15 §15): only broker-state/reconciliation/real-decision data panels may still be added, once F-047/F-048 exist to source them honestly — no further layout/framework/animation work is planned. No manual HALT/CANCEL/FLATTEN control surface exists — M8 itself requires that and is not attempted |
+| M8 Dashboard | IMPLEMENTED (v0.1, read-only, visually redesigned) | NOT PASSED | Dashboard v0 built 2026-08-24 — read-only status page + JSON endpoint (`scripts/run_dashboard.py`, `src/crumblr/dashboard/`), deliberately scoped to review 1.12 §8's minimum screen, not the full build.md §22/M8 spec (D-043). Visually rebuilt 2026-08-25 (review 1.13 §§4-10, F-042/F-043/F-044) into a dark ops-console layout with an EUR/USD candlestick chart, decision pipeline and activity timeline. Review 1.14 **accepted the visual direction** and closed two follow-on findings the same day: F-045 (the `PAPER` badge misread as an active campaign — now `DEMO DATA`) and F-046 (stale/missing data must look visibly non-live — historical banner + chart overlay). **Visual scope frozen** (review 1.14 §10, reconfirmed review 1.15 §15): only broker-state/reconciliation/real-decision data panels may still be added — F-047/F-048 now exist to source them (shipped 2026-08-25), but review 1.17 §15/§9 both say to wait for F-051's real-terminal validation before wiring them into the dashboard, so this remains not-yet-done rather than blocked-on-missing-code. No further layout/framework/animation work is planned. No manual HALT/CANCEL/FLATTEN control surface exists — M8 itself requires that and is not attempted |
 | M9 Paper campaign support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 | M10 Shadow support | SPECIFIED | NOT PASSED | Blocked behind M5 |
 
@@ -261,13 +255,12 @@ Next objective: F-051 on the next Windows/MT5 session (the twelve-step
 - [x] `pyproject.toml`
 - [x] dependency lockfile — `uv.lock`, CI installs with `--locked`
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
-- [x] strict typing — mypy `strict`, clean over 120 source files
+- [x] strict typing — mypy `strict`, clean over 125 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 839 total (property/replay/chaos suites plus unit and
+- [x] tests — 866 total (property/replay/chaos suites plus unit and
       integration, the latter needing a real PostgreSQL and skipping loudly
-      without one); 836 passed, 3 skipped (platform-dependent, explained) on
-      the Windows host with PostgreSQL up, 2026-08-25 (F-048 live/shadow
-      decision orchestrator shipped — see §13 twenty-sixth entry)
+      without one); 863 passed, 3 skipped (platform-dependent, explained),
+      2026-08-26 (F-053/F-054/D-031 shipped — see §13 twenty-eighth entry)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
@@ -302,9 +295,9 @@ F-033's own rule: current sections state present truth).
 | positions | x | x | 0 open positions read from the real account |
 | `order_check` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
 | `order_send` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
-| orders (pending) | | | not built; not required for M1's own acceptance |
+| orders (pending, read/persist) | x | | built 2026-08-25 (F-047) — `pending_orders()`, `broker_pending_order_snapshots`, unit/integration-tested against `FakeMt5`/`ScriptedMt5`. **Not yet validated against the real terminal — F-051** |
 | history (backfill beyond one poll) | | | not built; not required for M1's own acceptance |
-| reconciliation | | | M5 prerequisite, not M1 — HANDOVER.md §6 |
+| reconciliation | x | | v0 built 2026-08-25, instrument-spec comparison added 2026-08-26 (F-053) — `application/reconciliation.py` — not an M1 acceptance requirement, but no longer "not built" either. Account/position/pending-order **and** instrument-spec comparison all implemented and unit/integration-tested. The one smoke test against `crumblr_soak` correctly returned `UNKNOWN` (no real broker-state observation existed). **Not yet validated as `MATCHED` against a real flat account — F-051** |
 
 ### Risk
 
@@ -337,12 +330,18 @@ Per capability, because "implemented" and "validated" are different claims
 | automatic flatten at the deadline | | | | | |
 | execution-time revalidation | | | | | |
 
-No risk capability is MT5-integrated or paper-validated yet. M1 (read-only
-MT5 data) passed 2026-08-24, but that is a separate claim from this table:
-nothing in this codebase feeds a live MT5 tick into the risk engine — that
-needs a live decision pipeline, which does not exist (F-044, `feedback.1.13.md`)
-— so the MT5/paper columns stay blank until execution work begins, not
-"until M1" as this line previously implied (review 1.14 §11 F-033).
+No risk capability is MT5-integrated or paper-validated yet, but the
+picture is no longer "nothing feeds a live tick into the risk engine" —
+that was true through review 1.14 and is stale now (review 1.18 §3,
+contradiction B). Since 2026-08-25, `application/live_decision.py::LiveDecisionOrchestrator`
+does exactly that: a real persisted closed M5 bar reaches the intent-time
+Risk Engine (`risk.policies.evaluate`, this same unmodified table's
+functions) and the Supervisor, fed a real `ReconciliationStatus`. That
+pipeline is integration-tested against real PostgreSQL with a synthetic
+bar series — **it has not yet run end-to-end against a fresh real-terminal
+session (F-051)**, so the MT5/paper columns above stay blank until that
+happens, not because the pipeline doesn't exist but because it has not yet
+been exercised against what it is meant to observe.
 
 ### Data
 
@@ -351,11 +350,17 @@ Persisted by the running orchestrator, not merely storable (D-030 closed).
 - [x] raw ticks — `market_ticks`, written for every window the run observed
 - [x] raw bars — `market_bars`, each carrying its origin and, when derived, the
       pipeline version that produced it
-- [x] symbol specs — `instrument_specs` table exists; still no producer.
-      `LiveReader` observes real `InstrumentSpec` values every reconnect
-      (Phase A/B) but only holds them in memory for change detection
-      (`live_reader.spec_changed`) — it never writes to this table
-- [ ] features — the hash and version are journalled, the values are not
+- [x] symbol specs — `instrument_specs` has a real producer since 2026-08-25
+      (F-048): `persistence/instrument_specs.py::InstrumentSpecStore`,
+      written by `LiveReader._reconnect()` on every reconnect, content-keyed
+      by `spec_version`. Unit/integration-tested against a fake terminal;
+      **not yet run against the real terminal with this code — F-051**.
+      Reconciliation now compares it (F-053, shipped 2026-08-26) via the
+      spec's own `spec_version` hash
+- [x] features — `feature_snapshots` table (D-031, shipped 2026-08-26):
+      the full `FeatureEvidence` payload, not only its hash and version,
+      persisted for every evaluated window via `RunRecorder.record_features()`
+      on both the replay and live paths
 - [x] signals — `SignalGenerated`, one per evaluated window including NO_TRADE
 - [x] trade intents — `TradeIntentCreated`
 - [x] risk decisions — `RiskDecisionMade`
@@ -817,11 +822,11 @@ Use this for architectural or risk decisions.
 | Restart clears a halt | Critical | durable safety state + fail-closed startup; cross-process restart evidence recorded | CLOSED 2026-08-17 |
 | Safety state disagrees between file and event journal | High | precedence rule in ADR-002: any disagreement resolves to HALTED | CLOSED 2026-08-18 — `CompositeSafetyStateStore` is on the normal path |
 | Restart refills a spent daily-loss budget | Critical | risk-session state persisted and recovered; recovery can only tighten | CLOSED 2026-08-18 |
-| The journal records what was decided but not what it saw | High | raw tick and bar storage, written on the ordinary path | CLOSED 2026-08-18 for ticks and bars; feature *values* are still only hashed (D-031) |
+| The journal records what was decided but not what it saw | High | raw tick and bar storage, written on the ordinary path; feature values durably stored | CLOSED 2026-08-18 for ticks and bars; **CLOSED 2026-08-26 for feature values** (D-031) — `feature_snapshots`, no longer only a hash |
 | A schema change loses data nobody can regenerate | Medium | Alembic baseline, migrated deployment path, proven restore | CLOSED 2026-08-18 — no backup *schedule* exists yet, only a proven restore |
 | A position is carried through the 17:00 rollover | High | entries refused inside the window; a surviving exposure halts | MITIGATED — detection only. The flatten itself is M5 (D-033) |
 | A second EUR/USD exposure is opened | High | hard constant in the risk engine, above the account model | CLOSED 2026-08-18 |
-| The connected account is not the one that was configured | High | server, login, currency, leverage and margin mode all re-checked on every reconnect (`LiveReader`) | MITIGATED — verified once against a real terminal 2026-08-24, guard passed; the reconnect revalidation logic itself is built and passes all five review 1.9 F-034 scenarios against a fake. **Not yet exercised against a real reconnect** — review 1.10 Phase B |
+| The connected account is not the one that was configured | High | server, login, currency, leverage and margin mode all re-checked on every reconnect (`LiveReader`) | **CLOSED for the M1 reconnect path** — Phase B, 2026-08-24, owner present: two real deliberate terminal closures, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset), M1 PASSED on this evidence (review 1.12 §7). The remaining open risk is narrower and belongs to the newer F-047/F-048 paths, not this one: broker-state snapshots, reconciliation and the live decision pipeline built on top of the same reconnect logic have not themselves met the real terminal yet — see F-051 |
 
 ---
 
@@ -996,18 +1001,23 @@ Next engineering steps once unblocked:
       reconciliation status, live/shadow pipeline), correctly deferred
       until F-051 (real-terminal validation) succeeds. Review 1.17 §15 is
       explicit: no further visual redesign, operational data only
-- [ ] F-053 (review 1.17 §7) — reconciliation must compare the semantic
-      instrument specification (broker symbol, digits, point, tick size,
-      contract size, volume min/max/step, stops level, freeze level, trade
-      mode, filling capability), not only account/position identity.
-      Unblocked by F-048's `InstrumentSpecStore` (closes the `D-045`
-      "watch for" condition); not blocked on an MT5 host. Deferred
-      2026-08-26 — this session's focus was a documentation/handover pass
-- [ ] F-054 (review 1.17 §8) — `LiveDecisionOrchestrator`'s
-      `seen_decision_hashes` must become durable before an execution
-      service exists, so a restart can never turn one closed M5 window
-      into two independently executable order proposals. Not blocked on
-      an MT5 host. Deferred 2026-08-26 alongside F-053
+- [x] ~~F-053 (review 1.17 §7)~~ — done 2026-08-26, per review 1.18 §6's
+      explicit "build now" instruction: `reconcile()` compares the durable
+      instrument-spec baseline (first ever observed for the symbol) against
+      the latest observation via `spec_version`; missing/changed →
+      `UNKNOWN`/`MISMATCHED`. `InstrumentSpecStore.earliest()` (new).
+      Closes the `D-045` "watch for" condition
+- [x] ~~F-054 (review 1.17 §8)~~ — done 2026-08-26, per review 1.18 §7's
+      "hard prerequisite" framing: `application/decision_window.py` +
+      `persistence/decision_window.py::PostgresDecisionWindowStore` make
+      `LiveDecisionOrchestrator`'s decision-window/duplicate-protection
+      state durable, keyed by (canonical_symbol, strategy_id,
+      config_version). Migration `a7c4e19d6f52`
+- [x] ~~D-031 (feature-value persistence)~~ — done 2026-08-26:
+      `persistence/features.py::FeatureSnapshotStore` durably records the
+      full `FeatureEvidence` payload for every evaluated window, wired into
+      both `ReplayOrchestrator` and `LiveDecisionOrchestrator` via
+      `RunRecorder.record_features()`. Migration `b3f8a2c7d914`
 - [ ] Supply `review/domain_contracts.md` unchanged for actual reviewer
       inspection (review 1.17 §10) — the package existing was never the
       same claim as it being reviewed, and the reviewer states plainly it
@@ -1030,10 +1040,13 @@ Next engineering steps once unblocked:
       reconciliation → SL presence → closure → audit trail), **not** as
       evidence the strategy is profitable (review 1.15 §13/§14/§16).
 
-Next regular review (`feedback.1.18.md`) triggers on a meaningful package per
-review 1.17 §19 — F-051 real Pepperstone validation, plus a real shadow Agent
+Next regular review (`feedback.1.19.md`) triggers on a meaningful package per
+review 1.18 §15 — F-051 real MT5 validation, plus a real shadow Agent
 decision, plus the CI result, plus `review/domain_contracts.md` actually
-supplied — arriving together, not after one small change.
+supplied — arriving together, not after one small change. F-053/F-054/D-031
+are now shipped (review 1.18 §§6-8); only the three genuinely blocked items
+remain: F-051 (Windows/MT5 host), CI (`gh`/Actions access), and the
+domain-contract supply (a human reviewer).
 
 ---
 
@@ -4653,6 +4666,143 @@ destroy exactly what makes it trustworthy.
   both still pure evidence/approval tasks, not engineering.
 - Close D-031 (feature-value persistence) before calling any live-shadow
   evidence audit-quality (review 1.17 §9, reconfirming review 1.16 §10).
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-26 (twenty-eighth entry) — review 1.18 processed: F-033 fixed a sixth time, F-053/F-054/D-031 all built and shipped
+
+**Verdict: the reviewer explicitly instructed "build now, do not defer"**
+**for F-053 and F-054, and framed F-054 as a hard prerequisite before an**
+**execution service can exist. All three of F-053, F-054 and D-031 are**
+**now shipped — the only findings still open (F-051, CI, domain-contract**
+**review) are genuinely blocked on a Windows/MT5 host, GitHub Actions**
+**access, or a human reviewer, none of which this session has.**
+
+`review/feedback.1.18.md` arrived reviewing the twenty-seventh entry's
+documentation pass. Its verdict: useful, but no gate advancement, and a
+reopened documentation-integrity finding — F-033, a sixth time.
+
+**F-033 fixed.** Four current-state sections in this file contradicted its
+own more recent history, found because the file is now explicitly
+positioned as onboarding truth for a second developer:
+
+1. The MT5 capability table's `orders (pending)`/`reconciliation` rows
+   still read "not built"/"M5 prerequisite" after F-047 and reconciliation
+   v0 had both shipped a session earlier.
+2. The Risk section still said "nothing in this codebase feeds a live MT5
+   tick into the risk engine" after F-048 had shipped.
+3. The Data checklist still said `instrument_specs` "still no producer"
+   after F-048 had added `InstrumentSpecStore` — directly undermining
+   F-053, which only exists because that producer now exists.
+4. The current-risks table still described the M1 reconnect path as "not
+   yet exercised against a real reconnect" after Phase B had proven
+   exactly that and M1 had passed on that evidence.
+
+All four rewritten in place with explicit real-terminal-validated-vs-not
+distinctions, not simply asserted clean.
+
+**F-053 — instrument-spec reconciliation, built.** `reconcile()` now
+requires an `InstrumentSpecSource` (`latest`/`earliest`) and compares the
+durable baseline spec — the first one ever observed for the symbol, since
+this platform deliberately never hard-codes a contract specification
+(O-001) so there is no config-declared "expected" spec the way account
+fields have one — against the current observation, via
+`InstrumentSpec.spec_version` (already excludes `captured_at_utc`/
+`tick_value`, F-039, so this check cannot regress independently of that
+fix). Missing/unreadable spec → `UNKNOWN`; a changed version →
+`MISMATCHED`, combined with any account/position/pending-order mismatches
+already found. New: `InstrumentSpecStore.earliest()`. Both
+`scripts/reconcile.py` and `LiveDecisionOrchestrator` wired through their
+existing spec source — no new dependency for the live path, since it
+already held an `InstrumentSpecSource` for its own spec lookups.
+
+**F-054 — durable live-decision idempotence, built.** New
+`application/decision_window.py::DecisionWindowState`/`DecisionWindowStore`,
+the same shape `risk/session.py` already established for the daily-loss
+budget (F-019): a frozen state, a narrow store Protocol, an in-memory
+implementation for tests, `persistence/decision_window.py::PostgresDecisionWindowStore`
+for real runs. Keyed by `(canonical_symbol, strategy_id, config_version)` —
+matching the review's own invariant ("same strategy + same config + same
+canonical symbol + same closed M5 window + same feature/input identity →
+same logical decision identity"): a config change is a genuinely new
+logical-decision space, so starting fresh when it changes is correct, not
+a gap, and is directly tested. `LiveDecisionOrchestrator.__init__` now
+restores `_last_decided_open_time`/`_seen_hashes` from the store instead
+of starting blank, and `decide_once()` re-saves twice per window: once
+right after claiming it (so an early skip for insufficient feature history
+still durably marks the window handled) and again after a decision hash is
+added. Deliberately simpler failure semantics than `RiskSessionStore`: an
+unreadable record collapses to "nothing recorded" rather than halting,
+documented explicitly as a choice revisit-worthy once execution exists,
+since the worst consequence today is a duplicate audit row, not a
+duplicate order. Migration `a7c4e19d6f52`.
+
+**D-031 — feature-value persistence, built.** New
+`persistence/features.py::FeatureSnapshotStore`, content-keyed by
+`feature_snapshot_id` (both `compute_features` and the ICT model's own
+snapshot builder already derive this deterministically), the same identity
+discipline `InstrumentSpecStore` uses. Two different concrete
+`FeatureEvidence` shapes exist — `FeatureSnapshot` for `baseline_v1`,
+`IctFeatureSnapshot` for `ict_v1` — distinguished by `feature_set_version`;
+the store persists whichever raw payload it is given and does not attempt
+to decode either back into a typed object, since nothing in this codebase
+consumes one yet. `trading_agent/base.py::FeatureEvidence` widened to
+require `model_dump`/`symbol` — persisting the values is now part of what
+a strategy must be able to say about its evidence, not bolted on from
+outside. `RunRecorder` gained `record_features()`, implemented by both
+`NullRecorder` (no-op) and `JournalRecorder` (writes immediately, not
+batched — one row per decided window is low-volume, and content-derived
+identity already makes a duplicate write a no-op). Called from **both**
+`ReplayOrchestrator` and `LiveDecisionOrchestrator`, for every window that
+has features at all — including NO_TRADE and BLOCKed/HALTed windows, the
+same rule `SignalGenerated` already follows. Migration `b3f8a2c7d914`.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — 161 files already formatted
+mypy                  — no issues, 125 source files (up from 120)
+pytest                — 863 passed, 3 skipped, 0 failed
+                         (up from 836 — 27 new tests: 5 instrument-spec
+                         reconciliation unit, 2 reconciliation integration,
+                         3 InstrumentSpecStore.earliest() integration, 4
+                         F-054 unit including a config-version-change
+                         case, 6 DecisionWindowStore integration, 1 F-054
+                         real-PostgreSQL restart simulation, 3 D-031 unit,
+                         3 FeatureSnapshotStore integration)
+```
+
+Determinism reproven: `scripts/run_replay.py --bars 2000` hashed identical
+across two runs. Manually verified: `scripts/live_decision.py` run against
+the real `crumblr_soak` database (migrated to `b3f8a2c7d914`) still
+correctly reports "skipped — no instrument spec has been observed yet" —
+honest, unchanged, since no real-terminal `LiveReader` run with this
+session's code has happened yet (same F-051 limitation).
+
+**Problems found.** None in the new code. One test-design mistake caught
+and fixed before it reached the suite: an early draft of the F-054
+duplicate-hash test assumed every capsule carrying a `TradeIntent` also
+added its hash to `seen_decision_hashes`, which is only true on a `PASS`
+risk verdict — a `BLOCK`ed/`HALT`ed intent's capsule still carries the
+intent for audit purposes but was never added to the duplicate-protection
+set, unchanged by this entry. Corrected before the suite was reported
+green, not discovered by a later reviewer.
+
+**Decision.** F-053, F-054 and D-031 all CLOSED (SHIPPED). F-033 CLOSED
+again, sixth time. Real-terminal validation for all of the above remains
+F-051's job — none of this session's work has met the real terminal.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session — the checklist in
+  `feedback.1.17.md` §6 / `feedback.1.18.md` §5, now also covering the
+  instrument-spec comparison, decision-window durability and feature
+  persistence added this entry.
+- Run CI on a runner and record the result; supply
+  `review/domain_contracts.md` unchanged for actual reviewer inspection —
+  both remain pure evidence/approval tasks, not engineering.
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---

@@ -317,6 +317,7 @@ class ReplayOrchestrator:
         features = outcome.features
         decision = outcome.decision
 
+        self._recorder.record_features(features)
         self._recorder.record(
             SignalGenerated(
                 signal_id=uuid5(

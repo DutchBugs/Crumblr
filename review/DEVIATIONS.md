@@ -11,10 +11,9 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-26 (D-045/D-046 cross-referenced to review 1.17's F-053/
-F-054, which formalize their "watch for" conditions; no new deviation
-entries — review 1.17's findings are engineering work, tracked in
-`review/FEEDBACK.md`, not departures from `build.md`).
+Last updated 2026-08-26 (D-031, D-045 resolved; D-046 point 3 resolved —
+F-053/F-054/D-031 all shipped this session, per review 1.18 §§6-8's
+explicit "build now" instructions; no new deviation entries).
 
 ---
 
@@ -344,8 +343,9 @@ mean anything should start here.
   replayed in original order" — and it is now met for the decision path.
 
 ### D-031 — The journal carries decisions; the market store carries observations
-- **Status:** RESOLVED 2026-08-18 for storage (review 1.6 F-022); the feature
-  values remain outside it
+- **Status:** RESOLVED — 2026-08-18 for storage (review 1.6 F-022),
+  2026-08-26 for feature values (review 1.17 §9 / review 1.18 §8). Two of
+  three remaining gaps are unchanged, see below
 - **Spec:** build.md §26 M2 lists "raw market storage" and a "normalized bar
   pipeline"; §12.1 requires raw and derived data to be stored separately
 - **Original gap:** the `events` table recorded the decision flow and nothing
@@ -367,11 +367,22 @@ mean anything should start here.
       event journal = what the system did
       market store  = what the system saw
 
-- **Remaining gap:** three things.
-  1. **Feature values are still not stored.** A capsule carries the feature set
-     version and a hash of the values; the values themselves exist only in the
-     process that computed them. The hash proves a later recomputation matches,
-     which is not the same as being able to see what the strategy saw.
+- **Remaining gap:** one closed, two unchanged.
+  1. ~~**Feature values are still not stored.**~~ **Closed 2026-08-26.**
+     `persistence/features.py::FeatureSnapshotStore` durably records the full
+     `FeatureEvidence` payload (`FeatureSnapshot` for `baseline_v1`,
+     `IctFeatureSnapshot` for `ict_v1` — two different concrete shapes,
+     distinguished by `feature_set_version`), content-keyed by
+     `feature_snapshot_id` the same way `InstrumentSpecStore` is keyed by
+     `spec_version`. `RunRecorder.record_features()` is called from both
+     `ReplayOrchestrator` and `LiveDecisionOrchestrator`, for every window
+     that has features at all — including NO_TRADE and BLOCKed/HALTed
+     windows, the same "every evaluated window" rule `SignalGenerated`
+     already follows. `FeatureEvidence` (the Protocol both strategies'
+     concrete classes satisfy) was widened to require `model_dump` and
+     `symbol`, since persisting the values is now part of what a strategy
+     must be able to say about its evidence, not an afterthought bolted on
+     from outside. Migration `b3f8a2c7d914`.
   2. `MarketSnapshotReady` still has no producer. A snapshot carries its whole
      rolling window of up to 400 bars, so emitting one per decision would store
      the same bar several hundred times; the bars are in `market_bars` and the
@@ -380,8 +391,8 @@ mean anything should start here.
      because the generator emits bars directly rather than a tick stream. It is
      the path M1 will use for Pepperstone ticks and has never processed a real
      one.
-- **Gate affected:** M2's data deliverables are now met for ticks and bars.
-  Feature storage is M7 work. The pipeline meets a real feed at M1.
+- **Gate affected:** M2's data deliverables are now met for ticks, bars and
+  feature values. The pipeline meets a real feed at M1.
 
 ### D-032 — Risk-session recovery trusts local state, not broker history
 - **Status:** provisional — must close before M5
@@ -818,7 +829,8 @@ mean anything should start here.
   entry claims to satisfy on its own
 
 ### D-045 — Reconciliation v0 does not compare the instrument spec
-- **Status:** PROVISIONAL — close once `instrument_specs` has a producer
+- **Status:** RESOLVED 2026-08-26 (F-053). Real-terminal validation still
+  pending — see the remaining gap below
 - **Spec:** review 1.16 §7 lists "EUR/USD symbol/spec" among what
   reconciliation v0 must compare
 - **Original gap:** `instrument_specs` (the table) has never had a producer
@@ -830,28 +842,24 @@ mean anything should start here.
   pending order's `canonical_symbol` against what is expected, but has no
   durable instrument-spec observation to compare digits/point/volume-step/
   contract-size drift against
-- **Remaining gap:** a broker-side instrument spec change (a symbol's
-  volume step, contract size or stops level changing) would not be caught
-  by reconciliation today, only by `LiveReader`'s own in-memory
-  `spec_changed` flag, which is not persisted and not currently read by
-  anything outside `ReaderHealth.spec_changes`
-- **Watch for:** the day `instrument_specs` gets a real producer, add a
-  spec-version comparison to `reconcile()` alongside the account/position
-  checks it already makes — **that day arrived 2026-08-25 with F-048**
-  (`persistence/instrument_specs.py` + `LiveReader` wiring). Review 1.17 §7
-  formalizes this exact gap as **F-053** (`review/FEEDBACK.md`), naming the
-  specific stable fields to compare (broker symbol, digits, point, tick
-  size, contract size, volume min/max/step, stops level, freeze level,
-  trade mode, filling capability) and repeating F-039's instruction not to
-  use `tick_value` as a change trigger. Not yet built — deferred 2026-08-26
-  in favour of a documentation/handover pass; queued as the next concrete
-  engineering task
-- **Gate affected:** none directly. A refinement reconciliation needs before
-  M5 treats it as complete, not a blocker to the v0 that exists now.
-  Review 1.17 §7: must be complete before `feedback.2.0`
+- **Current state, updated 2026-08-26:** `reconcile()` now requires an
+  `InstrumentSpecSource` and compares the durable baseline spec (the first
+  one ever observed for the symbol — this platform never hard-codes a
+  contract specification, O-001, so there is no config-declared expectation
+  to compare against instead) against the latest observation, via
+  `InstrumentSpec.spec_version` — the same stable hash F-039 already
+  excludes `tick_value` from. Missing/unreadable → `UNKNOWN`; a changed
+  version → `MISMATCHED`. `InstrumentSpecStore.earliest()` (new);
+  `scripts/reconcile.py` and `LiveDecisionOrchestrator` both wired through.
+  Formalized by review 1.17 §7 as **F-053**, built per review 1.18 §6's
+  explicit "build now, do not defer" instruction
+- **Remaining gap:** none in logic — real-terminal validation is still
+  outstanding, the same F-051 gap every other post-M1 capability shares
+- **Gate affected:** none directly now that F-053 is shipped. Real-terminal
+  proof (F-051) remains before this counts toward M5
 
 ### D-046 — `LiveDecisionOrchestrator` v0 has three narrower-than-eventual behaviours
-- **Status:** PROVISIONAL — each closes on its own schedule, noted below
+- **Status:** PROVISIONAL — (1) and (2) unchanged; (3) RESOLVED 2026-08-26 (F-054)
 - **Spec:** review 1.15 §7 / review 1.16 §9 specify a live/shadow decision
   pipeline: real M5 bar → features → Trading Agent → intent-time Risk →
   Supervisor → persist, execution disabled
@@ -872,27 +880,28 @@ mean anything should start here.
      field
   2. **`orders_in_last_hour` is always `0`.** No order path exists to
      count against — reporting a nonzero placeholder would imply one does
-  3. **`seen_decision_hashes` is process-lifetime only, not persisted.** A
-     restart losing this memory produces a duplicate *audit row* in the
-     journal, never a duplicate order, since none can be submitted yet
-- **Remaining gap:** D-031 (feature-value persistence) is not closed by
-  this module — every capsule still carries only `feature_values_hash`.
-  Review 1.16 §10 explicitly permits "a first wiring test" before that
-  closes; this module is that wiring test, not yet evidence-quality shadow
-  output
+  3. ~~**`seen_decision_hashes` is process-lifetime only, not persisted.**~~
+     **Closed 2026-08-26 (F-054).** `application/decision_window.py::DecisionWindowStore`
+     (mirroring `risk/session.py`'s F-019 pattern) + `persistence/decision_window.py::PostgresDecisionWindowStore`,
+     keyed by `(canonical_symbol, strategy_id, config_version)`. Both
+     `_last_decided_open_time` and `_seen_hashes` are restored from the
+     store on construction and re-saved as `decide_once()` progresses, so a
+     restart cannot re-decide an already-decided window nor forget which
+     `TradeIntent` hashes the duplicate-protection check has seen. Formalized
+     by review 1.17 §8 as **F-054**, built per review 1.18 §7's "hard
+     prerequisite before an `ApprovedOrder` can become executable" framing
+- **Remaining gap:** ~~D-031 (feature-value persistence) is not closed by
+  this module~~ — **closed 2026-08-26**, see D-031's own entry above:
+  `RunRecorder.record_features()` durably stores the values behind every
+  window `LiveDecisionOrchestrator` evaluates, not only their hash
 - **Watch for:** (1) closes itself if a future `expected_login` is ever
   configured and this reconstruction is not revisited first — that would
   silently BLOCK every live intent, safely but confusingly, so revisit
-  `_account_state_from_snapshot` before setting `expected_login`. (2) and
-  (3) become real gaps only once an execution adapter exists (M5) — at that
-  point rate limiting and duplicate-order protection must be durable, not
-  process-lifetime. **Review 1.17 §8 formalizes (3) as F-054**
-  (`review/FEEDBACK.md`), framed as **critical before first order** rather
-  than before M5 itself: the invariant required is `same strategy + same
-  config + same canonical symbol + same closed M5 window + same
-  feature/input identity → same logical decision identity`, held across
-  restart/reconnect/crash recovery, connecting to the eventual durable
-  `order_request_id`. Not yet built — deferred 2026-08-26 alongside F-053
+  `_account_state_from_snapshot` before setting `expected_login`. (2)
+  becomes a real gap only once an execution adapter exists (M5) — at that
+  point rate limiting must be durable, not process-lifetime. (3) is closed;
+  the durable `DecisionWindowState` it introduced is exactly the seam the
+  eventual `order_request_id` should connect to when execution lands
 - **Gate affected:** none directly. A prerequisite for evidence-quality
   live-shadow decisions and, later, M5 — not itself claiming to be either
 

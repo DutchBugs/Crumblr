@@ -3,13 +3,14 @@
 Everything a developer needs to pick this up cold.
 
 **Written 2026-08-18. Rewritten 2026-08-24** when a Windows host became
-available and the repository got a remote. **Rewritten again 2026-08-26**
-after MT5 first contact, M1/M2 passing, and the platform being wired end to
-end from real market data through to a (deliberately unreachable) order —
-the biggest change in what this project *is* since it started. The
-2026-08-24 version described a project waiting for a broker account to
-exist; this version describes a project waiting for one supervised session
-on a real terminal to prove what has already been built.
+available and the repository got a remote. **Rewritten 2026-08-26** after
+MT5 first contact, M1/M2 passing, and the platform being wired end to end
+from real market data through to a (deliberately unreachable) order.
+**Updated again later the same day** after reconciliation, decision-window
+durability and feature-value persistence were all completed and reviewed —
+everything left open now genuinely needs either a Windows/MT5 host, GitHub
+Actions access, or a human reviewer; nothing is blocked on engineering
+alone any more.
 
 **Start at §0.** It is the exact point of handover. §4 tells you what is
 already proven against the real broker and what the very next session
@@ -19,9 +20,11 @@ should do. Then `CLAUDE.md` §1 for the mandatory session-start protocol.
 
 ## 0. Start here — the exact point this was handed over
 
-**Handed over 2026-08-26**, after commit `2fed71e` (F-048) was pushed to
-`https://github.com/DutchBugs/Crumblr` (private) and `review/feedback.1.17.md`
-was processed.
+**Handed over 2026-08-26**, after review `feedback.1.18.md` was processed:
+F-053 (instrument-spec reconciliation), F-054 (durable live-decision
+idempotence) and D-031 (feature-value persistence) were all built and
+shipped the same day, per the review's explicit instruction not to defer
+them through another documentation cycle.
 
 The last few things that happened, in order:
 
@@ -39,22 +42,30 @@ The last few things that happened, in order:
    autonomous MT5 **DEMO** canary order** — real decisioning, real demo
    fills, zero live-money exposure (O-006). Not live trading, not a
    profitability claim.
-4. Following that path: durable broker account/position/pending-order
-   snapshots (F-047), a coherent single-read account snapshot (F-052), a
-   separate `BrokerStateHealth` freshness concept (F-050), read-only
-   reconciliation v0, and — most recently — `LiveDecisionOrchestrator`
-   (F-048), which attaches real MT5 market data to the actual Trading
-   Agent / Risk Engine / Supervisor chain for the first time, execution
-   left structurally unreachable.
-5. Review 1.17 (2026-08-26) confirmed all of that and named the next real
-   checkpoint: **prove it once against the real terminal.**
+4. Durable broker account/position/pending-order snapshots (F-047), a
+   coherent single-read account snapshot (F-052), a separate
+   `BrokerStateHealth` freshness concept (F-050), read-only reconciliation
+   v0, and `LiveDecisionOrchestrator` (F-048) — real MT5 market data
+   attached to the actual Trading Agent / Risk Engine / Supervisor chain,
+   execution left structurally unreachable.
+5. Review 1.17 named the next real checkpoint (F-051) and two engineering
+   gaps unblocked by F-048's own work (F-053, F-054); review 1.18, arriving
+   the same day, reopened a documentation-accuracy finding (F-033, a sixth
+   time) and gave an explicit instruction: build F-053/F-054 now rather
+   than deferring them again, since neither needs an MT5 host.
+6. F-053, F-054 and D-031 were all built, tested (unit + integration
+   against real PostgreSQL, two new Alembic migrations) and shipped the
+   same day. Full quality gate clean; replay determinism reproven; a
+   real-soak smoke test of `scripts/live_decision.py` still returns the
+   same honest "no instrument spec observed yet" skip it always has.
 
-**The single most valuable thing the next developer can do is exactly
-that — F-051.** Everything F-047/F-048/F-050/F-052/reconciliation claim has
+**The single most valuable thing the next developer can do is F-051.**
+Everything from F-047 through D-031 — broker-state capture, reconciliation
+(including the new instrument-spec comparison), the live decision
+pipeline, its now-durable idempotence, and feature-value persistence — has
 only ever run against a fake/scripted MT5 terminal (`FakeMt5`/
 `ScriptedMt5`) or a real PostgreSQL with synthetic data. Not one line of
-this new work has met the real Pepperstone terminal yet. §4 below is the
-runbook.
+this has met the real Pepperstone terminal yet. §4 below is the runbook.
 
 ### 0.1 If you are a new session (human or agent) picking this up
 
@@ -64,15 +75,16 @@ handover time, open findings are:
 
 | Finding | What it needs | Blocked on |
 |---|---|---|
-| **F-051** | Real-terminal proof of F-047/F-052/reconciliation/F-048, one twelve-step session (`feedback.1.17.md` §6) | A Windows host with the MT5 terminal and the logged-in Pepperstone demo account |
-| **F-053** | Reconciliation must compare the semantic instrument spec, not just account/position identity | Nothing — pure engineering, unblocked since F-048 gave `instrument_specs` a producer |
-| **F-054** | `LiveDecisionOrchestrator`'s decision-window idempotence must become durable before an execution service exists | Nothing — pure engineering |
+| **F-051** | Real-terminal proof of F-047/F-052/reconciliation (incl. F-053)/F-048/F-054, one checklist session (`feedback.1.17.md` §6 / `feedback.1.18.md` §5) | A Windows host with the MT5 terminal and the logged-in Pepperstone demo account |
 | **CI** | Confirm the workflow actually ran green on a runner and record the result | `gh` CLI or GitHub Actions web access (this environment has neither) |
 | **Domain-contract review** | A human actually reads `review/domain_contracts.md` and approves or challenges it | A human reviewer |
-| **D-031** | Persist feature *values*, not only their hash, before any live-shadow run counts as promotion-quality evidence | Nothing — pure engineering, but reviewer-permitted to lag one more real wiring run |
 
-If you have MT5/Windows host access, **do F-051 first** — it is explicitly
-the highest-priority item and unblocks the most (it is also the trigger for
+Everything that was previously listed here as unblocked engineering
+(F-053, F-054, D-031) shipped 2026-08-26 — see §0 above. **All three
+remaining items are genuinely blocked on something this environment
+cannot produce on its own.** If you have MT5/Windows host access, **do
+F-051 first** — it is explicitly the highest-priority item and unblocks
+the most (it is also the trigger for
 the next regular review, `feedback.1.18.md`). If you don't, F-053 and F-054
 are the next unblocked engineering work.
 

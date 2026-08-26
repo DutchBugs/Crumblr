@@ -46,6 +46,7 @@ from crumblr.domain.models import (
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
     BrokerPositionSnapshot,
+    InstrumentSpec,
 )
 from crumblr.domain.timeutils import UtcDatetime
 
@@ -127,6 +128,19 @@ class BrokerStateSource(Protocol):
     def pending_orders_for(self, snapshot_id: UUID) -> tuple[BrokerPendingOrderSnapshot, ...]: ...
 
 
+class InstrumentSpecSource(Protocol):
+    """The slice of `persistence.instrument_specs.InstrumentSpecStore` this reads.
+
+    Both methods, not only `latest`: F-053 compares the current observation
+    against the first one ever durably recorded (`earliest`) — see that
+    method's docstring for why there is no config-declared expectation to
+    compare against instead.
+    """
+
+    def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
+    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
+
+
 def _unknown(reason: str, *, now: UtcDatetime, snapshot_id: UUID | None) -> ReconciliationResult:
     return ReconciliationResult(
         status=ReconciliationStatus.UNKNOWN,
@@ -140,10 +154,20 @@ def reconcile(
     source: BrokerStateSource,
     expectation: ExpectedState,
     *,
+    instrument_specs: InstrumentSpecSource,
     now: UtcDatetime,
     max_snapshot_age: timedelta = DEFAULT_MAX_SNAPSHOT_AGE,
 ) -> ReconciliationResult:
-    """Compare the latest durable broker-state observation against `expectation`."""
+    """Compare the latest durable broker-state observation against `expectation`,
+
+    including the semantic instrument specification (review 1.17 §7, F-053):
+    a broker-side change to the contract (digits, volume steps, stops/freeze
+    level, trade mode, filling capability) is exactly the kind of fact this
+    stage exists to catch, and `instrument_specs` has had a durable producer
+    since F-048 — there is no remaining reason to reconcile only account and
+    position identity. Missing/unreadable is `UNKNOWN`, not `MATCHED` by
+    default, the same rule every other check in this function follows.
+    """
     snapshot = source.latest_account_snapshot()
     if snapshot is None:
         return _unknown(
@@ -171,11 +195,30 @@ def reconcile(
             snapshot_id=snapshot.snapshot_id,
         )
 
+    current_spec = instrument_specs.latest(canonical_symbol=expectation.canonical_symbol)
+    if current_spec is None:
+        return _unknown(
+            f"no instrument spec has ever been observed for {expectation.canonical_symbol!r}",
+            now=now,
+            snapshot_id=snapshot.snapshot_id,
+        )
+    baseline_spec = instrument_specs.earliest(canonical_symbol=expectation.canonical_symbol)
+    if baseline_spec is None:
+        # Cannot happen if current_spec exists (earliest <= latest by
+        # definition) — guarded anyway, fail-closed rather than trusting
+        # that invariant instead of checking it.
+        return _unknown(
+            f"instrument spec baseline for {expectation.canonical_symbol!r} is unreadable",
+            now=now,
+            snapshot_id=snapshot.snapshot_id,
+        )
+
     mismatches = _account_mismatches(snapshot, expectation)
     mismatches += _position_mismatches(source.positions_for(snapshot.snapshot_id), expectation)
     mismatches += _pending_order_mismatches(
         source.pending_orders_for(snapshot.snapshot_id), expectation
     )
+    mismatches += _instrument_spec_mismatches(baseline_spec, current_spec)
 
     if mismatches:
         return ReconciliationResult(
@@ -233,6 +276,27 @@ def _position_mismatches(
                 f"{position.canonical_symbol!r} != expected {expectation.canonical_symbol!r}"
             )
     return mismatches
+
+
+def _instrument_spec_mismatches(baseline: InstrumentSpec, current: InstrumentSpec) -> list[str]:
+    """Compare two specs by their semantic identity, never field by field.
+
+    `InstrumentSpec.spec_version` already excludes `captured_at_utc` and
+    `tick_value` (review F-039) — the latter drifts live with the
+    account/quote cross-currency rate, not with broker policy, so hashing
+    it would manufacture a false mismatch on every reconnect. Reusing that
+    same hash here means this check cannot regress independently of the
+    one F-039 already fixed.
+    """
+    if baseline.spec_version == current.spec_version:
+        return []
+    return [
+        "instrument spec changed since it was first observed: "
+        f"baseline spec_version={baseline.spec_version[:12]}... "
+        f"!= current spec_version={current.spec_version[:12]}... "
+        f"(broker_symbol {current.broker_symbol!r}, first observed "
+        f"{baseline.captured_at_utc.isoformat()})"
+    ]
 
 
 def _pending_order_mismatches(

@@ -38,8 +38,10 @@ from crumblr.domain.events import Event, build_event, event_type_for
 from crumblr.domain.models import Contract, DecisionCapsule, MarketBar, MarketTick
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.observability.logging import get_logger
+from crumblr.persistence.features import FeatureSnapshotStore
 from crumblr.persistence.journal import CapsuleStore, EventJournal
 from crumblr.persistence.market_data import MarketDataStore
+from crumblr.trading_agent.base import FeatureEvidence
 
 _log = get_logger("recording")
 
@@ -125,6 +127,19 @@ class RunRecorder(Protocol):
         """
         ...
 
+    def record_features(self, features: FeatureEvidence) -> None:
+        """Record what the Trading Agent actually saw for one decision window (D-031).
+
+        Written to its own store, not embedded in the capsule: `DecisionCapsule`
+        already carries `feature_set_version`/`feature_values_hash`, so this
+        adds the values those prove a match against, without changing the
+        capsule's own shape or its `provenance_fingerprint`. Called once per
+        window that has features at all — including NO_TRADE and BLOCKed/
+        HALTed windows — the same "every evaluated window, not only ones
+        that traded" rule `SignalGenerated` already follows.
+        """
+        ...
+
     def seal(self, capsule: DecisionCapsule) -> None:
         """Commit the window: its buffered events and the sealed capsule."""
         ...
@@ -156,6 +171,9 @@ class NullRecorder:
     def observe(self, tick: MarketTick, bar: MarketBar | None = None) -> None:
         return None
 
+    def record_features(self, features: FeatureEvidence) -> None:
+        return None
+
     def seal(self, capsule: DecisionCapsule) -> None:
         return None
 
@@ -177,6 +195,7 @@ class JournalRecorder:
         self._journal = EventJournal(engine)
         self._capsules = CapsuleStore(engine)
         self._market_data = MarketDataStore(engine)
+        self._features = FeatureSnapshotStore(engine)
         self._engine = engine
         self._environment = environment
         self._pending: list[Event[Contract]] = []
@@ -211,6 +230,14 @@ class JournalRecorder:
             self._pending_bars.append(bar)
         if len(self._pending_ticks) >= MARKET_DATA_BATCH:
             self._flush_market_data()
+
+    def record_features(self, features: FeatureEvidence) -> None:
+        # Written immediately, not buffered with the window's events: one
+        # row per decided window is low-volume compared to ticks/bars, and
+        # content-derived identity (`feature_snapshot_id`) already makes a
+        # duplicate write a no-op, the same reasoning `InstrumentSpecStore`
+        # uses for its own immediate, unbuffered writes.
+        self._features.record(features)
 
     def record(
         self,

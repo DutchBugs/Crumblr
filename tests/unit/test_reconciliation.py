@@ -9,21 +9,30 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 from uuid import UUID
 
-from crumblr.application.reconciliation import ExpectedState, reconcile
+from crumblr.application.reconciliation import (
+    DEFAULT_MAX_SNAPSHOT_AGE,
+    ExpectedState,
+    ReconciliationResult,
+    reconcile,
+)
 from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import ReconciliationStatus, SnapshotCompleteness
 from crumblr.domain.models import (
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
     BrokerPositionSnapshot,
+    InstrumentSpec,
 )
+from crumblr.domain.timeutils import UtcDatetime
 from tests.conftest import (
     FIXED_NOW,
     make_broker_account_snapshot,
     make_broker_pending_order_snapshot,
     make_broker_position_snapshot,
+    make_instrument_spec,
 )
 
 # Matches `make_broker_account_snapshot`'s own defaults (`tests/conftest.py`)
@@ -61,22 +70,69 @@ class FakeBrokerStateSource:
         return self._pending_orders
 
 
+# The default fixture every test implicitly reconciles against unless it
+# overrides `specs=`: one spec, observed once, so `earliest() == latest()`
+# and the instrument-spec check contributes no mismatch by default — the
+# same "matches unless told otherwise" shape `FakeBrokerStateSource` already
+# has for account/position/pending-order state.
+DEFAULT_SPEC = make_instrument_spec()
+
+
+class FakeInstrumentSpecSource:
+    def __init__(
+        self,
+        *,
+        latest: InstrumentSpec | None = DEFAULT_SPEC,
+        earliest: InstrumentSpec | None = DEFAULT_SPEC,
+    ) -> None:
+        self._latest = latest
+        self._earliest = earliest
+
+    def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
+        return self._latest
+
+    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
+        return self._earliest
+
+
 def expectation(**overrides: object) -> ExpectedState:
     return replace(ExpectedState.flat(GUARD), **overrides)  # type: ignore[arg-type]
+
+
+def reconcile_with(
+    source: FakeBrokerStateSource,
+    exp: ExpectedState | None = None,
+    *,
+    specs: FakeInstrumentSpecSource | None = None,
+    now: UtcDatetime,
+    max_snapshot_age: timedelta = DEFAULT_MAX_SNAPSHOT_AGE,
+) -> ReconciliationResult:
+    """`reconcile()` with the default matching instrument-spec fixture wired
+
+    in, so tests about account/position/pending-order behaviour do not each
+    have to know about F-053's instrument-spec check to stay green.
+    """
+    return reconcile(
+        source,
+        exp if exp is not None else expectation(),
+        instrument_specs=specs if specs is not None else FakeInstrumentSpecSource(),
+        now=now,
+        max_snapshot_age=max_snapshot_age,
+    )
 
 
 class TestUnknownWhenTheObservedSideCannotBeTrusted:
     """Review 1.16 §7's fail-closed rules: missing/stale/incomplete -> UNKNOWN."""
 
     def test_no_snapshot_ever_captured(self) -> None:
-        result = reconcile(FakeBrokerStateSource(account=None), expectation(), now=FIXED_NOW)
+        result = reconcile_with(FakeBrokerStateSource(account=None), expectation(), now=FIXED_NOW)
         assert result.status is ReconciliationStatus.UNKNOWN
         assert "ever been captured" in result.reasons[0]
         assert result.snapshot_id is None
 
     def test_a_stale_snapshot(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account),
             expectation(),
             now=FIXED_NOW + timedelta(minutes=10),
@@ -89,7 +145,9 @@ class TestUnknownWhenTheObservedSideCannotBeTrusted:
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, position_set_state=SnapshotCompleteness.FAILED
         )
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.UNKNOWN
         assert "position set" in result.reasons[0]
 
@@ -97,7 +155,9 @@ class TestUnknownWhenTheObservedSideCannotBeTrusted:
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, pending_order_set_state=SnapshotCompleteness.UNKNOWN
         )
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.UNKNOWN
         assert "pending-order set" in result.reasons[0]
 
@@ -105,7 +165,9 @@ class TestUnknownWhenTheObservedSideCannotBeTrusted:
 class TestMatchedOnAFlatCorrectAccount:
     def test_a_flat_complete_account_matches(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.MATCHED
         assert result.reasons == ()
         assert result.snapshot_id == account.snapshot_id
@@ -114,7 +176,7 @@ class TestMatchedOnAFlatCorrectAccount:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         position = make_broker_position_snapshot(snapshot_id=account.snapshot_id, ticket=111)
         order = make_broker_pending_order_snapshot(snapshot_id=account.snapshot_id, order_id=222)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account, positions=(position,), pending_orders=(order,)),
             expectation(
                 expected_position_tickets=frozenset({111}),
@@ -130,26 +192,32 @@ class TestMismatched:
 
     def test_wrong_server(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, server="OtherBroker-Demo")
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("server" in reason for reason in result.reasons)
 
     def test_wrong_currency(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, currency="USD")
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("currency" in reason for reason in result.reasons)
 
     def test_wrong_leverage(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, leverage=100)
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("leverage" in reason for reason in result.reasons)
 
     def test_an_unexpected_position(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         position = make_broker_position_snapshot(snapshot_id=account.snapshot_id, ticket=999)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account, positions=(position,)),
             expectation(),
             now=FIXED_NOW,
@@ -159,7 +227,7 @@ class TestMismatched:
 
     def test_a_missing_expected_position(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account),
             expectation(expected_position_tickets=frozenset({555})),
             now=FIXED_NOW,
@@ -170,7 +238,7 @@ class TestMismatched:
     def test_an_unexpected_pending_order(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         order = make_broker_pending_order_snapshot(snapshot_id=account.snapshot_id, order_id=777)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account, pending_orders=(order,)),
             expectation(),
             now=FIXED_NOW,
@@ -180,7 +248,7 @@ class TestMismatched:
 
     def test_a_missing_expected_pending_order(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account),
             expectation(expected_pending_order_ids=frozenset({888})),
             now=FIXED_NOW,
@@ -192,13 +260,91 @@ class TestMismatched:
         position = make_broker_position_snapshot(
             snapshot_id=account.snapshot_id, ticket=111, canonical_symbol="GBP/USD"
         )
-        result = reconcile(
+        result = reconcile_with(
             FakeBrokerStateSource(account=account, positions=(position,)),
             expectation(expected_position_tickets=frozenset({111})),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("symbol" in reason for reason in result.reasons)
+
+
+class TestInstrumentSpecReconciliation:
+    """Review 1.17 §7 / F-053: the semantic contract spec is part of what
+
+    reconciliation checks now that `instrument_specs` has a durable producer
+    (F-048) — not only account/position/pending-order identity.
+    """
+
+    def test_no_spec_ever_observed_is_unknown_not_matched(self) -> None:
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(),
+            specs=FakeInstrumentSpecSource(latest=None, earliest=None),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.UNKNOWN
+        assert any("no instrument spec" in reason for reason in result.reasons)
+
+    def test_the_same_spec_reobserved_still_matches(self) -> None:
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        spec = make_instrument_spec()
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(),
+            specs=FakeInstrumentSpecSource(latest=spec, earliest=spec),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.MATCHED
+
+    def test_a_material_spec_change_is_a_mismatch(self) -> None:
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        baseline = make_instrument_spec()
+        current = make_instrument_spec(volume_step=Decimal("0.10"))
+        assert baseline.spec_version != current.spec_version
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(),
+            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.MISMATCHED
+        assert any("instrument spec changed" in reason for reason in result.reasons)
+
+    def test_tick_value_drift_alone_does_not_cause_a_mismatch(self) -> None:
+        """F-039 already excludes `tick_value` from `spec_version`'s hash
+
+        because it drifts live with the account/quote cross-currency rate,
+        not with broker policy — review 1.17 §7 explicitly repeats that
+        instruction for this check. Reusing `spec_version` here means it is
+        structurally impossible to regress independently of that fix.
+        """
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        baseline = make_instrument_spec()
+        current = make_instrument_spec(tick_value=Decimal("1.13"))
+        assert baseline.spec_version == current.spec_version
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(),
+            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.MATCHED
+
+    def test_a_spec_mismatch_combines_with_other_mismatches(self) -> None:
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, currency="USD")
+        baseline = make_instrument_spec()
+        current = make_instrument_spec(digits=3)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(),
+            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.MISMATCHED
+        assert any("currency" in reason for reason in result.reasons)
+        assert any("instrument spec changed" in reason for reason in result.reasons)
 
 
 class TestAccountIdentity:
@@ -216,7 +362,7 @@ class TestAccountIdentity:
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, account_ref="wrongwrongwrong0"
         )
-        result = reconcile(FakeBrokerStateSource(account=account), exp, now=FIXED_NOW)
+        result = reconcile_with(FakeBrokerStateSource(account=account), exp, now=FIXED_NOW)
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("account identity" in reason for reason in result.reasons)
 
@@ -226,14 +372,16 @@ class TestAccountIdentity:
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, account_ref=exp.expected_account_ref
         )
-        result = reconcile(FakeBrokerStateSource(account=account), exp, now=FIXED_NOW)
+        result = reconcile_with(FakeBrokerStateSource(account=account), exp, now=FIXED_NOW)
         assert result.status is ReconciliationStatus.MATCHED
 
 
 class TestResultPayload:
     def test_to_payload_is_json_safe(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        result = reconcile(FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account), expectation(), now=FIXED_NOW
+        )
         payload = result.to_payload()
         assert payload["status"] == "MATCHED"
         assert payload["snapshot_id"] == str(account.snapshot_id)

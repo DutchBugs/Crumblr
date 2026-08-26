@@ -365,6 +365,68 @@ F-047 §5): a flat position book can still carry future exposure through a
 pending order, so that fact must not be invisible to reconciliation."""
 
 
+feature_snapshots = Table(
+    "feature_snapshots",
+    metadata,
+    # Identity is content-derived by the producer (both `compute_features`
+    # and the ICT model's `_feature_id` build it as a uuid5 of the symbol
+    # and the computation instant), so recomputing the same window's
+    # features twice — a replay rerun, or a live restart re-deciding —
+    # collapses to one row rather than duplicating.
+    Column("feature_snapshot_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("feature_set_version", String(128), nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    _utc_column("computed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    # The whole `FeatureEvidence` payload, whichever concrete shape the
+    # strategy that produced it uses (`FeatureSnapshot`, `IctFeatureSnapshot`,
+    # ...). `feature_set_version` says which — decoding is a future
+    # consumer's job, not this store's; today nothing reconstructs a typed
+    # object from this table, the same as `decision_capsules`' payload is
+    # queried by column but read back as a whole.
+    Column("payload", JSONB, nullable=False),
+    Index("ix_feature_snapshots_symbol_time", "canonical_symbol", "computed_at_utc"),
+)
+"""What the Trading Agent actually saw for one decision window (D-031).
+
+Previously only `feature_set_version` and a hash of these values were
+journalled with the capsule — proof that a later recomputation matches, not
+a way to see what the strategy saw. Append-only, content-keyed, like every
+other observation this schema holds."""
+
+
+decision_window_states = Table(
+    "decision_window_states",
+    metadata,
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("canonical_symbol", String(64), nullable=False),
+    Column("strategy_id", String(128), nullable=False),
+    Column("config_version", Text, nullable=False),
+    _utc_column("last_decided_open_time_utc", nullable=False),
+    # Every `TradeIntent.decision_hash` the risk engine's duplicate-
+    # protection check had seen when this was written. A JSON array, not a
+    # separate child table: unlike the broker-state snapshots, there is no
+    # need to query these individually, only to reload the whole set.
+    Column("seen_decision_hashes", JSONB, nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("schema_version", Integer, nullable=False),
+    Index(
+        "ix_decision_window_key",
+        "canonical_symbol",
+        "strategy_id",
+        "config_version",
+        "sequence",
+    ),
+)
+"""Live-decision idempotence checkpoints (review 1.17 §8, F-054). Append-only,
+
+like every other record of something a restart must not be allowed to
+forget: which bar window was last decided, and which decision hashes the
+duplicate-protection check has already seen."""
+
+
 APPEND_ONLY_TABLES: tuple[str, ...] = (
     "events",
     "decision_capsules",
@@ -377,6 +439,8 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "broker_account_snapshots",
     "broker_position_snapshots",
     "broker_pending_order_snapshots",
+    "decision_window_states",
+    "feature_snapshots",
 )
 """Tables the application role may only insert into and read from."""
 
@@ -402,6 +466,8 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "broker_account_snapshots",
             "broker_position_snapshots",
             "broker_pending_order_snapshots",
+            "decision_window_states",
+            "feature_snapshots",
         )
     ]
     return tuple(statements)

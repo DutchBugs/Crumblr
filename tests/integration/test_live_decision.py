@@ -34,6 +34,7 @@ from crumblr.market_data.synthetic import (
     generate_ticks,
 )
 from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.decision_window import PostgresDecisionWindowStore
 from crumblr.persistence.engine import DEFAULT_TEST_URL
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import EventJournal
@@ -130,6 +131,7 @@ def orchestrator_for(
         recorder=runtime.recorder,
         kill_switch=runtime.kill_switch,
         session_store=runtime.session_store,
+        decision_window_store=PostgresDecisionWindowStore(engine),
         clock=lambda: ticks[-1].received_time_utc,
     )
 
@@ -191,5 +193,38 @@ class TestLiveDecisionEndToEnd:
         assert not first.skipped
         assert second.skipped
         assert second.skipped_reason == "no new closed bar since the last decision"
+
+        runtime.dispose()
+
+    def test_a_fresh_orchestrator_against_the_same_database_does_not_redecide(
+        self, engine: Engine, config: PlatformConfig, tmp_path: Path
+    ) -> None:
+        """F-054, proven against real PostgreSQL rather than a fake store:
+
+        a second `LiveDecisionOrchestrator`, constructed independently
+        against the same database — exactly what a restarted process looks
+        like — must not re-decide the window the first one already sealed.
+        """
+        del engine  # see the comment in the first test above
+        runtime = build_durable_runtime(
+            environment=config.environment,
+            state_file=tmp_path / "safety_state.json",
+            url=DEFAULT_TEST_URL,
+        )
+        arm(runtime.kill_switch)
+
+        spec = build_instrument_spec()
+        ticks = list(generate_ticks(SyntheticMarketConfig(bar_count=80), spec))
+        seed(runtime.engine, spec, ticks, config)
+
+        first_process = orchestrator_for(config, runtime, ticks)
+        first_outcome = first_process.decide_once()
+        assert not first_outcome.skipped
+
+        second_process = orchestrator_for(config, runtime, ticks)
+        second_outcome = second_process.decide_once()
+
+        assert second_outcome.skipped
+        assert second_outcome.skipped_reason == "no new closed bar since the last decision"
 
         runtime.dispose()

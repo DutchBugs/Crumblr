@@ -17,7 +17,7 @@ than an overwrite silently losing the previous one.
 
 from __future__ import annotations
 
-from sqlalchemy import Engine, desc, select
+from sqlalchemy import Engine, asc, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from crumblr.domain.models import InstrumentSpec
@@ -65,6 +65,29 @@ class InstrumentSpecStore:
             select(instrument_specs.c.payload)
             .where(instrument_specs.c.canonical_symbol == canonical_symbol)
             .order_by(desc(instrument_specs.c.captured_at_utc))
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).scalar_one_or_none()
+        return InstrumentSpec.model_validate(row) if row is not None else None
+
+    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
+        """The first spec ever durably observed for `canonical_symbol`, or `None`.
+
+        The baseline reconciliation (F-053) compares `latest()` against: this
+        platform never hard-codes a contract specification (O-001 — digits,
+        volume steps, stops/freeze levels and filling modes are discovered,
+        never assumed), so there is no config-declared "expected" spec to
+        compare against the way `ExpectedState.flat()` compares account
+        fields against `AccountGuardConfig`. The first confirmed observation
+        is the only value this platform has ever asserted about the
+        contract, so a later observation disagreeing with it is exactly the
+        broker-side change reconciliation must catch.
+        """
+        statement = (
+            select(instrument_specs.c.payload)
+            .where(instrument_specs.c.canonical_symbol == canonical_symbol)
+            .order_by(asc(instrument_specs.c.captured_at_utc))
             .limit(1)
         )
         with self._engine.connect() as connection:

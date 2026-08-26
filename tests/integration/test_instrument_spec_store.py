@@ -55,3 +55,38 @@ class TestRecordAndReadBack:
         latest = store.latest(canonical_symbol="EUR/USD")
         assert latest is not None
         assert latest.spec_version == newer.spec_version
+
+
+class TestEarliest:
+    """F-053: reconciliation's baseline for detecting a broker-side change."""
+
+    def test_no_spec_recorded_yet_reads_as_none(self, engine: Engine) -> None:
+        store = InstrumentSpecStore(engine)
+        assert store.earliest(canonical_symbol="EUR/USD") is None
+
+    def test_one_spec_recorded_is_both_earliest_and_latest(self, engine: Engine) -> None:
+        spec = make_instrument_spec()
+        store = InstrumentSpecStore(engine)
+        store.record(spec)
+
+        assert store.earliest(canonical_symbol="EUR/USD") is not None
+        earliest = store.earliest(canonical_symbol="EUR/USD")
+        latest = store.latest(canonical_symbol="EUR/USD")
+        assert earliest is not None and latest is not None
+        assert earliest.spec_version == latest.spec_version == spec.spec_version
+
+    def test_earliest_stays_the_first_one_observed_after_a_later_change(
+        self, engine: Engine
+    ) -> None:
+        older = make_instrument_spec()
+        newer = make_instrument_spec(
+            digits=4, captured_at_utc=older.captured_at_utc + timedelta(minutes=5)
+        )
+        store = InstrumentSpecStore(engine)
+
+        store.record(older)
+        store.record(newer)
+
+        earliest = store.earliest(canonical_symbol="EUR/USD")
+        assert earliest is not None
+        assert earliest.spec_version == older.spec_version

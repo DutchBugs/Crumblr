@@ -322,20 +322,27 @@ src/crumblr/
   risk/            sizing, pre-trade policies, kill switch, equity ledger,
                    durable safety state, restart-safe risk sessions
   trading_agent/   ICT primitives (structure, imbalance, liquidity, sessions),
-                   the ict_v1 entry model, and the baseline_v1 benchmark
+                   the ict_v1 entry model, the baseline_v1 benchmark, and
+                   base.py's FeatureEvidence protocol (persisted by D-031)
   evaluator/       supervisor pre-trade policy; post-trade and drift at M7
   persistence/     PostgreSQL schema, event journal, capsule store, market
-                   store, broker-state store, instrument-spec store, safety
-                   and risk-session stores
+                   store, broker-state store, instrument-spec store (with
+                   earliest()/latest(), F-053), feature-snapshot store
+                   (D-031), decision-window store (F-054), safety and
+                   risk-session stores
   backtest/        cost and fill models                   (M3, remaining)
   application/     orchestration.py — the replay §3 transaction flow;
-                   recording.py/bootstrap.py/reconstruction.py; live_reader.py
-                   (M1 — observes + persists real MT5 state); broker_state.py
+                   recording.py (RunRecorder, incl. record_features)/
+                   bootstrap.py/reconstruction.py; live_reader.py (M1 —
+                   observes + persists real MT5 state); broker_state.py
                    (F-047 — one gateway read -> a durable snapshot);
-                   reconciliation.py (observed vs. expected broker state);
-                   live_decision.py (F-048 — LiveDecisionOrchestrator: real
-                   bar -> Trading Agent -> Risk -> Supervisor -> persist,
-                   execution structurally unreachable)
+                   reconciliation.py (observed vs. expected broker state,
+                   incl. instrument-spec comparison, F-053);
+                   decision_window.py (F-054 — durable decision-window
+                   idempotence); live_decision.py (F-048 —
+                   LiveDecisionOrchestrator: real bar -> Trading Agent ->
+                   Risk -> Supervisor -> persist, execution structurally
+                   unreachable)
   dashboard/       Dashboard v0 — read-only FastAPI app, outside the broker
                    execution boundary (review 1.9 F-035), visual scope frozen
   api/             control API — authenticated operator functions (M8, not built)
@@ -360,11 +367,11 @@ tests/             unit, property, replay, integration, chaos
 | One EUR/USD exposure, intraday entry cut-off | Enforced by the risk engine |
 | Durable broker account/position/pending-order snapshots (F-047) | Working, unit/integration-tested — **not yet real-terminal-validated** (F-051) |
 | Broker-state freshness as its own health concept (F-050) | Working, same validation status as above |
-| Read-only reconciliation v0 | Working — compares durable broker snapshots against an expected (pre-execution: flat) state; instrument-spec comparison not yet built (F-053); **not yet real-terminal-validated** |
+| Read-only reconciliation v0 | Working — compares durable broker snapshots **and** the instrument-spec baseline (F-053) against an expected (pre-execution: flat) state; **not yet real-terminal-validated** |
 | Live/shadow decision pipeline (F-048) | Working — real closed M5 bar reaches the Trading Agent, Risk Engine and Supervisor; execution structurally unreachable; **not yet real-terminal-validated** |
-| Durable decision-window idempotence | Not started — process-memory only today; harmless before an execution path exists, required before one (F-054) |
+| Durable decision-window idempotence (F-054) | Working — a restart restores which window was last decided and which `TradeIntent` hashes the duplicate-protection check has seen, from `DecisionWindowStore`; **not yet real-terminal-validated** |
 | Automatic flatten at the session boundary | Not started — detection halts instead (M5, ADR-004) |
-| Feature *values* in storage | Not started — only their hash and version (D-031) |
+| Feature *values* in storage (D-031) | Working — the full `FeatureEvidence` payload, not only its hash and version, persisted for every evaluated window on both the replay and live paths |
 | Post-trade evaluation, drift monitor | Not started |
 | Dashboard v0 | Working — read-only status page (`scripts/run_dashboard.py`), see above. Visual scope frozen; broker-state/reconciliation/decision-pipeline panels not yet added (waiting on F-051) |
 | Control API, manual HALT/FLATTEN from a UI | Not started |
