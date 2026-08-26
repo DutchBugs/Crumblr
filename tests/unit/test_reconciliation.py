@@ -71,32 +71,25 @@ class FakeBrokerStateSource:
 
 
 # The default fixture every test implicitly reconciles against unless it
-# overrides `specs=`: one spec, observed once, so `earliest() == latest()`
-# and the instrument-spec check contributes no mismatch by default — the
-# same "matches unless told otherwise" shape `FakeBrokerStateSource` already
-# has for account/position/pending-order state.
+# overrides `specs=`: one observed spec, matching `expectation()`'s own
+# default pinned `expected_spec_version` below — the same "matches unless
+# told otherwise" shape `FakeBrokerStateSource` already has for
+# account/position/pending-order state.
 DEFAULT_SPEC = make_instrument_spec()
 
 
 class FakeInstrumentSpecSource:
-    def __init__(
-        self,
-        *,
-        latest: InstrumentSpec | None = DEFAULT_SPEC,
-        earliest: InstrumentSpec | None = DEFAULT_SPEC,
-    ) -> None:
+    def __init__(self, *, latest: InstrumentSpec | None = DEFAULT_SPEC) -> None:
         self._latest = latest
-        self._earliest = earliest
 
     def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
         return self._latest
 
-    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
-        return self._earliest
-
 
 def expectation(**overrides: object) -> ExpectedState:
-    return replace(ExpectedState.flat(GUARD), **overrides)  # type: ignore[arg-type]
+    fields: dict[str, object] = {"expected_spec_version": DEFAULT_SPEC.spec_version}
+    fields.update(overrides)
+    return replace(ExpectedState.flat(GUARD), **fields)  # type: ignore[arg-type]
 
 
 def reconcile_with(
@@ -273,44 +266,62 @@ class TestInstrumentSpecReconciliation:
     """Review 1.17 §7 / F-053: the semantic contract spec is part of what
 
     reconciliation checks now that `instrument_specs` has a durable producer
-    (F-048) — not only account/position/pending-order identity.
+    (F-048) — not only account/position/pending-order identity. Review 1.19
+    §4 (F-055) then required the *expected* side to be an explicitly pinned
+    baseline, not whichever spec happened to be observed first.
     """
+
+    def test_no_pinned_baseline_is_unknown_even_with_a_matching_observation(self) -> None:
+        """F-055's exact concern: an unpinned baseline must never read as
+
+        MATCHED just because a spec has been observed — that would be
+        trust-on-first-use, not authority.
+        """
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(expected_spec_version=None),
+            specs=FakeInstrumentSpecSource(latest=DEFAULT_SPEC),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.UNKNOWN
+        assert any("no approved instrument-spec baseline" in reason for reason in result.reasons)
 
     def test_no_spec_ever_observed_is_unknown_not_matched(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         result = reconcile_with(
             FakeBrokerStateSource(account=account),
             expectation(),
-            specs=FakeInstrumentSpecSource(latest=None, earliest=None),
+            specs=FakeInstrumentSpecSource(latest=None),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.UNKNOWN
         assert any("no instrument spec" in reason for reason in result.reasons)
 
-    def test_the_same_spec_reobserved_still_matches(self) -> None:
+    def test_the_pinned_baseline_matches_the_current_observation(self) -> None:
         account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         spec = make_instrument_spec()
         result = reconcile_with(
             FakeBrokerStateSource(account=account),
-            expectation(),
-            specs=FakeInstrumentSpecSource(latest=spec, earliest=spec),
+            expectation(expected_spec_version=spec.spec_version),
+            specs=FakeInstrumentSpecSource(latest=spec),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.MATCHED
 
-    def test_a_material_spec_change_is_a_mismatch(self) -> None:
-        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        baseline = make_instrument_spec()
+    def test_a_material_spec_change_from_the_pinned_baseline_is_a_mismatch(self) -> None:
+        pinned = make_instrument_spec()
         current = make_instrument_spec(volume_step=Decimal("0.10"))
-        assert baseline.spec_version != current.spec_version
+        assert pinned.spec_version != current.spec_version
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         result = reconcile_with(
             FakeBrokerStateSource(account=account),
-            expectation(),
-            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            expectation(expected_spec_version=pinned.spec_version),
+            specs=FakeInstrumentSpecSource(latest=current),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.MISMATCHED
-        assert any("instrument spec changed" in reason for reason in result.reasons)
+        assert any("does not match the approved baseline" in reason for reason in result.reasons)
 
     def test_tick_value_drift_alone_does_not_cause_a_mismatch(self) -> None:
         """F-039 already excludes `tick_value` from `spec_version`'s hash
@@ -320,31 +331,50 @@ class TestInstrumentSpecReconciliation:
         instruction for this check. Reusing `spec_version` here means it is
         structurally impossible to regress independently of that fix.
         """
-        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
-        baseline = make_instrument_spec()
+        pinned = make_instrument_spec()
         current = make_instrument_spec(tick_value=Decimal("1.13"))
-        assert baseline.spec_version == current.spec_version
+        assert pinned.spec_version == current.spec_version
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
         result = reconcile_with(
             FakeBrokerStateSource(account=account),
-            expectation(),
-            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            expectation(expected_spec_version=pinned.spec_version),
+            specs=FakeInstrumentSpecSource(latest=current),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.MATCHED
 
     def test_a_spec_mismatch_combines_with_other_mismatches(self) -> None:
-        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, currency="USD")
-        baseline = make_instrument_spec()
+        pinned = make_instrument_spec()
         current = make_instrument_spec(digits=3)
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW, currency="USD")
         result = reconcile_with(
             FakeBrokerStateSource(account=account),
-            expectation(),
-            specs=FakeInstrumentSpecSource(latest=current, earliest=baseline),
+            expectation(expected_spec_version=pinned.spec_version),
+            specs=FakeInstrumentSpecSource(latest=current),
             now=FIXED_NOW,
         )
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("currency" in reason for reason in result.reasons)
-        assert any("instrument spec changed" in reason for reason in result.reasons)
+        assert any("does not match the approved baseline" in reason for reason in result.reasons)
+
+    def test_resetting_the_observation_database_does_not_silently_repin(self) -> None:
+        """F-055's motivating scenario: a fresh/reset database observing a
+
+        materially different spec must not have that new observation
+        quietly become the accepted baseline just because reconciliation
+        has nothing else to compare against — the pinned config value is
+        the only authority, and it does not move on its own.
+        """
+        pinned = make_instrument_spec()
+        first_observation_after_reset = make_instrument_spec(digits=2)
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(expected_spec_version=pinned.spec_version),
+            specs=FakeInstrumentSpecSource(latest=first_observation_after_reset),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.MISMATCHED
 
 
 class TestAccountIdentity:
@@ -358,7 +388,7 @@ class TestAccountIdentity:
 
     def test_a_mismatched_account_ref_is_caught(self) -> None:
         guard = GUARD.model_copy(update={"expected_login": 5_000_123})
-        exp = ExpectedState.flat(guard)
+        exp = ExpectedState.flat(guard, expected_spec_version=DEFAULT_SPEC.spec_version)
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, account_ref="wrongwrongwrong0"
         )
@@ -368,7 +398,7 @@ class TestAccountIdentity:
 
     def test_a_matching_account_ref_does_not_by_itself_cause_a_mismatch(self) -> None:
         guard = GUARD.model_copy(update={"expected_login": 5_000_123})
-        exp = ExpectedState.flat(guard)
+        exp = ExpectedState.flat(guard, expected_spec_version=DEFAULT_SPEC.spec_version)
         account = make_broker_account_snapshot(
             observed_at_utc=FIXED_NOW, account_ref=exp.expected_account_ref
         )

@@ -254,10 +254,17 @@ checked structurally by a test rather than by intent alone. It prints an
 "EXECUTION DISABLED" banner on every run as a reminder.
 
 `scripts/reconcile.py` is the one-shot companion: compares the latest
-durable broker-state snapshot (F-047) against the platform's expected state
-(currently `ExpectedState.flat()` — no execution path exists yet to expect
-anything else), returning `MATCHED`/`MISMATCHED`/`UNKNOWN`, the last never
-silently upgraded to the first.
+durable broker-state snapshot (F-047) — account/positions/pending orders
+(`ExpectedState.flat()`, since no execution path exists yet to expect
+anything else) and the instrument spec — against the platform's expected
+state, returning `MATCHED`/`MISMATCHED`/`UNKNOWN`, the last never silently
+upgraded to the first. The instrument-spec expectation is
+`config.MarketConfig.expected_spec_version`, an explicitly pinned value a
+human approves after reviewing a real observation (F-051) — never inferred
+from whichever spec happened to be observed first, which review 1.19 §4
+correctly flagged as trust-on-first-use rather than authority (F-055). It
+is `None` in every shipped config today, so reconciliation reads `UNKNOWN`
+for the instrument-spec dimension until a real run is reviewed and pinned.
 
 **Not yet real-terminal-validated.** Both of the above, and the broker-state
 capture/reconciliation feeding them, have only ever run against
@@ -326,9 +333,9 @@ src/crumblr/
                    base.py's FeatureEvidence protocol (persisted by D-031)
   evaluator/       supervisor pre-trade policy; post-trade and drift at M7
   persistence/     PostgreSQL schema, event journal, capsule store, market
-                   store, broker-state store, instrument-spec store (with
-                   earliest()/latest(), F-053), feature-snapshot store
-                   (D-031), decision-window store (F-054), safety and
+                   store, broker-state store, instrument-spec store,
+                   feature-snapshot store (D-031), decision-window store
+                   (F-054, three-state fail-closed recovery), safety and
                    risk-session stores
   backtest/        cost and fill models                   (M3, remaining)
   application/     orchestration.py — the replay §3 transaction flow;
@@ -337,12 +344,12 @@ src/crumblr/
                    observes + persists real MT5 state); broker_state.py
                    (F-047 — one gateway read -> a durable snapshot);
                    reconciliation.py (observed vs. expected broker state,
-                   incl. instrument-spec comparison, F-053);
-                   decision_window.py (F-054 — durable decision-window
-                   idempotence); live_decision.py (F-048 —
-                   LiveDecisionOrchestrator: real bar -> Trading Agent ->
-                   Risk -> Supervisor -> persist, execution structurally
-                   unreachable)
+                   incl. instrument-spec comparison against a pinned
+                   baseline, F-053/F-055); decision_window.py (F-054 —
+                   durable, fail-closed decision-window idempotence);
+                   live_decision.py (F-048 — LiveDecisionOrchestrator:
+                   real bar -> Trading Agent -> Risk -> Supervisor ->
+                   persist, execution structurally unreachable)
   dashboard/       Dashboard v0 — read-only FastAPI app, outside the broker
                    execution boundary (review 1.9 F-035), visual scope frozen
   api/             control API — authenticated operator functions (M8, not built)
@@ -367,9 +374,9 @@ tests/             unit, property, replay, integration, chaos
 | One EUR/USD exposure, intraday entry cut-off | Enforced by the risk engine |
 | Durable broker account/position/pending-order snapshots (F-047) | Working, unit/integration-tested — **not yet real-terminal-validated** (F-051) |
 | Broker-state freshness as its own health concept (F-050) | Working, same validation status as above |
-| Read-only reconciliation v0 | Working — compares durable broker snapshots **and** the instrument-spec baseline (F-053) against an expected (pre-execution: flat) state; **not yet real-terminal-validated** |
+| Read-only reconciliation v0 | Working — compares durable broker snapshots against an expected (pre-execution: flat) state, **and** the instrument spec against an explicitly pinned baseline (F-053/F-055 — `config.MarketConfig.expected_spec_version`, never the first observation); **not yet real-terminal-validated** |
 | Live/shadow decision pipeline (F-048) | Working — real closed M5 bar reaches the Trading Agent, Risk Engine and Supervisor; execution structurally unreachable; **not yet real-terminal-validated** |
-| Durable decision-window idempotence (F-054) | Working — a restart restores which window was last decided and which `TradeIntent` hashes the duplicate-protection check has seen, from `DecisionWindowStore`; **not yet real-terminal-validated** |
+| Durable decision-window idempotence (F-054) | Working — a restart restores which window was last decided and which `TradeIntent` hashes the duplicate-protection check has seen, from `DecisionWindowStore`; an unreadable record fails closed (trips the kill switch) rather than reading as empty; **not yet real-terminal-validated** |
 | Automatic flatten at the session boundary | Not started — detection halts instead (M5, ADR-004) |
 | Feature *values* in storage (D-031) | Working — the full `FeatureEvidence` payload, not only its hash and version, persisted for every evaluated window on both the replay and live paths |
 | Post-trade evaluation, drift monitor | Not started |

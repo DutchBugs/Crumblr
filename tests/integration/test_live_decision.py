@@ -22,8 +22,8 @@ from sqlalchemy import Engine
 from crumblr.application.bootstrap import DurableRuntime, build_durable_runtime
 from crumblr.application.broker_state import BrokerStateObservation
 from crumblr.application.live_decision import LiveDecisionOrchestrator
-from crumblr.config import PlatformConfig, load_config
-from crumblr.domain.enums import Environment, SnapshotCompleteness
+from crumblr.config import MarketConfig, PlatformConfig, load_config
+from crumblr.domain.enums import Environment, ReasonCode, SnapshotCompleteness
 from crumblr.domain.models import BrokerAccountSnapshot, InstrumentSpec
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.market_data.synthetic import (
@@ -226,5 +226,80 @@ class TestLiveDecisionEndToEnd:
 
         assert second_outcome.skipped
         assert second_outcome.skipped_reason == "no new closed bar since the last decision"
+
+        runtime.dispose()
+
+
+class TestF055PinnedInstrumentSpecBaseline:
+    """Review 1.19 §4: the pin comes from config, not from whichever spec
+
+    happened to be observed first — proven end to end against a real
+    orchestrator/database, not only the reconciliation unit tests.
+    """
+
+    def test_without_a_pinned_baseline_a_produced_intent_is_halted_by_reconciliation(
+        self, engine: Engine, config: PlatformConfig, tmp_path: Path
+    ) -> None:
+        del engine
+        runtime = build_durable_runtime(
+            environment=config.environment,
+            state_file=tmp_path / "safety_state.json",
+            url=DEFAULT_TEST_URL,
+        )
+        arm(runtime.kill_switch)
+
+        spec = build_instrument_spec()
+        ticks = list(generate_ticks(SyntheticMarketConfig(bar_count=BARS), spec))
+        seed(runtime.engine, spec, ticks, config)
+
+        # `config` (the module fixture) never pins expected_spec_version —
+        # the shipped default.
+        outcome = orchestrator_for(config, runtime, ticks).decide_once()
+
+        assert outcome.capsule is not None
+        if outcome.capsule.trade_intent is not None:
+            assert outcome.capsule.supervisor_decision is not None
+            assert (
+                ReasonCode.RECONCILIATION_UNKNOWN
+                in outcome.capsule.supervisor_decision.reason_codes
+            )
+
+        runtime.dispose()
+
+    def test_a_pinned_baseline_matching_the_real_spec_clears_reconciliation(
+        self, engine: Engine, config: PlatformConfig, tmp_path: Path
+    ) -> None:
+        del engine
+        runtime = build_durable_runtime(
+            environment=config.environment,
+            state_file=tmp_path / "safety_state.json",
+            url=DEFAULT_TEST_URL,
+        )
+        arm(runtime.kill_switch)
+
+        spec = build_instrument_spec()
+        ticks = list(generate_ticks(SyntheticMarketConfig(bar_count=BARS), spec))
+        seed(runtime.engine, spec, ticks, config)
+
+        pinned_config = config.model_copy(
+            update={
+                "markets": (
+                    MarketConfig(
+                        canonical_symbol="EUR/USD",
+                        enabled=True,
+                        expected_spec_version=spec.spec_version,
+                    ),
+                )
+            }
+        )
+        outcome = orchestrator_for(pinned_config, runtime, ticks).decide_once()
+
+        assert outcome.capsule is not None
+        if outcome.capsule.trade_intent is not None:
+            assert outcome.capsule.supervisor_decision is not None
+            assert (
+                ReasonCode.RECONCILIATION_UNKNOWN
+                not in outcome.capsule.supervisor_decision.reason_codes
+            )
 
         runtime.dispose()

@@ -179,6 +179,14 @@ class ReasonCode(StrEnum):
     RECONCILIATION_UNKNOWN = "RECONCILIATION_UNKNOWN"
     INCIDENT_STATE_UNKNOWN = "INCIDENT_STATE_UNKNOWN"
     SAFETY_STATE_UNKNOWN = "SAFETY_STATE_UNKNOWN"
+    DECISION_STATE_UNKNOWN = "DECISION_STATE_UNKNOWN"
+    """Review 1.19 §5 (F-054): the durable decision-window/duplicate-
+
+    protection record exists but could not be read, or failed its own
+    schema check. Distinct from a genuinely first-ever start (nothing
+    recorded, which is not an error) — collapsing the two would let a
+    corrupted idempotence record look identical to a legitimate fresh
+    start, which is exactly the failure class F-054 exists to prevent."""
 
     # §10.1 — supervisor pre-trade envelope checks.
     UNKNOWN_REGIME = "UNKNOWN_REGIME"

@@ -1,8 +1,10 @@
 """Decision-window idempotence state in PostgreSQL (review 1.17 §8, F-054).
 
 Same shape as `persistence/risk_session.py`: appended, never updated, and
-`load_latest` returns the most recently appended row rather than raising.
-Unlike the risk session (one budget per process), this is keyed by
+`load_latest` returns the most recently appended row rather than raising —
+`DecisionWindowRecord(unreadable=...)` if it cannot be trusted (review 1.19
+§5), never a bare `None` collapsing that with "nothing recorded". Unlike
+the risk session (one budget per process), this is keyed by
 `(canonical_symbol, strategy_id, config_version)` so more than one live
 decision worker can share a database without reading each other's
 idempotence state.
@@ -15,7 +17,11 @@ from uuid import uuid4
 from sqlalchemy import Engine, and_, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from crumblr.application.decision_window import SCHEMA_VERSION, DecisionWindowState
+from crumblr.application.decision_window import (
+    SCHEMA_VERSION,
+    DecisionWindowRecord,
+    DecisionWindowState,
+)
 from crumblr.observability.logging import get_logger
 from crumblr.persistence.schema import decision_window_states
 
@@ -30,7 +36,7 @@ class PostgresDecisionWindowStore:
 
     def load_latest(
         self, *, canonical_symbol: str, strategy_id: str, config_version: str
-    ) -> DecisionWindowState | None:
+    ) -> DecisionWindowRecord:
         statement = (
             select(decision_window_states)
             .where(
@@ -47,35 +53,39 @@ class PostgresDecisionWindowStore:
             with self._engine.connect() as connection:
                 row = connection.execute(statement).mappings().first()
         except Exception as error:
-            # Unreadable collapses to "nothing recorded" here — see the
-            # module docstring in application/decision_window.py for why
-            # that is a deliberately different rule from RiskSessionStore.
             _log.error("decision_window.unreadable", error=str(error))
-            return None
+            return DecisionWindowRecord(unreadable=f"decision-window store unreachable: {error}")
 
         if row is None:
-            return None
+            return DecisionWindowRecord()
         if row["schema_version"] != SCHEMA_VERSION:
             _log.error(
                 "decision_window.schema_mismatch",
                 stored=row["schema_version"],
                 expected=SCHEMA_VERSION,
             )
-            return None
+            return DecisionWindowRecord(
+                unreadable=(
+                    f"decision-window schema {row['schema_version']!r} "
+                    f"is not the expected {SCHEMA_VERSION}"
+                )
+            )
 
         try:
-            return DecisionWindowState(
-                canonical_symbol=row["canonical_symbol"],
-                strategy_id=row["strategy_id"],
-                config_version=row["config_version"],
-                last_decided_open_time_utc=row["last_decided_open_time_utc"],
-                seen_decision_hashes=frozenset(row["seen_decision_hashes"]),
-                recorded_at_utc=row["recorded_at_utc"],
-                schema_version=row["schema_version"],
+            return DecisionWindowRecord(
+                state=DecisionWindowState(
+                    canonical_symbol=row["canonical_symbol"],
+                    strategy_id=row["strategy_id"],
+                    config_version=row["config_version"],
+                    last_decided_open_time_utc=row["last_decided_open_time_utc"],
+                    seen_decision_hashes=frozenset(row["seen_decision_hashes"]),
+                    recorded_at_utc=row["recorded_at_utc"],
+                    schema_version=row["schema_version"],
+                )
             )
         except (ValueError, TypeError, KeyError) as error:
             _log.error("decision_window.malformed_row", error=str(error))
-            return None
+            return DecisionWindowRecord(unreadable=f"decision-window row is malformed: {error}")
 
     def save(self, state: DecisionWindowState) -> None:
         statement = pg_insert(decision_window_states).values(

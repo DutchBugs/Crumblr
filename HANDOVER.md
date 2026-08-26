@@ -6,11 +6,15 @@ Everything a developer needs to pick this up cold.
 available and the repository got a remote. **Rewritten 2026-08-26** after
 MT5 first contact, M1/M2 passing, and the platform being wired end to end
 from real market data through to a (deliberately unreachable) order.
-**Updated again later the same day** after reconciliation, decision-window
-durability and feature-value persistence were all completed and reviewed —
-everything left open now genuinely needs either a Windows/MT5 host, GitHub
-Actions access, or a human reviewer; nothing is blocked on engineering
-alone any more.
+**Updated twice more the same day**: once after reconciliation,
+decision-window durability and feature-value persistence were completed
+(F-053/F-054/D-031), and again after a second review the same day found —
+and this session fixed — two real correctness gaps in that work: F-054's
+recovery treated a corrupted record the same as an absent one, and F-053's
+instrument-spec comparison trusted whichever spec was observed first
+instead of an approved baseline. **Everything left open now genuinely
+needs either a Windows/MT5 host, GitHub Actions access, or a human
+reviewer; nothing is blocked on engineering alone any more.**
 
 **Start at §0.** It is the exact point of handover. §4 tells you what is
 already proven against the real broker and what the very next session
@@ -20,11 +24,10 @@ should do. Then `CLAUDE.md` §1 for the mandatory session-start protocol.
 
 ## 0. Start here — the exact point this was handed over
 
-**Handed over 2026-08-26**, after review `feedback.1.18.md` was processed:
-F-053 (instrument-spec reconciliation), F-054 (durable live-decision
-idempotence) and D-031 (feature-value persistence) were all built and
-shipped the same day, per the review's explicit instruction not to defer
-them through another documentation cycle.
+**Handed over 2026-08-26**, after review `feedback.1.19.md` was processed:
+it accepted F-053/F-054/D-031 as material progress but found two
+execution-grade gaps and reopened both the same day they were reported
+shipped — both fixed before this handover.
 
 The last few things that happened, in order:
 
@@ -53,19 +56,34 @@ The last few things that happened, in order:
    the same day, reopened a documentation-accuracy finding (F-033, a sixth
    time) and gave an explicit instruction: build F-053/F-054 now rather
    than deferring them again, since neither needs an MT5 host.
-6. F-053, F-054 and D-031 were all built, tested (unit + integration
-   against real PostgreSQL, two new Alembic migrations) and shipped the
-   same day. Full quality gate clean; replay determinism reproven; a
-   real-soak smoke test of `scripts/live_decision.py` still returns the
-   same honest "no instrument spec observed yet" skip it always has.
+6. F-053, F-054 and D-031 were all built and shipped the same day.
+7. Review 1.19 arrived the same day and found two real gaps in that work:
+   **F-054's recovery collapsed "record unreadable/corrupt" into "nothing
+   recorded"** — a genuinely dangerous conflation once an execution service
+   exists, since a corrupted duplicate-protection record would then look
+   exactly like a legitimate fresh start. **F-053's instrument-spec
+   comparison trusted whichever spec was observed first** as its baseline
+   (`InstrumentSpecStore.earliest()`) — trust-on-first-use, not authority: a
+   database reset (a workflow this project already has,
+   `scripts/reset_soak_database.py`) could observe an already-wrong spec
+   and reconciliation would call it `MATCHED` for comparing the broker to
+   its own new first observation. Both reopened as `F-054` (same ID,
+   hardened) and a new finding `F-055`, and both fixed the same day: F-054
+   now mirrors `RiskSessionStore`'s three-state recovery shape and trips
+   the kill switch on a corrupted record; F-055 replaced the
+   first-observation baseline with `config.MarketConfig.expected_spec_version`
+   — an explicit, human-approved, git-reviewable pin, `None` (→ `UNKNOWN`)
+   until a real F-051 observation is reviewed and accepted.
 
 **The single most valuable thing the next developer can do is F-051.**
-Everything from F-047 through D-031 — broker-state capture, reconciliation
-(including the new instrument-spec comparison), the live decision
-pipeline, its now-durable idempotence, and feature-value persistence — has
-only ever run against a fake/scripted MT5 terminal (`FakeMt5`/
-`ScriptedMt5`) or a real PostgreSQL with synthetic data. Not one line of
-this has met the real Pepperstone terminal yet. §4 below is the runbook.
+Everything from F-047 through F-055 — broker-state capture, reconciliation
+(account/position **and** instrument-spec, against a pinned baseline), the
+live decision pipeline, its now-durably-and-safely-recovered idempotence,
+and feature-value persistence — has only ever run against a fake/scripted
+MT5 terminal (`FakeMt5`/`ScriptedMt5`) or a real PostgreSQL with synthetic
+data. Not one line of this has met the real Pepperstone terminal yet. §4
+below is the runbook. **The first real run is also the first opportunity to
+actually pin a baseline** — see §4.4 step 9.
 
 ### 0.1 If you are a new session (human or agent) picking this up
 
@@ -75,18 +93,19 @@ handover time, open findings are:
 
 | Finding | What it needs | Blocked on |
 |---|---|---|
-| **F-051** | Real-terminal proof of F-047/F-052/reconciliation (incl. F-053)/F-048/F-054, one checklist session (`feedback.1.17.md` §6 / `feedback.1.18.md` §5) | A Windows host with the MT5 terminal and the logged-in Pepperstone demo account |
+| **F-051** | Real-terminal proof of F-047/F-052/reconciliation (incl. F-053/F-055)/F-048/F-054, one checklist session (`feedback.1.17.md` §6 / `feedback.1.19.md` §8, 18 steps) | A Windows host with the MT5 terminal and the logged-in Pepperstone demo account |
 | **CI** | Confirm the workflow actually ran green on a runner and record the result | `gh` CLI or GitHub Actions web access (this environment has neither) |
 | **Domain-contract review** | A human actually reads `review/domain_contracts.md` and approves or challenges it | A human reviewer |
 
 Everything that was previously listed here as unblocked engineering
-(F-053, F-054, D-031) shipped 2026-08-26 — see §0 above. **All three
-remaining items are genuinely blocked on something this environment
+(F-053, F-054, F-055, D-031) shipped 2026-08-26 — see §0 above. **All
+three remaining items are genuinely blocked on something this environment
 cannot produce on its own.** If you have MT5/Windows host access, **do
 F-051 first** — it is explicitly the highest-priority item and unblocks
-the most (it is also the trigger for
-the next regular review, `feedback.1.18.md`). If you don't, F-053 and F-054
-are the next unblocked engineering work.
+the most (it is also the trigger for the next regular review,
+`feedback.1.20.md`). If you don't, there is currently no unblocked
+engineering work queued — review the trackers for anything a fresh review
+may have raised since this was written.
 
 ### 0.2 Initialise the Windows host
 
@@ -125,9 +144,9 @@ uv run ruff check . ; uv run ruff format --check . ; uv run mypy ; uv run pytest
 |---|---|
 | `platform.machine()` | `AMD64`. `ARM64` means **stop** — no MT5 wheels exist for it |
 | `MetaTrader5.__version__` | a version string. An ImportError means `--extra mt5` was missed |
-| ruff, mypy | clean, 120 source files (2026-08-25 count — check `status.md` §13 for the latest) |
+| ruff, mypy | clean, 125 source files (2026-08-26 count — check `status.md` §13 for the latest) |
 | pytest, **no database running** | most persistence tests skip silently — a green run here proves nothing about persistence |
-| pytest, **with `crumblr-pg` up** | **836 passed, 3 skipped** as of 2026-08-25. The 3 skips are two POSIX-permission-bit tests that don't apply on this platform's filesystem, and one `MetaTrader5` import-availability test — all expected, not failures |
+| pytest, **with `crumblr-pg` up** | **877 passed, 3 skipped** as of 2026-08-26. The 3 skips are two POSIX-permission-bit tests that don't apply on this platform's filesystem, and one `MetaTrader5` import-availability test — all expected, not failures |
 
 ```powershell
 docker run -d --name crumblr-pg `
@@ -186,10 +205,10 @@ uv run python scripts/run_replay.py --bars 4000
 |---|---|
 | **Gate** | M0 open only on CI confirmation + human domain-contract review · **M1 PASSED** · **M2 PASSED** · M3/M4/M6/M7/M8 not passed (implemented, replay-tested) · **M5 and P2 NO-GO** |
 | **Capital at risk** | €0. No `order_check`/`order_send` call exists anywhere in this codebase's call graph — checked structurally by tests, not only by intent. |
-| **Tests** | 836 passing, 3 explained skips, `uv run pytest` with PostgreSQL up (2026-08-25 count) |
+| **Tests** | 877 passing, 3 explained skips, `uv run pytest` with PostgreSQL up (2026-08-26 count) |
 | **Strategy** | `ict_v1` configured, feature-frozen since review F-004. `baseline_v1` retained as benchmark and used in integration tests (it triggers far more often than `ict_v1` on a short synthetic series) |
 | **Real MT5 data** | Yes, since 2026-08-24: real EUR/USD ticks and M5 bars have been observed, persisted, and (as of F-048, not yet real-terminal-run) fed all the way through the Trading Agent / Risk Engine / Supervisor chain. Nothing has ever submitted an order. |
-| **Reviews** | `feedback.1.0` … `1.17` all processed. `feedback.1.18.md` is the next expected review, triggered by F-051 real evidence + CI result + the domain-contract package actually being supplied. `feedback.2.0.md` is mandatory before any `order_send`, demo included, and is a separate, larger review from the numbered 1.x sequence |
+| **Reviews** | `feedback.1.0` … `1.19` all processed. `feedback.1.20.md` is the next expected review, triggered by F-051 real evidence + a real shadow decision + CI result + the domain-contract package actually being supplied — though review 1.19 also explicitly accepts a real integration defect exposed by F-051 as its own trigger. `feedback.2.0.md` is mandatory before any `order_send`, demo included, and is a separate, larger review from the numbered 1.x sequence |
 
 The honest one-line summary: **the full decide-and-audit pipeline now runs**
 **on real market data; nothing has ever submitted an order, and the new**
@@ -462,10 +481,17 @@ Anything already settled is marked; anything still open needs a real read.
 7. **F-047's broker account balance/equity/margin/positions/pending orders,
    `SnapshotCompleteness` per side** — **not yet observed against the real
    terminal.** This is the open item.
-8. **Reconciliation's `MATCHED` verdict on a real flat account** — **not
-   yet observed.** Open.
-9. **A real Signal/Risk/Supervisor decision from `LiveDecisionOrchestrator`
-   against a real closed M5 bar** — **not yet observed.** Open.
+8. **Approve and pin the instrument-spec baseline (F-055).** After
+   confirming the observed spec's fields against what steps 1-6 above
+   already settled, set `expected_spec_version` on the `EUR/USD` entry in
+   `config/paper.yaml`'s `markets` list to the observed `spec_version` —
+   this is the explicit, git-reviewed act F-055 requires, not something
+   the code does for you. Nothing is pinned yet in any shipped config.
+9. **Reconciliation's `MATCHED` verdict on a real flat account, including
+   the pinned instrument spec** — **not yet observed.** Open, and cannot
+   read `MATCHED` for the spec dimension until step 8 above is done.
+10. **A real Signal/Risk/Supervisor decision from `LiveDecisionOrchestrator`
+    against a real closed M5 bar** — **not yet observed.** Open.
 
 Record the results in `status.md` §13 with evidence attached, and open a
 deviation for each disagreement between the terminal and the code — do not
@@ -517,66 +543,60 @@ and must rely on integration evidence, not tracker claims.
 
 ## 6. What to build next, in order
 
-### Immediately available — nothing blocks these
+### The one blocking checkpoint
 
-1. **F-051** — the real-terminal checklist, §0.4/§4 above. Needs a Windows/
-   MT5 host, which is the only thing blocking it.
-2. **F-053** — teach `application/reconciliation.py::reconcile()` to compare
-   the semantic instrument spec (broker symbol, digits, point, tick size,
-   contract size, volume steps, stops level, freeze level, trade mode,
-   filling capability) now that `instrument_specs` has a real producer.
-   Do not use `tick_value` as a change trigger (F-039 already excluded it
-   from the spec's own identity hash for the same reason). Unblocked, not
-   MT5-host-dependent.
-3. **F-054** — make `LiveDecisionOrchestrator`'s decision-window
-   identity durable, so a restart can never turn one closed M5 window into
-   two independently executable order proposals once an execution service
-   exists. Required invariant: `same strategy + config + canonical symbol +
-   closed M5 window + feature/input identity → same logical decision
-   identity`, held across restart/reconnect/crash recovery. Connects to
-   the later durable `order_request_id`. Unblocked.
-4. **D-031** — persist feature *values*, not only their hash and version.
-   A capsule proves a later recomputation matches; it does not let anyone
-   see what the strategy actually saw. Review 1.17 §9: required before any
-   live-shadow run counts as promotion-quality evidence, though the first
-   F-051 wiring run is explicitly allowed to happen before this lands.
+1. **F-051** — the real-terminal checklist, §0.4/§4 above
+   (`feedback.1.19.md` §8, 18 steps, now covering F-047 through F-055 and
+   D-031 together). Needs a Windows/MT5 host, which is the only thing
+   blocking it. As of 2026-08-26 there is no unblocked engineering work
+   queued ahead of it — F-053, F-054, F-055 and D-031 (the things that
+   used to be listed here) are all shipped.
 
 ### Evidence/approval tasks — not engineering
 
-5. **CI** — confirm the workflow actually ran green on a runner (commit
+2. **CI** — confirm the workflow actually ran green on a runner (commit
    SHA, Linux job, Windows job, PostgreSQL tests, gitleaks, unexpected
    skips) and record the result. Needs `gh` CLI or GitHub Actions web
    access.
-6. **Domain-contract human review** — supply `review/domain_contracts.md`
+3. **Domain-contract human review** — supply `review/domain_contracts.md`
    unchanged to the reviewer; it has been assembled but never actually
-   read by the reviewer (review 1.17 §10).
+   read by the reviewer (review 1.17 §10, reconfirmed 1.19 §10).
 
 ### Blocked on a human decision
 
-7. Confirm the risk budget in `config/paper.yaml` (build.md §29 Q7-Q8) —
+4. Confirm the risk budget in `config/paper.yaml` (build.md §29 Q7-Q8) —
    placeholders, not policy (`D-013`).
-8. Confirm the intraday cut-off and flatten offsets (`ADR-004` §3).
-9. Production/demo HALT-reset authority (Q12).
+5. Confirm the intraday cut-off and flatten offsets (`ADR-004` §3).
+6. Production/demo HALT-reset authority (Q12).
 
 ### After F-051 succeeds
 
-10. **Dashboard operational data** — balance, equity, open P/L, free
-    margin, open positions, pending orders, broker-state age,
-    reconciliation status, live/shadow pipeline (review 1.17 §15's exact
-    list). No further visual redesign — the layout is frozen.
-11. **Phase 4 — execution engineering, prepared but not enabled.** A
-    separate execution-capable MT5 adapter, `order_check`, an
-    `ApprovedOrder` contract, an `ExecutionResult` contract, a durable
-    `order_request_id`, ADR-001's final execution-time risk revalidation,
-    the automatic intraday flatten, post-result reconciliation. None of
-    this is built yet, correctly — see the note in §3 above about keeping
-    `LiveDecisionOrchestrator` and any future execution adapter as
-    separate classes, the same way `LiveReader` stays separate from both.
-12. **F-049** — the multi-gated execution enablement rule (environment,
+7. **Pin the instrument-spec baseline (F-055).** The first real,
+   human-verified observation from step 1 becomes
+   `config.MarketConfig.expected_spec_version` — see §4.4 step 8 above.
+   Without this, reconciliation reads `UNKNOWN` for the instrument-spec
+   dimension forever, by design.
+8. **Dashboard operational data** — balance, equity, open P/L, free
+   margin, open positions, pending orders, broker-state age,
+   reconciliation status, live/shadow pipeline (review 1.17 §15's exact
+   list, reconfirmed 1.19 §11). No further visual redesign — the layout is
+   frozen.
+9. **Phase 4 — execution engineering, may be prepared in parallel with
+   F-051, but nothing may become order-capable until F-054's fail-closed
+   fix is in — it now is (review 1.19 §5, fixed 2026-08-26).** A separate
+   execution-capable MT5 adapter, `order_check`, an `ApprovedOrder`
+   contract, an `ExecutionResult` contract, a durable `order_request_id`
+   (build directly on `DecisionWindowState`'s identity, per D-046's own
+   "watch for"), ADR-001's final execution-time risk revalidation, the
+   automatic intraday flatten, post-result reconciliation. None of this is
+   built yet, correctly — see the note in §3 above about keeping
+   `LiveDecisionOrchestrator` and any future execution adapter as separate
+   classes, the same way `LiveReader` stays separate from both.
+10. **F-049** — the multi-gated execution enablement rule (environment,
     account/server, reconciliation, data health, safety state, risk
     policy, execution adapter, terminal AlgoTrading, `feedback.2.0` — all
     simultaneously true). Not built, correctly, since M5 is NO-GO.
-13. `feedback.2.0.md`, then one deliberately constrained canary DEMO order
+11. `feedback.2.0.md`, then one deliberately constrained canary DEMO order
     (O-006) — a technical proof, not a profitability claim.
 
 ---
@@ -768,4 +788,4 @@ thing it is meant to observe.
 | What did the reviewer say? | `review/feedback.1.*.md`, newest first |
 | Has this been proven against the real broker, or only against a fake one? | §4/§8 above, and the Implementation column in `review/FEEDBACK.md` |
 | How do I connect to MT5? | §4 above, and `scripts/mt5_probe.py` / `scripts/mt5_live_reader.py` |
-| What is the very next thing to do? | §0/§6 above — F-051 if you have a Windows/MT5 host, F-053/F-054 if you don't |
+| What is the very next thing to do? | §0/§6 above — F-051 if you have a Windows/MT5 host; otherwise CI evidence, the domain-contract supply, or an owner-policy decision are the only unblocked items |

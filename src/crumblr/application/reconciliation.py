@@ -30,6 +30,20 @@ with what the platform expects. That is exactly the shape build.md's
 five-stage pipeline gives this stage: "Agent proposes. Risk engine
 constrains. Supervisor vetoes. Execution service executes. Reconciliation
 verifies."
+
+**The instrument spec has an expected value too, and it must be pinned,
+not inferred (review 1.19 §4, F-055).** An earlier version of this module
+compared the latest observed `InstrumentSpec` against the *first* one ever
+durably recorded — which detects drift after that first row, but never
+establishes that the first row itself was the approved contract. A fresh
+or reset database could observe an already-wrong spec and call it its own
+baseline, and reconciliation would report `MATCHED` for comparing the
+broker to itself. `ExpectedState.expected_spec_version` is instead read
+from `config.MarketConfig.expected_spec_version` — `None` until a human
+explicitly approves a real observation (normally during F-051), at which
+point it becomes a git-reviewable config value like any other pinned
+expectation in this module (`expected_server`, `expected_currency`, …).
+No pin yet means `UNKNOWN`, never `MATCHED`.
 """
 
 from __future__ import annotations
@@ -71,9 +85,22 @@ class ExpectedState:
     expected_account_ref: str | None = None
     expected_position_tickets: frozenset[int] = frozenset()
     expected_pending_order_ids: frozenset[int] = frozenset()
+    expected_spec_version: str | None = None
+    """The pinned, approved `InstrumentSpec.spec_version` (review 1.19 §4,
+
+    F-055). `None` means no human has approved a baseline yet — reconciled
+    as `UNKNOWN` for the instrument-spec dimension, never inferred from
+    whichever observation happened to be recorded first. See
+    `config.MarketConfig.expected_spec_version` for how this is set."""
 
     @classmethod
-    def flat(cls, guard: AccountGuardConfig, *, canonical_symbol: str = "EUR/USD") -> ExpectedState:
+    def flat(
+        cls,
+        guard: AccountGuardConfig,
+        *,
+        canonical_symbol: str = "EUR/USD",
+        expected_spec_version: str | None = None,
+    ) -> ExpectedState:
         """The only correct expectation before an execution path exists
 
         (review 1.16 §8): no open positions, no pending orders. Once
@@ -92,6 +119,7 @@ class ExpectedState:
             expected_leverage=guard.expected_leverage,
             canonical_symbol=canonical_symbol,
             expected_account_ref=expected_account_ref,
+            expected_spec_version=expected_spec_version,
         )
 
 
@@ -131,14 +159,15 @@ class BrokerStateSource(Protocol):
 class InstrumentSpecSource(Protocol):
     """The slice of `persistence.instrument_specs.InstrumentSpecStore` this reads.
 
-    Both methods, not only `latest`: F-053 compares the current observation
-    against the first one ever durably recorded (`earliest`) — see that
-    method's docstring for why there is no config-declared expectation to
-    compare against instead.
+    Only `latest`: review 1.19 §4 (F-055) replaced the original design —
+    comparing against `earliest()`, the first spec ever durably observed —
+    with comparing against an explicitly pinned `expected_spec_version`
+    (`ExpectedState.expected_spec_version`). `earliest()` remains on
+    `InstrumentSpecStore` itself as a discovery/diagnostic tool, just no
+    longer part of what reconciliation reads.
     """
 
     def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
-    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None: ...
 
 
 def _unknown(reason: str, *, now: UtcDatetime, snapshot_id: UUID | None) -> ReconciliationResult:
@@ -167,6 +196,11 @@ def reconcile(
     since F-048 — there is no remaining reason to reconcile only account and
     position identity. Missing/unreadable is `UNKNOWN`, not `MATCHED` by
     default, the same rule every other check in this function follows.
+
+    The instrument-spec comparison is against `expectation.expected_spec_version`
+    — an explicitly pinned, human-approved baseline — never against whichever
+    spec happened to be recorded first (review 1.19 §4, F-055). No pin yet
+    means `UNKNOWN`, not "trust the first observation".
     """
     snapshot = source.latest_account_snapshot()
     if snapshot is None:
@@ -195,20 +229,17 @@ def reconcile(
             snapshot_id=snapshot.snapshot_id,
         )
 
+    if expectation.expected_spec_version is None:
+        return _unknown(
+            f"no approved instrument-spec baseline has been pinned for "
+            f"{expectation.canonical_symbol!r} — see config.MarketConfig.expected_spec_version",
+            now=now,
+            snapshot_id=snapshot.snapshot_id,
+        )
     current_spec = instrument_specs.latest(canonical_symbol=expectation.canonical_symbol)
     if current_spec is None:
         return _unknown(
             f"no instrument spec has ever been observed for {expectation.canonical_symbol!r}",
-            now=now,
-            snapshot_id=snapshot.snapshot_id,
-        )
-    baseline_spec = instrument_specs.earliest(canonical_symbol=expectation.canonical_symbol)
-    if baseline_spec is None:
-        # Cannot happen if current_spec exists (earliest <= latest by
-        # definition) — guarded anyway, fail-closed rather than trusting
-        # that invariant instead of checking it.
-        return _unknown(
-            f"instrument spec baseline for {expectation.canonical_symbol!r} is unreadable",
             now=now,
             snapshot_id=snapshot.snapshot_id,
         )
@@ -218,7 +249,7 @@ def reconcile(
     mismatches += _pending_order_mismatches(
         source.pending_orders_for(snapshot.snapshot_id), expectation
     )
-    mismatches += _instrument_spec_mismatches(baseline_spec, current_spec)
+    mismatches += _instrument_spec_mismatches(expectation.expected_spec_version, current_spec)
 
     if mismatches:
         return ReconciliationResult(
@@ -278,24 +309,24 @@ def _position_mismatches(
     return mismatches
 
 
-def _instrument_spec_mismatches(baseline: InstrumentSpec, current: InstrumentSpec) -> list[str]:
-    """Compare two specs by their semantic identity, never field by field.
+def _instrument_spec_mismatches(expected_spec_version: str, current: InstrumentSpec) -> list[str]:
+    """Compare the pinned baseline against the current observation by
 
-    `InstrumentSpec.spec_version` already excludes `captured_at_utc` and
-    `tick_value` (review F-039) — the latter drifts live with the
-    account/quote cross-currency rate, not with broker policy, so hashing
-    it would manufacture a false mismatch on every reconnect. Reusing that
-    same hash here means this check cannot regress independently of the
-    one F-039 already fixed.
+    semantic identity, never field by field. `InstrumentSpec.spec_version`
+    already excludes `captured_at_utc` and `tick_value` (review F-039) — the
+    latter drifts live with the account/quote cross-currency rate, not with
+    broker policy, so hashing it would manufacture a false mismatch on
+    every reconnect. Reusing that same hash here means this check cannot
+    regress independently of the one F-039 already fixed.
     """
-    if baseline.spec_version == current.spec_version:
+    if expected_spec_version == current.spec_version:
         return []
     return [
-        "instrument spec changed since it was first observed: "
-        f"baseline spec_version={baseline.spec_version[:12]}... "
+        "instrument spec does not match the approved baseline: "
+        f"expected spec_version={expected_spec_version[:12]}... "
         f"!= current spec_version={current.spec_version[:12]}... "
-        f"(broker_symbol {current.broker_symbol!r}, first observed "
-        f"{baseline.captured_at_utc.isoformat()})"
+        f"(broker_symbol {current.broker_symbol!r}, observed "
+        f"{current.captured_at_utc.isoformat()})"
     ]
 
 

@@ -1,7 +1,7 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.6  
+**Status document version:** 1.7  
 **Last updated:** 2026-08-26  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
@@ -47,7 +47,7 @@ Gate qualification is a separate, human decision recorded in §16.
 
 | Component | Maturity | Gate qualification | Blocker |
 |---|---|---|---|
-| 1. Platform / Application | REPLAY-TESTED | **NOT PASSED** (M0) | M0's own remainder: human contract review, and CI never run on a runner. Broker and Windows host are M1 dependencies and are tracked there (F-010) |
+| 1. Platform / Application | MT5-INTEGRATED (M1); everything past M1 is REPLAY-TESTED, not yet real-terminal-validated (F-051) | **NOT PASSED** (M0) | M0's own remainder: human contract review, and CI never run on a runner. M1 itself is PASSED — see §16 Promotion history |
 | 2. Trading Agent | REPLAY-TESTED | **NOT PASSED** (M6) | No real EUR/USD evidence; feature-frozen per F-004 |
 | 3. Evaluator / Supervisor | UNIT-TESTED | **NOT PASSED** (M7) | Layer 1 only; post-trade and drift not started |
 
@@ -72,8 +72,8 @@ LIVE-CANARY
 ## Overall health
 
 ```text
-Engineering health:   AMBER   (lint/types/tests green locally, 836 passed/3
-                                explained skips as of 2026-08-25; CI still
+Engineering health:   AMBER   (lint/types/tests green locally, 877 passed/3
+                                explained skips as of 2026-08-26; CI still
                                 never confirmed executed on a runner — review
                                 1.17 §11 now treats this as a pure evidence-
                                 retrieval task, not an engineering blocker)
@@ -257,10 +257,10 @@ Next objective: F-051 on the next Windows/MT5 session (the checklist in
 - [x] environment config — `config/base.yaml` + `config/paper.yaml`, versioned by content hash
 - [x] strict typing — mypy `strict`, clean over 125 source files
 - [x] linting — ruff check + format, clean
-- [x] tests — 866 total (property/replay/chaos suites plus unit and
+- [x] tests — 880 total (property/replay/chaos suites plus unit and
       integration, the latter needing a real PostgreSQL and skipping loudly
-      without one); 863 passed, 3 skipped (platform-dependent, explained),
-      2026-08-26 (F-053/F-054/D-031 shipped — see §13 twenty-eighth entry)
+      without one); 877 passed, 3 skipped (platform-dependent, explained),
+      2026-08-26 (F-053/F-054/F-055/D-031 shipped — see §13 twenty-ninth entry)
 - [x] schema migrations — Alembic baseline `ce70efeb9fe9`; a migrated database
       is asserted to match the application's metadata, and a `pg_dump` restore
       is asserted to reproduce the run
@@ -1002,17 +1002,28 @@ Next engineering steps once unblocked:
       until F-051 (real-terminal validation) succeeds. Review 1.17 §15 is
       explicit: no further visual redesign, operational data only
 - [x] ~~F-053 (review 1.17 §7)~~ — done 2026-08-26, per review 1.18 §6's
-      explicit "build now" instruction: `reconcile()` compares the durable
-      instrument-spec baseline (first ever observed for the symbol) against
-      the latest observation via `spec_version`; missing/changed →
-      `UNKNOWN`/`MISMATCHED`. `InstrumentSpecStore.earliest()` (new).
-      Closes the `D-045` "watch for" condition
+      explicit "build now" instruction: `reconcile()` compares the
+      instrument spec's `spec_version` against an expected value;
+      missing/changed/unpinned → `UNKNOWN`/`MISMATCHED`. Closes the `D-045`
+      "watch for" condition. Its first version compared against the
+      earliest-ever observation — review 1.19 §4 reopened that half as
+      F-055 (below), fixed the same day
 - [x] ~~F-054 (review 1.17 §8)~~ — done 2026-08-26, per review 1.18 §7's
       "hard prerequisite" framing: `application/decision_window.py` +
       `persistence/decision_window.py::PostgresDecisionWindowStore` make
       `LiveDecisionOrchestrator`'s decision-window/duplicate-protection
       state durable, keyed by (canonical_symbol, strategy_id,
-      config_version). Migration `a7c4e19d6f52`
+      config_version). Migration `a7c4e19d6f52`. Review 1.19 §5 reopened it
+      the same day for execution-grade failure semantics — an unreadable
+      record must not read as "nothing recorded" — fixed the same day:
+      `DecisionWindowRecord` (three states, mirroring `RiskSessionStore`)
+      + `_recover_decision_window()` trips the kill switch on corruption
+- [x] ~~F-055 (review 1.19 §4)~~ — done 2026-08-26: the instrument-spec
+      baseline F-053 reconciles against must be an explicitly pinned,
+      human-approved value, not whichever spec happened to be observed
+      first (trust-on-first-use). `config.MarketConfig.expected_spec_version`
+      — `None` (→ `UNKNOWN`) until a real F-051 observation is reviewed and
+      approved; `PlatformConfig.market_for()` (new) looks it up per symbol
 - [x] ~~D-031 (feature-value persistence)~~ — done 2026-08-26:
       `persistence/features.py::FeatureSnapshotStore` durably records the
       full `FeatureEvidence` payload for every evaluated window, wired into
@@ -1040,11 +1051,13 @@ Next engineering steps once unblocked:
       reconciliation → SL presence → closure → audit trail), **not** as
       evidence the strategy is profitable (review 1.15 §13/§14/§16).
 
-Next regular review (`feedback.1.19.md`) triggers on a meaningful package per
-review 1.18 §15 — F-051 real MT5 validation, plus a real shadow Agent
-decision, plus the CI result, plus `review/domain_contracts.md` actually
-supplied — arriving together, not after one small change. F-053/F-054/D-031
-are now shipped (review 1.18 §§6-8); only the three genuinely blocked items
+Next regular review (`feedback.1.20.md`) triggers on a meaningful package per
+review 1.19 §17 — F-054 hardened, plus F-055 pinned baseline, plus F-051
+real MT5 validation, plus a real shadow decision, plus CI and/or the
+domain-contract package — though the review explicitly also accepts a real
+integration defect exposed by F-051 as its own trigger, without waiting for
+the whole bundle. F-053/F-054/F-055/D-031 are all shipped as of 2026-08-26
+(reviews 1.18 §§6-8 and 1.19 §§4-5); only three genuinely blocked items
 remain: F-051 (Windows/MT5 host), CI (`gh`/Actions access), and the
 domain-contract supply (a human reviewer).
 
@@ -4800,6 +4813,132 @@ F-051's job — none of this session's work has met the real terminal.
   `feedback.1.17.md` §6 / `feedback.1.18.md` §5, now also covering the
   instrument-spec comparison, decision-window durability and feature
   persistence added this entry.
+- Run CI on a runner and record the result; supply
+  `review/domain_contracts.md` unchanged for actual reviewer inspection —
+  both remain pure evidence/approval tasks, not engineering.
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-26 (twenty-ninth entry) — review 1.19 processed: F-054 hardened to fail closed, F-055 (pinned instrument-spec baseline) built, F-033 synced a seventh time
+
+**Verdict: review 1.19 accepted F-053/F-054/D-031 as material progress but**
+**found two real execution-grade gaps in the same-day work and reopened**
+**both immediately — a corrupted F-054 record was indistinguishable from**
+**an absent one, and F-053's baseline trusted whichever spec was observed**
+**first rather than an approved value. Both fixed the same day, alongside**
+**the two small F-033 summary-sync drifts the review flagged as**
+**non-blocking. F-051 is now, in the reviewer's own words, "the main**
+**real-world checkpoint" — nothing else stands between this platform and**
+**that session.**
+
+`review/feedback.1.19.md` arrived reviewing the twenty-eighth entry's
+F-053/F-054/D-031 work. Its verdict: **GO — material technical progress;**
+**F-051 is now the main real-world checkpoint.** M1/M2 remain PASSED; M0
+stays open on CI + contract review only.
+
+**F-033 — seventh reopen, non-blocking, fixed while processing.** Two
+summary-sync drifts: §1's maturity table still called Platform/Application
+flatly `REPLAY-TESTED` while §3 already said `MT5-INTEGRATED (M1)`; and
+§1's "Overall health" line cited the pre-F-053/054/031 test count (836)
+while the repository checklist already said 863. Both corrected in place.
+
+**F-054 reopened for execution-grade failure semantics (review 1.19 §5).**
+The version shipped in the twenty-eighth entry collapsed "the decision-
+window record is unreadable/corrupt" into "nothing recorded" — deliberately,
+on the reasoning that the only consequence today is a duplicate audit row.
+The reviewer's point stands regardless: a corrupted idempotence record
+would look *identical* to a legitimate fresh start, and that distinction is
+exactly what F-054 exists to preserve, not a corner to cut while it is
+still cheap. Fixed by mirroring `risk/session.py`'s `SessionRecord`/
+`recover_session` shape exactly: `DecisionWindowRecord(state, unreadable)` —
+three answers, not two — and a new pure function `recover_decision_window()`.
+`LiveDecisionOrchestrator._recover_decision_window()` (called once, lazily,
+on the first `decide_once()`, not in `__init__` — a constructor should not
+have this kind of side effect) now trips the kill switch with the new
+`ReasonCode.DECISION_STATE_UNKNOWN` when the record cannot be trusted,
+using the exact same `_trip()` mechanism `_recover_session()` already uses
+for a corrupted risk-session record. `PostgresDecisionWindowStore.load_latest()`
+now returns `DecisionWindowRecord(unreadable=...)` on a connection failure,
+a schema-version mismatch, or a malformed row — never a bare `None`.
+
+**F-055 — instrument-spec baseline must be authorized, not first-observed
+(new finding, review 1.19 §4, built and closed the same day).** F-053's
+original design compared the latest observed spec against
+`InstrumentSpecStore.earliest()` — the first spec ever durably recorded.
+The reviewer's exact framing: that "detects drift after the first row" but
+"does not establish that the first row itself is the approved expected
+broker contract" — trust-on-first-use, not authority. The concrete risk:
+`scripts/reset_soak_database.py` already exists precisely because this
+project resets its observation database sometimes, and a fresh database's
+first observation after a reset could be an already-wrong spec that
+reconciliation would then call `MATCHED` — because it would be comparing
+the broker to its own new first observation, not to anything approved.
+Fixed per the review's required sequence ("discover → verify → pin →
+reconcile future observations"): `config.MarketConfig.expected_spec_version:
+str | None = None` — a new field, explicitly set by a human only after a
+real F-051 observation has been reviewed and accepted, exactly as
+git-reviewable as any other config edit. `None` (the state of every
+shipped config today, since no F-051 run has happened) reconciles as
+`UNKNOWN`, never `MATCHED`. `PlatformConfig.market_for()` (new) looks up
+the pin per symbol; `ExpectedState.expected_spec_version` carries it into
+`reconcile()`; `scripts/reconcile.py` and `LiveDecisionOrchestrator` both
+wired through. `InstrumentSpecStore.earliest()` itself is unchanged and
+still useful as a discovery/diagnostic tool — it is simply no longer part
+of what reconciliation trusts.
+
+**A real behavioural consequence, caught while building this, not by a
+later reviewer:** since no shipped config pins a baseline, every existing
+`LiveDecisionOrchestrator` test now sees reconciliation read `UNKNOWN` for
+the instrument-spec dimension whenever an intent is actually proposed —
+which correctly makes the Supervisor HALT on `RECONCILIATION_UNKNOWN`
+(`evaluator/pretrade.py`'s existing, unmodified rule). Checked against
+every existing unit and integration test in `test_live_decision.py`: none
+of them assert a specific non-HALT outcome for a produced intent, so this
+is a real, correct, fail-closed behaviour change with no false test
+regressions — confirmed by running the targeted suite before and after.
+Two new integration tests make the behaviour itself explicit rather than
+leaving it implicit: `TestF055PinnedInstrumentSpecBaseline` proves both
+that an unpinned baseline HALTs a produced intent on
+`RECONCILIATION_UNKNOWN` and that a baseline pinned to match the real
+observed spec clears that specific reason code.
+
+**Evidence.**
+
+```text
+ruff check .          — all checks passed
+ruff format --check . — 162 files already formatted
+mypy                  — no issues, 125 source files
+pytest                — 877 passed, 3 skipped, 0 failed
+                         (up from 863 — 17 new tests: 2 F-054 fail-closed
+                         unit tests + 1 recovery-runs-once test, 1
+                         schema-mismatch-is-unreadable integration test, 4
+                         F-055 unit tests (incl. the database-reset
+                         scenario), 3 F-055 integration tests, 4 config
+                         market_for()/expected_spec_version unit tests, 2
+                         F-055 end-to-end integration tests)
+```
+
+Determinism reproven: `scripts/run_replay.py --bars 2000` hashed identical
+across two runs. Manually verified: `scripts/live_decision.py` run against
+the real `crumblr_soak` database (migrated through the current head) still
+correctly reports "skipped — no instrument spec has been observed yet" —
+honest, unchanged.
+
+**Problems found.** None beyond the two the reviewer named, both fixed
+before this entry.
+
+**Decision.** F-054 reopened then CLOSED again (hardened). F-055 opened
+and CLOSED the same day. F-033 partly reopened (non-blocking) then CLOSED.
+`InstrumentSpecStore.earliest()` kept as a discovery tool, deliberately no
+longer load-bearing for reconciliation.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session — `feedback.1.19.md` §8's 18-step
+  checklist, now covering F-047 through F-055 and D-031 together. Step 9
+  of that checklist is the first real opportunity to actually pin a
+  baseline (§4.4 step 8 in `HANDOVER.md`).
 - Run CI on a runner and record the result; supply
   `review/domain_contracts.md` unchanged for actual reviewer inspection —
   both remain pure evidence/approval tasks, not engineering.

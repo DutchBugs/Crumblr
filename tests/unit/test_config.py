@@ -251,6 +251,41 @@ class TestMarkets:
         ]
         assert PlatformConfig.model_validate(payload).enabled_symbols() == ("EUR/USD",)
 
+    def test_market_for_finds_the_matching_symbol(self) -> None:
+        config = PlatformConfig.model_validate(paper_config_payload())
+        market = config.market_for("EUR/USD")
+        assert market is not None
+        assert market.canonical_symbol == "EUR/USD"
+
+    def test_market_for_an_unconfigured_symbol_is_none(self) -> None:
+        config = PlatformConfig.model_validate(paper_config_payload())
+        assert config.market_for("GBP/USD") is None
+
+    def test_expected_spec_version_defaults_to_none(self) -> None:
+        """Review 1.19 §4 (F-055): no baseline is pinned unless a human
+
+        explicitly set one — the shipped config must not smuggle in a value
+        nobody approved.
+        """
+        config = PlatformConfig.model_validate(paper_config_payload())
+        market = config.market_for("EUR/USD")
+        assert market is not None
+        assert market.expected_spec_version is None
+
+    def test_expected_spec_version_can_be_pinned(self) -> None:
+        payload = paper_config_payload()
+        payload["markets"] = [
+            {
+                "canonical_symbol": "EUR/USD",
+                "enabled": True,
+                "expected_spec_version": "a" * 64,
+            }
+        ]
+        config = PlatformConfig.model_validate(payload)
+        market = config.market_for("EUR/USD")
+        assert market is not None
+        assert market.expected_spec_version == "a" * 64
+
 
 class TestConfigVersioning:
     """build.md §17: configuration is versioned and immutable per decision."""

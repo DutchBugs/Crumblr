@@ -61,7 +61,12 @@ def main() -> int:
     engine = create_db_engine(url)
     store = BrokerStateStore(engine)
     specs = InstrumentSpecStore(engine)
-    expectation = ExpectedState.flat(config.account_guard, canonical_symbol=args.canonical_symbol)
+    market = config.market_for(args.canonical_symbol)
+    expectation = ExpectedState.flat(
+        config.account_guard,
+        canonical_symbol=args.canonical_symbol,
+        expected_spec_version=market.expected_spec_version if market is not None else None,
+    )
 
     result = reconcile(
         store,

@@ -11,9 +11,11 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-26 (D-031, D-045 resolved; D-046 point 3 resolved —
-F-053/F-054/D-031 all shipped this session, per review 1.18 §§6-8's
-explicit "build now" instructions; no new deviation entries).
+Last updated 2026-08-26, second pass (D-045 and D-046 point 3 updated again
+after review 1.19 §§4-5 reopened F-053's baseline-authority half as F-055
+and F-054's failure semantics, both fixed the same day; no new deviation
+entries — review 1.19's findings are engineering work, tracked in
+`review/FEEDBACK.md`, not new departures from `build.md`).
 
 ---
 
@@ -842,17 +844,19 @@ mean anything should start here.
   pending order's `canonical_symbol` against what is expected, but has no
   durable instrument-spec observation to compare digits/point/volume-step/
   contract-size drift against
-- **Current state, updated 2026-08-26:** `reconcile()` now requires an
-  `InstrumentSpecSource` and compares the durable baseline spec (the first
-  one ever observed for the symbol — this platform never hard-codes a
-  contract specification, O-001, so there is no config-declared expectation
-  to compare against instead) against the latest observation, via
-  `InstrumentSpec.spec_version` — the same stable hash F-039 already
-  excludes `tick_value` from. Missing/unreadable → `UNKNOWN`; a changed
-  version → `MISMATCHED`. `InstrumentSpecStore.earliest()` (new);
-  `scripts/reconcile.py` and `LiveDecisionOrchestrator` both wired through.
-  Formalized by review 1.17 §7 as **F-053**, built per review 1.18 §6's
-  explicit "build now, do not defer" instruction
+- **Current state, updated 2026-08-26:** `reconcile()` compares the latest
+  observed `InstrumentSpec.spec_version` — the same stable hash F-039
+  already excludes `tick_value` from — against an *expected* value.
+  Missing/unreadable spec or no expectation → `UNKNOWN`; a changed version
+  → `MISMATCHED`. `scripts/reconcile.py` and `LiveDecisionOrchestrator`
+  both wired through. Formalized by review 1.17 §7 as **F-053**, built per
+  review 1.18 §6's explicit "build now, do not defer" instruction. The
+  first version of this fix compared against `InstrumentSpecStore.earliest()`
+  (the first spec ever observed) — review 1.19 §4 correctly identified this
+  as trust-on-first-use, not authority, and reopened it as **F-055**, fixed
+  the same day: the expectation is now `config.MarketConfig.expected_spec_version`,
+  an explicitly pinned value a human approves after reviewing a real
+  observation, never one the platform infers from observation order
 - **Remaining gap:** none in logic — real-terminal validation is still
   outstanding, the same F-051 gap every other post-M1 capability shares
 - **Gate affected:** none directly now that F-053 is shipped. Real-terminal
@@ -884,12 +888,18 @@ mean anything should start here.
      **Closed 2026-08-26 (F-054).** `application/decision_window.py::DecisionWindowStore`
      (mirroring `risk/session.py`'s F-019 pattern) + `persistence/decision_window.py::PostgresDecisionWindowStore`,
      keyed by `(canonical_symbol, strategy_id, config_version)`. Both
-     `_last_decided_open_time` and `_seen_hashes` are restored from the
-     store on construction and re-saved as `decide_once()` progresses, so a
-     restart cannot re-decide an already-decided window nor forget which
-     `TradeIntent` hashes the duplicate-protection check has seen. Formalized
-     by review 1.17 §8 as **F-054**, built per review 1.18 §7's "hard
-     prerequisite before an `ApprovedOrder` can become executable" framing
+     `_last_decided_open_time` and `_seen_hashes` are restored on the first
+     `decide_once()` call and re-saved as it progresses, so a restart cannot
+     re-decide an already-decided window nor forget which `TradeIntent`
+     hashes the duplicate-protection check has seen. Formalized by review
+     1.17 §8 as **F-054**, built per review 1.18 §7's "hard prerequisite
+     before an `ApprovedOrder` can become executable" framing. Review 1.19
+     §5 then reopened it same-day: the first version collapsed "unreadable/
+     corrupt record" into "nothing recorded", which would let a corrupted
+     idempotence record look identical to a legitimate fresh start — fixed
+     by mirroring `RiskSessionStore`'s three-state shape (`DecisionWindowRecord`),
+     with an unreadable record now tripping the kill switch
+     (`ReasonCode.DECISION_STATE_UNKNOWN`) via `_recover_decision_window()`
 - **Remaining gap:** ~~D-031 (feature-value persistence) is not closed by
   this module~~ — **closed 2026-08-26**, see D-031's own entry above:
   `RunRecorder.record_features()` durably stores the values behind every

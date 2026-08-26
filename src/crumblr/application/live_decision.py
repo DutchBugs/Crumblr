@@ -46,9 +46,12 @@ about intent, it is where the code actually stops.
 - Decision-window idempotence (which bar window was last decided, and which
   `TradeIntent` hashes the risk engine's duplicate-protection check has
   seen) is durable as of F-054 (review 1.17 §8) — restored from
-  `DecisionWindowStore` on construction and re-saved as `decide_once()`
-  progresses, so a restart cannot re-decide an already-decided window from
-  a blank slate. See `application/decision_window.py`.
+  `DecisionWindowStore` on the first `decide_once()` call and re-saved as
+  it progresses, so a restart cannot re-decide an already-decided window
+  from a blank slate. Review 1.19 §5 hardened the recovery itself: an
+  unreadable/corrupt record trips the kill switch (`_recover_decision_window`)
+  rather than being treated as "nothing recorded" — the two must never look
+  the same. See `application/decision_window.py`.
 - D-031 (feature-value persistence) is closed as of review 1.17 §9 / review
   1.18 §8: `self._recorder.record_features(features)` durably stores the
   full `FeatureEvidence` payload, not only its hash, for every window that
@@ -64,7 +67,11 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from crumblr.application.decision_window import DecisionWindowState, DecisionWindowStore
+from crumblr.application.decision_window import (
+    DecisionWindowState,
+    DecisionWindowStore,
+    recover_decision_window,
+)
 from crumblr.application.reconciliation import (
     BrokerStateSource,
     ExpectedState,
@@ -255,8 +262,11 @@ class LiveDecisionOrchestrator:
         self._clock = clock
 
         self._strategy = registry.resolve(config.trading_agent.strategy_id)
+        market = config.market_for(canonical_symbol)
         self._expectation = ExpectedState.flat(
-            config.account_guard, canonical_symbol=canonical_symbol
+            config.account_guard,
+            canonical_symbol=canonical_symbol,
+            expected_spec_version=market.expected_spec_version if market is not None else None,
         )
         self._risk_context = policies.RiskContext(
             risk=config.risk,
@@ -287,24 +297,14 @@ class LiveDecisionOrchestrator:
         self._ledger: EquityLedger | None = None
         self._current_trading_day: date | None = None
 
-        # F-054: restore what a previous process lifetime (or an earlier
-        # connection this same process made) had already decided, so a
-        # restart cannot re-decide an already-decided window from a blank
-        # slate. `config.config_version` is part of the key on purpose —
-        # a config change is a genuinely new logical-decision space (review
-        # 1.17 §8's own invariant), so starting fresh in that case is
-        # correct, not a gap.
-        restored = decision_window_store.load_latest(
-            canonical_symbol=canonical_symbol,
-            strategy_id=self._strategy.strategy_id,
-            config_version=config.config_version,
-        )
-        self._seen_hashes: set[str] = (
-            set(restored.seen_decision_hashes) if restored is not None else set()
-        )
-        self._last_decided_open_time: datetime | None = (
-            restored.last_decided_open_time_utc if restored is not None else None
-        )
+        # F-054: restored lazily on the first `decide_once()` call, not
+        # here — `_recover_decision_window()` may need to trip the kill
+        # switch (review 1.19 §5's fail-closed requirement), and a
+        # constructor is not the place for that side effect. Blank until
+        # then; `_decision_window_recovered` guards against redoing it.
+        self._seen_hashes: set[str] = set()
+        self._last_decided_open_time: datetime | None = None
+        self._decision_window_recovered = False
 
     def decide_once(self) -> LiveDecisionOutcome:
         """Evaluate the newest closed real bar, if it has not been judged yet.
@@ -315,6 +315,10 @@ class LiveDecisionOrchestrator:
         transitions: a caller driving this on a timer should not have to
         wrap every call in its own try/except for expected quiet windows.
         """
+        if not self._decision_window_recovered:
+            self._recover_decision_window()
+            self._decision_window_recovered = True
+
         spec = self._instrument_specs.latest(canonical_symbol=self._canonical_symbol)
         if spec is None:
             return self._skip("no instrument spec has been observed yet")
@@ -486,6 +490,41 @@ class LiveDecisionOrchestrator:
         return LiveDecisionOutcome(capsule=capsule)
 
     # ------------------------------------------------------------------ #
+
+    def _recover_decision_window(self) -> None:
+        """Restore F-054 state, failing closed if it cannot be trusted.
+
+        Review 1.19 §5: an unreadable/corrupt decision-window record must
+        not be treated as "nothing recorded" — that would let the exact
+        failure this store exists to prevent (re-deciding an
+        already-decided window after a restart) hide behind a record that
+        merely *looks* empty. `recover_decision_window()` tells the two
+        apart; a corrupted record trips the kill switch here, the same way
+        `_recover_session()` already does for a corrupted risk-session
+        record.
+        """
+        record = self._decision_window_store.load_latest(
+            canonical_symbol=self._canonical_symbol,
+            strategy_id=self._strategy.strategy_id,
+            config_version=self._config.config_version,
+        )
+        recovery = recover_decision_window(record)
+        self._last_decided_open_time = recovery.last_decided_open_time_utc
+        self._seen_hashes = set(recovery.seen_decision_hashes)
+        if recovery.must_halt:
+            now = self._clock()
+            self._trip(
+                recovery.reason_codes,
+                "decision_window_recovery",
+                now,
+                uuid5(
+                    NAMESPACE_URL,
+                    f"crumblr:decision-window-recovery:{self._canonical_symbol}:"
+                    f"{self._strategy.strategy_id}:{self._config.config_version}:"
+                    f"{now.isoformat()}",
+                ),
+                detail=recovery.detail,
+            )
 
     def _save_decision_window(self, now: UtcDatetime) -> None:
         """Persist what a restart must not be allowed to forget (F-054).

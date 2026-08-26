@@ -2,8 +2,8 @@
 
 §7-8) — the fail-closed rule matrix itself is unit-tested against an
 in-memory fake (`tests/unit/test_reconciliation.py`); this file proves the
-`BrokerStateSource` Protocol the real store implements actually matches
-what `reconcile()` calls, against real PostgreSQL.
+`BrokerStateSource`/`InstrumentSpecSource` Protocols the real stores
+implement actually match what `reconcile()` calls, against real PostgreSQL.
 """
 
 from __future__ import annotations
@@ -40,16 +40,19 @@ GUARD = AccountGuardConfig.model_validate(
     }
 )
 
+PINNED_SPEC = make_instrument_spec()
+
 
 class TestReconcileAgainstTheRealStore:
     def test_a_flat_account_persisted_via_the_real_store_matches(self, engine: Engine) -> None:
         store = BrokerStateStore(engine)
         specs = InstrumentSpecStore(engine)
-        specs.record(make_instrument_spec())
+        specs.record(PINNED_SPEC)
         account = make_broker_account_snapshot(observed_at_utc=NOW)
         store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
 
-        result = reconcile(store, ExpectedState.flat(GUARD), instrument_specs=specs, now=NOW)
+        expectation = ExpectedState.flat(GUARD, expected_spec_version=PINNED_SPEC.spec_version)
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
 
         assert result.status is ReconciliationStatus.MATCHED
 
@@ -58,14 +61,15 @@ class TestReconcileAgainstTheRealStore:
     ) -> None:
         store = BrokerStateStore(engine)
         specs = InstrumentSpecStore(engine)
-        specs.record(make_instrument_spec())
+        specs.record(PINNED_SPEC)
         account = make_broker_account_snapshot(observed_at_utc=NOW)
         position = make_broker_position_snapshot(snapshot_id=account.snapshot_id, ticket=42)
         store.record(
             BrokerStateObservation(account=account, positions=(position,), pending_orders=())
         )
 
-        result = reconcile(store, ExpectedState.flat(GUARD), instrument_specs=specs, now=NOW)
+        expectation = ExpectedState.flat(GUARD, expected_spec_version=PINNED_SPEC.spec_version)
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
 
         assert result.status is ReconciliationStatus.MISMATCHED
         assert any("unexpected open position" in reason for reason in result.reasons)
@@ -74,9 +78,30 @@ class TestReconcileAgainstTheRealStore:
         store = BrokerStateStore(engine)
         specs = InstrumentSpecStore(engine)
 
-        result = reconcile(store, ExpectedState.flat(GUARD), instrument_specs=specs, now=NOW)
+        expectation = ExpectedState.flat(GUARD, expected_spec_version=PINNED_SPEC.spec_version)
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
 
         assert result.status is ReconciliationStatus.UNKNOWN
+
+    def test_no_pinned_baseline_is_unknown_even_with_a_matching_flat_account(
+        self, engine: Engine
+    ) -> None:
+        """Review 1.19 §4 (F-055): no config-approved baseline means
+
+        `UNKNOWN`, never `MATCHED` — regardless of what the database
+        happens to hold, including a perfectly ordinary observation.
+        """
+        store = BrokerStateStore(engine)
+        specs = InstrumentSpecStore(engine)
+        specs.record(PINNED_SPEC)
+        account = make_broker_account_snapshot(observed_at_utc=NOW)
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        expectation = ExpectedState.flat(GUARD)  # expected_spec_version left unset
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
+
+        assert result.status is ReconciliationStatus.UNKNOWN
+        assert any("no approved instrument-spec baseline" in reason for reason in result.reasons)
 
     def test_no_instrument_spec_ever_persisted_is_unknown_even_with_a_flat_account(
         self, engine: Engine
@@ -86,20 +111,45 @@ class TestReconcileAgainstTheRealStore:
         account = make_broker_account_snapshot(observed_at_utc=NOW)
         store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
 
-        result = reconcile(store, ExpectedState.flat(GUARD), instrument_specs=specs, now=NOW)
+        expectation = ExpectedState.flat(GUARD, expected_spec_version=PINNED_SPEC.spec_version)
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
 
         assert result.status is ReconciliationStatus.UNKNOWN
         assert any("no instrument spec" in reason for reason in result.reasons)
 
-    def test_a_real_persisted_spec_change_mismatches(self, engine: Engine) -> None:
+    def test_a_real_persisted_spec_change_from_the_pinned_baseline_mismatches(
+        self, engine: Engine
+    ) -> None:
         store = BrokerStateStore(engine)
         specs = InstrumentSpecStore(engine)
-        specs.record(make_instrument_spec(captured_at_utc=NOW - timedelta(days=1)))
         specs.record(make_instrument_spec(volume_step=Decimal("0.10"), captured_at_utc=NOW))
         account = make_broker_account_snapshot(observed_at_utc=NOW)
         store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
 
-        result = reconcile(store, ExpectedState.flat(GUARD), instrument_specs=specs, now=NOW)
+        # Pinned to a spec that is NOT the one now observed — exactly the
+        # broker-side drift reconciliation exists to catch, and exactly the
+        # comparison F-055 requires (against the pin, not "the first row").
+        expectation = ExpectedState.flat(GUARD, expected_spec_version=PINNED_SPEC.spec_version)
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
 
         assert result.status is ReconciliationStatus.MISMATCHED
-        assert any("instrument spec changed" in reason for reason in result.reasons)
+        assert any("does not match the approved baseline" in reason for reason in result.reasons)
+
+    def test_a_database_reset_does_not_silently_repin_the_baseline(self, engine: Engine) -> None:
+        """F-055's motivating scenario, proven against a real store: even
+
+        though this is the *only* row `instrument_specs` has ever held (as
+        a reset/fresh database would produce), it does not become the
+        accepted baseline just by being first and only — the pin comes
+        from config, and config says nothing was ever approved here.
+        """
+        store = BrokerStateStore(engine)
+        specs = InstrumentSpecStore(engine)
+        specs.record(make_instrument_spec(digits=2, captured_at_utc=NOW - timedelta(minutes=1)))
+        account = make_broker_account_snapshot(observed_at_utc=NOW)
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        expectation = ExpectedState.flat(GUARD)  # no pin configured
+        result = reconcile(store, expectation, instrument_specs=specs, now=NOW)
+
+        assert result.status is ReconciliationStatus.UNKNOWN

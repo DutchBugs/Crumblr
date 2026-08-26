@@ -47,6 +47,25 @@ class MarketConfig(ConfigSection):
     canonical_symbol: Symbol
     enabled: bool
 
+    expected_spec_version: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    """The approved, pinned `InstrumentSpec.spec_version` for this symbol —
+
+    review 1.19 §4 (F-055). `None` (the default) means no baseline has been
+    explicitly authorized yet, and reconciliation must read `UNKNOWN` for
+    this symbol's instrument spec rather than silently trusting whichever
+    observation happened to arrive first (`instrument_specs.earliest()` is
+    trust-on-first-use, not authority — a database reset or a first real
+    session against a materially different broker configuration would
+    otherwise "pin" itself).
+
+    Set this only after a real observation (F-051) has been reviewed and
+    accepted as correct — the value itself is still discovered from the
+    terminal, never invented; this field records that a human looked at
+    what was discovered and approved it. Changing it later is exactly as
+    reviewable as any other config edit, which is the point: an approved
+    baseline changes only through an explicit, git-visible act, not because
+    a database happened to be recreated."""
+
 
 class RiskConfig(ConfigSection):
     """Every field is required. build.md §17: do not ship production defaults."""
@@ -209,6 +228,12 @@ class PlatformConfig(ConfigSection):
 
     def enabled_symbols(self) -> tuple[str, ...]:
         return tuple(market.canonical_symbol for market in self.markets if market.enabled)
+
+    def market_for(self, canonical_symbol: str) -> MarketConfig | None:
+        return next(
+            (market for market in self.markets if market.canonical_symbol == canonical_symbol),
+            None,
+        )
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

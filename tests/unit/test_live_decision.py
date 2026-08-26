@@ -17,6 +17,7 @@ from crumblr.application.decision_window import InMemoryDecisionWindowStore
 from crumblr.application.live_decision import LiveDecisionOrchestrator
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import ReasonCode
+from crumblr.domain.events import SystemHalted
 from crumblr.domain.models import (
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
@@ -95,13 +96,6 @@ class FakeInstrumentSpecSource:
         self.spec = spec
 
     def latest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
-        return self.spec
-
-    def earliest(self, *, canonical_symbol: str) -> InstrumentSpec | None:
-        # Same spec as `latest()` by default, so F-053's instrument-spec
-        # reconciliation check contributes no mismatch in tests that are
-        # not themselves about that check — the same "matches unless told
-        # otherwise" shape `FakeBrokerStateSource` already has.
         return self.spec
 
 
@@ -480,12 +474,13 @@ class TestF054DurableDecisionWindowIdempotence:
         )
         outcome = first_process.decide_once()
 
-        recorded = store.load_latest(
+        record = store.load_latest(
             canonical_symbol="EUR/USD",
             strategy_id=config().trading_agent.strategy_id,
             config_version=config().config_version,
         )
-        assert recorded is not None
+        assert record.is_known
+        assert record.state is not None
         capsule = outcome.capsule
         # The hash only joins the risk engine's duplicate-protection set on
         # a PASS verdict (`decide_once()`'s own logic, unchanged by F-054) —
@@ -498,13 +493,109 @@ class TestF054DurableDecisionWindowIdempotence:
             and capsule.risk_decision is not None
             and capsule.risk_decision.verdict.value == "PASS"
         ):
-            assert capsule.trade_intent.decision_hash in recorded.seen_decision_hashes
+            assert capsule.trade_intent.decision_hash in record.state.seen_decision_hashes
         else:
             # A NO_TRADE, BLOCKed or HALTed window still durably records
-            # the window itself as decided (the `recorded is not None`
+            # the window itself as decided (the `record.state is not None`
             # assertion above), with the hash set unchanged from before
             # this, the first ever call.
-            assert recorded.seen_decision_hashes == frozenset()
+            assert record.state.seen_decision_hashes == frozenset()
+
+
+class TestF054FailsClosedOnCorruption:
+    """Review 1.19 §5: an unreadable decision-window record must not be
+
+    treated as "nothing recorded" — it must halt, distinguishing a
+    corrupted idempotence record from a genuine first start.
+    """
+
+    def test_an_unreadable_store_trips_the_kill_switch_before_deciding(self) -> None:
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        recorder = RecordingRunRecorder()
+        kill_switch = KillSwitch()
+        store = InMemoryDecisionWindowStore(unreadable="simulated corruption")
+        live = orchestrator(
+            market,
+            broker,
+            FakeInstrumentSpecSource(),
+            recorder,
+            kill_switch=kill_switch,
+            decision_window_store=store,
+        )
+
+        live.decide_once()
+
+        assert kill_switch.is_halted
+        halted_events = [
+            payload for payload, *_ in recorder.events if isinstance(payload, SystemHalted)
+        ]
+        assert len(halted_events) == 1
+        assert halted_events[0].reason_codes == (ReasonCode.DECISION_STATE_UNKNOWN,)
+
+    def test_a_genuinely_first_start_does_not_halt(self) -> None:
+        """The contrast case: no prior record at all is not corruption."""
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        kill_switch = KillSwitch()
+        live = orchestrator(
+            market,
+            broker,
+            FakeInstrumentSpecSource(),
+            RecordingRunRecorder(),
+            kill_switch=kill_switch,
+            decision_window_store=InMemoryDecisionWindowStore(),
+        )
+
+        live.decide_once()
+
+        assert not kill_switch.is_halted
+
+    def test_recovery_is_only_attempted_once_per_process(self) -> None:
+        """A second `decide_once()` call must not re-read the store — the
+
+        recovery already happened, and re-checking every call would be
+        both wasteful and, for a store that flips from unreadable to
+        readable mid-session, a source of surprising behaviour change.
+        """
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(80)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+
+        class CountingStore(InMemoryDecisionWindowStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.load_calls = 0
+
+            def load_latest(self, *, canonical_symbol, strategy_id, config_version):  # type: ignore[no-untyped-def]
+                self.load_calls += 1
+                return super().load_latest(
+                    canonical_symbol=canonical_symbol,
+                    strategy_id=strategy_id,
+                    config_version=config_version,
+                )
+
+        store = CountingStore()
+        live = orchestrator(
+            market,
+            broker,
+            FakeInstrumentSpecSource(),
+            RecordingRunRecorder(),
+            decision_window_store=store,
+        )
+
+        live.decide_once()
+        live.decide_once()
+
+        assert store.load_calls == 1
 
 
 class TestHaltPropagation:

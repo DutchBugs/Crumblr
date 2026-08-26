@@ -23,16 +23,17 @@ logical decision identity". A config change is therefore a genuinely new
 logical-decision space, not a continuation of the old one: starting fresh
 when `config_version` changes is correct, not a gap.
 
-**Deliberately simpler failure semantics than `RiskSessionStore`.** A risk
-budget that cannot be read must halt (`SessionRecord.unreadable`) — losing
-that record could buy back headroom, which is unsafe in the permissive
-direction. Losing *this* record cannot: the worst consequence, today, is a
-duplicate audit row, which is explicitly the safe direction. `load_latest`
-therefore resolves an unreadable record to "nothing recorded" rather than a
-third state a caller must handle, which would just be more code protecting
-a risk this module's own docstring says does not exist yet. Revisit this
-choice when an execution service is attached and the consequence of
-"forgot" changes from an audit duplicate to a real one.
+**Review 1.19 §5: "nothing recorded" and "recorded but unreadable" must not**
+**collapse into the same outcome.** The first version of this module made
+exactly that collapse, on the reasoning that the only consequence today is a
+duplicate audit row — true, but the review's point stands: a corrupted or
+unreadable record would look identical to a legitimate fresh start, and that
+distinction is precisely the one F-054 exists to preserve, not something to
+skip while it is still cheap. `DecisionWindowRecord`/`recover_decision_window`
+now mirror `risk/session.py`'s `SessionRecord`/`recover_session` shape
+exactly: three answers, not two — "no prior record" recovers cleanly, while
+"a record exists but could not be read" fails closed and trips the kill
+switch, the same way a corrupted risk-session record does.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from crumblr.domain.enums import ReasonCode
 from crumblr.domain.timeutils import UtcDatetime
 
 SCHEMA_VERSION = 1
@@ -58,18 +60,38 @@ class DecisionWindowState:
     schema_version: int = SCHEMA_VERSION
 
 
+@dataclass(frozen=True)
+class DecisionWindowRecord:
+    """The outcome of asking the store what it remembers.
+
+    Three answers, not two — the same shape `risk/session.py::SessionRecord`
+    uses, for the same reason (review 1.19 §5): "nothing recorded" (a
+    genuine first start) and "I could not read what was recorded" (the
+    store is corrupted, unavailable, or on a schema this code no longer
+    understands) must never collapse into one, because a caller that cannot
+    tell them apart cannot tell a legitimate fresh start from a corrupted
+    idempotence record that happens to look empty.
+    """
+
+    state: DecisionWindowState | None = None
+    unreadable: str | None = None
+
+    @property
+    def is_known(self) -> bool:
+        return self.unreadable is None
+
+
 class DecisionWindowStore(Protocol):
     """Where decision-window idempotence state is persisted between runs.
 
     `load_latest` must never raise — an implementation that cannot read its
-    own record returns `None`, the same as "nothing recorded yet" (see the
-    module docstring for why that collapse is safe here and would not be
-    for `RiskSessionStore`).
+    own record returns `DecisionWindowRecord(unreadable=...)`, never a bare
+    `None`, so the caller cannot mistake a failed read for an absent one.
     """
 
     def load_latest(
         self, *, canonical_symbol: str, strategy_id: str, config_version: str
-    ) -> DecisionWindowState | None: ...
+    ) -> DecisionWindowRecord: ...
 
     def save(self, state: DecisionWindowState) -> None: ...
 
@@ -77,13 +99,18 @@ class DecisionWindowStore(Protocol):
 class InMemoryDecisionWindowStore:
     """For tests and for a decision worker that should not outlive its process."""
 
-    def __init__(self, initial: DecisionWindowState | None = None) -> None:
+    def __init__(
+        self, initial: DecisionWindowState | None = None, *, unreadable: str | None = None
+    ) -> None:
         self._state = initial
+        self._unreadable = unreadable
         self.saves = 0
 
     def load_latest(
         self, *, canonical_symbol: str, strategy_id: str, config_version: str
-    ) -> DecisionWindowState | None:
+    ) -> DecisionWindowRecord:
+        if self._unreadable is not None:
+            return DecisionWindowRecord(unreadable=self._unreadable)
         state = self._state
         if (
             state is not None
@@ -91,9 +118,51 @@ class InMemoryDecisionWindowStore:
             and state.strategy_id == strategy_id
             and state.config_version == config_version
         ):
-            return state
-        return None
+            return DecisionWindowRecord(state=state)
+        return DecisionWindowRecord()
 
     def save(self, state: DecisionWindowState) -> None:
         self._state = state
         self.saves += 1
+
+
+@dataclass(frozen=True)
+class DecisionWindowRecovery:
+    """What a `LiveDecisionOrchestrator` should restore, and whether it must halt first."""
+
+    last_decided_open_time_utc: UtcDatetime | None
+    seen_decision_hashes: frozenset[str]
+    must_halt: bool
+    reason_codes: tuple[ReasonCode, ...] = ()
+    detail: str | None = None
+
+
+def recover_decision_window(record: DecisionWindowRecord) -> DecisionWindowRecovery:
+    """Restore decision-window state from a record, failing closed on corruption.
+
+    Mirrors `risk/session.py::recover_session`'s shape. A genuinely absent
+    record recovers to an empty, un-halted starting point — nothing has
+    been decided yet, so there is nothing to protect. An unreadable record
+    halts instead of silently starting empty, because "empty" and
+    "corrupted" must never look the same to a caller deciding whether it is
+    safe to proceed (review 1.19 §5).
+    """
+    if not record.is_known:
+        return DecisionWindowRecovery(
+            last_decided_open_time_utc=None,
+            seen_decision_hashes=frozenset(),
+            must_halt=True,
+            reason_codes=(ReasonCode.DECISION_STATE_UNKNOWN,),
+            detail=f"decision-window state could not be read: {record.unreadable}",
+        )
+    if record.state is None:
+        return DecisionWindowRecovery(
+            last_decided_open_time_utc=None,
+            seen_decision_hashes=frozenset(),
+            must_halt=False,
+        )
+    return DecisionWindowRecovery(
+        last_decided_open_time_utc=record.state.last_decided_open_time_utc,
+        seen_decision_hashes=record.state.seen_decision_hashes,
+        must_halt=False,
+    )
