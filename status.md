@@ -303,8 +303,8 @@ Next objective: finish F-051 part 2 once enough real M5 bars have
       failed fast; root cause found and fixed same day (F-056: `numpy` was
       an undeclared test dependency, present only as a side effect of the
       `mt5` extra). Reproduced and fixed locally against the exact failing
-      commands; **not yet confirmed green on an actual runner** — needs a
-      push and a human/`gh` check of the next run
+      commands; fix pushed → **hosted rerun result pending** (no `gh`/Actions
+      access in this environment — needs a human check of the next run)
 
 ### MT5
 
@@ -383,10 +383,11 @@ Persisted by the running orchestrator, not merely storable (D-030 closed).
 - [x] symbol specs — `instrument_specs` has a real producer since 2026-08-25
       (F-048): `persistence/instrument_specs.py::InstrumentSpecStore`,
       written by `LiveReader._reconnect()` on every reconnect, content-keyed
-      by `spec_version`. Unit/integration-tested against a fake terminal;
-      **not yet run against the real terminal with this code — F-051**.
-      Reconciliation now compares it (F-053, shipped 2026-08-26) via the
-      spec's own `spec_version` hash
+      by `spec_version`. **Real-terminal validated 2026-08-26** (F-051 part
+      1) — a real spec was persisted, compared field-by-field against the
+      2026-08-24 first-contact evidence, and approved as the pinned
+      baseline. Reconciliation now compares it (F-053, shipped 2026-08-26)
+      via the spec's own `spec_version` hash
 - [x] features — `feature_snapshots` table (D-031, shipped 2026-08-26):
       the full `FeatureEvidence` payload, not only its hash and version,
       persisted for every evaluated window via `RunRecorder.record_features()`
@@ -5263,6 +5264,101 @@ completes.
   one still has neither.
 - Continue F-051 part 2 (real Trader decision, pending bar accumulation).
 - Everything else in `feedback.1.20.md` §6 remains as previously recorded.
+
+---
+
+## Update 2026-08-26 (thirty-third entry) — review 1.21 processed: F-051 part 1 accepted PASSED, F-056 accepted fix-correct/gate-still-open, Phase 4 explicitly authorized
+
+Component: Process (review intake), documentation sync
+Milestone: M0 (unchanged — still OPEN), F-051 (part 1 formally accepted), F-056 (gate framing corrected)
+Status before: `feedback.1.21.md` unread this session; `review/FEEDBACK.md` not yet registering review 1.21; two `status.md` current-state lines slightly stale
+Status after: Review 1.21 fully processed per the CLAUDE.md session-start protocol; no engineering required — this review opened no new findings
+
+Completed:
+- Read `feedback.1.21.md` in full (19 sections). Confirmed it opens **no new
+  findings** — it is an acceptance-plus-authorization review.
+- Applied the two tiny current-state syncs review 1.21 §9 asked for:
+  1. `status.md` §3 Data section: the InstrumentSpec producer line now reads
+     "Real-terminal validated 2026-08-26 (F-051 part 1)..." instead of "not
+     yet run against the real terminal" (was already fixed by the earlier
+     share-readiness pass, commit `5af6f83` — confirmed correct, no further
+     change needed there).
+  2. `status.md` §2 M0 acceptance checklist: the CI line said "not yet
+     confirmed green on an actual runner — needs a push and a human/`gh`
+     check of the next run" (stale — the push already happened). Corrected
+     to "fix pushed → **hosted rerun result pending** (no `gh`/Actions access
+     in this environment — needs a human check of the next run)", matching
+     the wording already used correctly elsewhere in §1's Overall health
+     block. Confirmed via grep that no other current-state section (§1, §3
+     milestone tracker, historical §13 entries) carried the stale phrasing —
+     the one checklist line was the only drift.
+- Updated `review/FEEDBACK.md`:
+  - Registered `feedback.1.21.md` in the "Reviews received" table.
+  - Updated the F-051 finding row: part 1 now **PASSED** (review 1.21 §2,
+    zero defects), part 2 **IN PROGRESS, NO DEFECT** (review 1.21 §5
+    explicitly instructs not to interfere with the running bar
+    accumulation).
+  - Updated the F-056 finding row: **SPECIFIC DEFECT FIXED / CI GATE STILL
+    OPEN** (review 1.21 §8's own framing) — the fix is pushed and correct in
+    principle, but the M0 CI gate stays open until a hosted rerun is
+    visibly green ("local reproduction of CI ≠ green hosted CI").
+  - Rewrote the "Unreviewed work" section: heading now names
+    `feedback.1.22.md` as the next trigger (not yet sent); body records
+    review 1.21's acceptance of F-051 part 1, its explicit
+    do-not-interfere instruction for part 2, its F-056 gate-still-open
+    framing, its Phase-4 authorization, and the submission-idempotence and
+    owner-risk-policy items it named as now-relevant.
+  - Refreshed the "Nothing below has been seen by a reviewer yet" table:
+    removed the now-reviewed CI/F-051 rows and the already-fixed §3
+    wording-lag row, added Phase 4 (authorized, not yet started) and owner
+    risk-policy decisions as the new unreviewed items.
+
+Evidence:
+- tests: none run — no code changed, documentation/process only
+- logs: n/a
+- metrics: real M5 bar count reconfirmed at 57 (up from 49 at review 1.21's
+  own snapshot) via a direct query against `crumblr_soak`, consistent with
+  review 1.21 §5's framing that the background `mt5_live_reader.py` run
+  (task `bmzovc8kd`) is still the correct thing to leave alone
+- artifact/commit: pending — this entry, plus the `status.md` and
+  `review/FEEDBACK.md` edits above, not yet committed
+
+Problems found:
+- None. This was a pure acceptance-and-authorization review; the only
+  actionable items were the two tiny wording syncs in §9, one of which
+  turned out to already be correct.
+
+Risk impact:
+- None. No code, config, or risk-relevant behavior changed.
+
+Decision:
+- Review 1.21 fully processed. F-051 part 1 formally CLOSED as PASSED;
+  part 2 remains open, correctly so, pending real bar accumulation — no
+  action to take beyond waiting. F-056 remains SHIPPED with the CI gate
+  explicitly still open pending a hosted green run. Phase 4 (non-sending
+  execution engineering) is now explicitly authorized to begin, in
+  parallel, without waiting for F-051 part 2 or CI confirmation — not yet
+  started as of this entry.
+
+Next:
+- Begin Phase 4 (non-sending execution engineering): execution-capable MT5
+  adapter (still never calling `order_send`), `ApprovedOrder` construction,
+  an `order_check` wrapper, a durable `order_request_id` for submission
+  idempotence (review 1.21 §12), `ExecutionResult` persistence, a
+  FINAL execution-time Risk re-check, automatic flatten, an execution
+  multi-gate, and post-execution reconciliation design. Given the
+  safety-criticality of this code, plan it properly before writing it.
+- Continue monitoring the background `mt5_live_reader.py` run for
+  `baseline_v1`'s 65-bar threshold; once crossed, rerun the wiring-proof
+  script and record F-051 part 2 evidence against review 1.21 §7's 16-item
+  checklist.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate).
+- `domain_contracts.md` still needs an actual human reviewer — unchanged
+  blocker.
+- Owner risk-policy decisions (risk per trade, max daily loss/drawdown,
+  last-entry cutoff, flatten deadline, HALT-reset authority) can now be
+  decided in parallel per review 1.21 §13 — this requires the owner, not
+  further agent action.
 
 ---
 
