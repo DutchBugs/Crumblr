@@ -86,7 +86,8 @@ Data health:          GREEN   (decisions journalled, ticks and bars stored,
                                 schema versioned; real Pepperstone feed
                                 evidence exists — Phase A, 2026-08-24: 2,920
                                 real ticks + 17 real M5 bars, GOOD quality,
-                                zero gaps)
+                                zero gaps; broker-state/instrument-spec
+                                snapshots real-terminal-confirmed 2026-08-26)
 MT5 connectivity:     GREEN   (M1 = MT5-INTEGRATED, PASSED — review
                                 feedback.1.12, 2026-08-24. Account, symbol,
                                 instrument and position reads, continuous
@@ -95,7 +96,13 @@ MT5 connectivity:     GREEN   (M1 = MT5-INTEGRATED, PASSED — review
                                 Pepperstone terminal: Phase A (30 clean
                                 minutes) and Phase B (two deliberate terminal
                                 closures, both recovered) — F-034/F-037
-                                closed)
+                                closed. F-051, part 1, 2026-08-26: broker
+                                snapshot, instrument spec and reconciliation
+                                (UNKNOWN before a human-approved pin,
+                                MATCHED after — F-055) all real-terminal-
+                                confirmed, zero defects found. A real
+                                Trader/Risk/Supervisor decision (F-051 part 2)
+                                remains pending real M5 bar accumulation)
 Paper campaign:       NOT STARTED
 Production readiness: 0%
 ```
@@ -275,9 +282,14 @@ Next objective: F-051 on the next Windows/MT5 session — `feedback.1.20.md`
       minutes, continuous real ticks/bars), and Phase B (two deliberate
       terminal closures, both detected and recovered with full revalidation)
       — F-034/F-037 closed, M1 PASSED (review 1.14 §11 F-033)
-- [ ] CI pipeline — workflow committed; the repository has had a remote since
-      2026-08-24, so nothing external blocks running it, but it has not been
-      confirmed to run yet (review 1.9 §8, 1.10 §8)
+- [ ] CI pipeline — **ran for real for the first time 2026-08-26** (owner
+      relayed GitHub's failure notifications directly — no `gh`/Actions log
+      access exists in this environment either way). Both platform jobs
+      failed fast; root cause found and fixed same day (F-056: `numpy` was
+      an undeclared test dependency, present only as a side effect of the
+      `mt5` extra). Reproduced and fixed locally against the exact failing
+      commands; **not yet confirmed green on an actual runner** — needs a
+      push and a human/`gh` check of the next run
 
 ### MT5
 
@@ -298,9 +310,9 @@ F-033's own rule: current sections state present truth).
 | positions | x | x | 0 open positions read from the real account |
 | `order_check` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
 | `order_send` | — | — | N/A for M1 by design — refused, not merely untested (D-036) |
-| orders (pending, read/persist) | x | | built 2026-08-25 (F-047) — `pending_orders()`, `broker_pending_order_snapshots`, unit/integration-tested against `FakeMt5`/`ScriptedMt5`. **Not yet validated against the real terminal — F-051** |
+| orders (pending, read/persist) | x | x | built 2026-08-25 (F-047) — `pending_orders()`, `broker_pending_order_snapshots`. **Real-terminal-validated 2026-08-26**: real flat account read as `pending_order_set_state=COMPLETE` with 0 rows, not `UNKNOWN` |
 | history (backfill beyond one poll) | | | not built; not required for M1's own acceptance |
-| reconciliation | x | | v0 built 2026-08-25, instrument-spec comparison added 2026-08-26 (F-053) — `application/reconciliation.py` — not an M1 acceptance requirement, but no longer "not built" either. Account/position/pending-order **and** instrument-spec comparison all implemented and unit/integration-tested. The one smoke test against `crumblr_soak` correctly returned `UNKNOWN` (no real broker-state observation existed). **Not yet validated as `MATCHED` against a real flat account — F-051** |
+| reconciliation | x | x | v0 built 2026-08-25, instrument-spec comparison added 2026-08-26 (F-053), pinned-baseline authority added same day (F-055) — `application/reconciliation.py`. **Real-terminal-validated 2026-08-26**: `UNKNOWN` before a human-approved `expected_spec_version` pin, `MATCHED` after — the first real `MATCHED` reconciliation result this project has ever produced. Account/position/pending-order dimensions also real-terminal-confirmed via the same flat-account snapshot |
 
 ### Risk
 
@@ -5012,6 +5024,219 @@ underlying sentence is fixed.
 - Phase 4 (non-sending execution engineering) — authorized to start in
   parallel, pending a decision on scope/timing.
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-26 (thirty-first entry) — F-051 real-terminal session, part 1: discovery through reconciliation MATCHED, the first time ever
+
+**Verdict: this session ran on the Windows/MT5 host itself (confirmed AMD64,**
+**MT5 terminal `Pepperstone MetaTrader 5` installed and running). The full**
+**discovery-through-reconciliation half of `feedback.1.20.md` §6's 26-step**
+**checklist (steps 1-18) succeeded cleanly against the real Pepperstone**
+**demo terminal, with zero defects found — the first real-terminal run in**
+**this project's history that found nothing to fix. Reconciliation read**
+**`UNKNOWN` before a human-approved pin and `MATCHED` after, proving F-055's**
+**fail-closed design end to end for real. The remaining steps (19-26, a**
+**real Trader decision) are honestly blocked on real M5 bar accumulation,**
+**not a defect — see "what remains" below.**
+
+**A. Discovery / fail-closed proof (steps 1-11).**
+
+```text
+1. crumblr_soak already at head (b3f8a2c7d914) from earlier this session
+2. config/paper.yaml confirmed unpinned (expected_spec_version unset)
+3. scripts/mt5_live_reader.py run against PepperstoneUK-Demo, 120s
+4. mt5.connected — account_ref ***706 (masked, F-031), server matched
+5. InstrumentSpec persisted — spec_version bcd6a592...00283bd4
+6. BrokerAccountSnapshot persisted — balance/equity EUR 10,000.00, margin 0,
+   margin_free 10,000.00, RETAIL_HEDGING, currency EUR, leverage 30
+7. position_set_state = COMPLETE
+8. pending_order_set_state = COMPLETE
+9. Account confirmed flat: 0 open positions, 0 pending orders
+10. scripts/reconcile.py run
+11. Result: UNKNOWN — "no approved instrument-spec baseline has been
+    pinned for 'EUR/USD'" — exactly the required result before a pin exists
+```
+
+Zero reconnects, zero failures, 24 consecutive HEALTHY polls. Broker clock
+offset re-measured fresh: 180 minutes, consistent with every prior
+measurement since D-039 — no drift, no surprises.
+
+**Field-by-field comparison against the 2026-08-24 first-contact evidence**
+(`var/first-contact.sanitized.json`), done before asking for approval:
+broker_symbol, digits, point, tick_size, contract_size, volume_min/max/step,
+stops_level, freeze_level, trade_mode and filling_modes all matched
+exactly, two days and one real session apart. Only `tick_value` differed
+(0.8569 → 0.8579), exactly as F-039 predicts — it drifts with the live
+EUR/USD cross-currency rate, not broker policy, which is precisely why it
+is excluded from `spec_version`'s hash. This is real evidence that F-039's
+fix behaves correctly in production, not only in the unit tests that
+originally proved it.
+
+**B. Human pin (steps 12-15).** The comparison above, plus the flat-account
+confirmation, was presented to the owner directly in this conversation —
+not self-approved by the agent, per F-055's explicit design intent and
+review 1.19 §4's "human/reviewer accepts it" requirement. Approved.
+`config/paper.yaml` gained a `markets` override (the base config's
+`markets` list is replaced wholesale by the environment overlay, not
+deep-merged, so the full entry is repeated) setting
+`expected_spec_version: bcd6a59271173c8fc49f4d88d522a9bd55d9e0e5ba44137b6d8c9b4d00283bd4`
+for `EUR/USD`, dated and reasoned in a comment in the file itself. This is
+the **first time this project has ever pinned a real, human-approved
+instrument-spec baseline** — everything before this was either synthetic
+or an unapproved first observation.
+
+**C. Reconciliation after the pin (steps 16-18).**
+
+```text
+16. Config reload confirmed to pick up the new pin (verified directly)
+17. Fresh broker-state capture (a second, shorter mt5_live_reader.py run)
+18. scripts/reconcile.py → MATCHED
+```
+
+**The first `MATCHED` reconciliation result this project has ever produced
+against a real broker.** `snapshot_id=037ab721-12df-426d-84ea-2ca3a63ed12f`.
+
+**What remains (steps 19-26) — honestly blocked, not a defect.**
+`scripts/live_decision.py` (the shipped `ict_v1` strategy) correctly and
+safely reported `skipped: only 49 bars stored, strategy needs 120` — no
+crash, no wrong answer, exactly the fail-closed "insufficient evidence"
+behaviour the strategy is supposed to produce. A one-off wiring-proof
+substitution to `baseline_v1` (the same substitution
+`tests/integration/test_live_decision.py` already uses, and for the same
+documented reason — `config/paper.yaml` itself was never touched, the
+shipped strategy stays `ict_v1`) still came up short: `baseline_v1` needs
+65 bars and only 49 exist. **There is no bar-history backfill capability
+in this codebase** (the MT5 capability table has always listed this as
+"not built; not required for M1's own acceptance") — real M5 bars only
+accumulate through continuous real-time polling, one every five minutes,
+and `crumblr_soak`'s 49 bars were built up across Phase A/B (2026-08-24)
+plus this session. Reaching 65 needs roughly 80 more minutes of continuous
+real-time accumulation; reaching `ict_v1`'s 120 needs roughly six hours.
+**No synthetic bar was, or will be, mixed into this real data to shortcut
+this** — `MarketBar.origin` exists specifically to keep that distinction
+honest, and manufacturing "real" evidence would undermine the entire point
+of this checkpoint.
+
+**Decision, with the owner in this conversation:** run
+`scripts/mt5_live_reader.py --duration 6000` (100 minutes) in the
+background to accumulate enough real bars, then complete the `baseline_v1`
+wiring proof. This entry records what is proven so far; a follow-up entry
+will record the Trader-decision evidence once the accumulation finishes.
+
+**Evidence.** No source code changed this entry — only `config/paper.yaml`
+(the pin) and this file. The quality gate is unaffected; the previous
+(thirtieth) entry's results stand: 877 passed, 3 skipped, ruff/mypy clean.
+
+**Problems found.** None. This is the first real-terminal session in this
+project's history to find zero defects — every prior first-contact/Phase
+A/Phase B session found at least one real bug (D-037, D-039, D-040, D-041,
+D-042, F-034's original gap). That the platform is now mature enough for a
+real session to simply confirm correct behaviour is itself informative.
+
+**Next**
+
+- Wait for the background `mt5_live_reader.py` run to accumulate enough
+  real bars, then run the `baseline_v1` wiring proof (or, given enough
+  time, the real `ict_v1` run) and record a follow-up entry.
+- Everything else in `feedback.1.20.md` §6 remains as previously recorded:
+  CI evidence, the domain-contract supply, owner risk-policy decisions,
+  and Phase 4 preparation.
+
+---
+
+## Update 2026-08-26 (thirty-second entry) — F-056: CI ran for real for the first time and failed; root cause found and fixed the same day
+
+**Verdict: GitHub Actions executed this repository's CI workflow for the**
+**first time in the project's history — both platform jobs failed fast.**
+**The owner relayed the failure notifications directly. Reproduced exactly**
+**by running the same commands locally under the same conditions (no `mt5`**
+**extra installed): `numpy` was an undeclared test dependency, present**
+**only as a side effect of the `mt5` extra. Fixed the same day.**
+
+The owner reported, via GitHub's own notification (not through `gh`
+CLI/Actions access, which still does not exist in this environment):
+
+```text
+Lint, types and tests (Linux)     — Failed in 19 seconds
+Tests (Windows — MT5 host platform) — Failed in 23 seconds
+No secrets committed              — Succeeded in 6 seconds
+```
+
+Both failures in well under 30 seconds ruled out an ordinary test failure
+(the full suite takes minutes) and pointed at an early step — checkout,
+`uv sync --locked`, or test collection itself.
+
+**Reproduction.** Both CI jobs run `uv sync --locked` without the `mt5`
+extra (the Linux job cannot install it at all — Windows-only wheels; the
+Windows job deliberately does not, per its own comment, "today it proves
+the platform code is host-independent"). Running the exact same command
+locally, then the exact test commands each job runs
+(`uv run pytest -m "not integration"` for the Windows job; the full suite
+for the Linux job), reproduced two failures exactly:
+
+```text
+ModuleNotFoundError: No module named 'numpy'
+  tests/unit/test_mt5_readonly_gateway.py::TestTicks
+    ::test_real_numpy_structured_rows_convert_without_crashing
+  tests/unit/test_mt5_readonly_gateway.py::TestBars
+    ::test_real_numpy_structured_rows_convert_without_crashing
+```
+
+These are the D-040 regression tests (added after the first real MT5
+soak, 2026-08-24) that build a real numpy structured array to reproduce
+the exact shape `copy_ticks_from`/`copy_rates_from_pos` return, proving
+`Decimal(repr(x))` handles numpy 2.x's own scalar `__repr__` correctly.
+`numpy` itself was never a declared dependency anywhere — it happened to
+be present locally only as a transitive dependency of the `mt5` extra's
+`MetaTrader5` package. These two tests therefore silently passed only on
+hosts that happened to have that extra installed, and were never actually
+exercised on any host without it — including both CI jobs, and including
+every CI run there might have been before this one, had CI ever run
+before.
+
+**Fixed** by adding `numpy>=2.0` to `[dependency-groups] dev` in
+`pyproject.toml` — the dev group, not the `mt5` extra, since this
+regression test must run on every platform regardless of whether MT5
+itself is installed — and regenerating `uv.lock`. Confirmed against the
+exact commands both jobs run:
+
+```text
+uv sync --locked                          — succeeds, installs numpy 2.5.2
+                                             without the mt5 extra
+uv run pytest -m "not integration"        — 724 passed, 1 skipped, 0 failed
+                                             (the Windows job's exact command)
+uv run ruff check . / format --check .    — clean
+uv run mypy                               — clean, 125 source files
+uv run pytest (full suite, no mt5 extra)  — 877 passed, 3 skipped, 0 failed
+                                             — matches the Linux job's
+                                             conditions exactly, fully clean
+```
+
+**Problems found.** Exactly the one described above — genuinely the first
+concrete evidence CI has ever produced, and it caught something real:
+these two tests had an unstated, environment-dependent dependency that no
+local development session had ever noticed, because every local
+development session so far happened to have the `mt5` extra installed at
+some point. This is precisely the kind of gap CI exists to catch and that
+"CI has never run" had been silently hiding.
+
+**Decision.** F-056 CLOSED (SHIPPED) — the specific reported failure is
+reproduced and fixed locally with high confidence. **Not yet CLOSED as
+"CI confirmed green"** — that still requires an actual push and a human
+(or a session with `gh`/Actions access) to check the next run's result.
+Recording the fix here rather than waiting for that confirmation matches
+this project's discipline of logging real defects and their fixes as soon
+as they are understood, not only once every downstream verification step
+completes.
+
+**Next**
+
+- Push this fix and check whether the next CI run is actually green — a
+  human check, or a future session with `gh`/Actions access, since this
+  one still has neither.
+- Continue F-051 part 2 (real Trader decision, pending bar accumulation).
+- Everything else in `feedback.1.20.md` §6 remains as previously recorded.
 
 ---
 

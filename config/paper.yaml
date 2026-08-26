@@ -70,3 +70,26 @@ account_guard:
   require_demo_account: true
   expected_currency: EUR
   expected_leverage: 30
+
+# F-055 (review 1.19 §4): the instrument-spec baseline reconciliation checks
+# against must be an explicit, approved pin — never inferred from whichever
+# spec happened to be observed first. `markets` is replaced wholesale by the
+# overlay merge (config._deep_merge only merges mappings, not lists), so the
+# full entry is repeated here rather than just the new field.
+#
+# Pinned 2026-08-26, F-051 real-terminal session (owner approved, this
+# conversation): observed against the live PepperstoneUK-Demo terminal and
+# compared field by field against the 2026-08-24 first-contact evidence
+# (`var/first-contact.sanitized.json`) — digits, point, tick_size,
+# contract_size, volume_min/max/step, stops_level, freeze_level, trade_mode
+# and filling_modes all matched exactly. `tick_value` differed (0.8569 vs
+# 0.8579) as expected — it is deliberately excluded from `spec_version`
+# because it drifts live with the EUR/USD cross-currency rate, not with
+# broker policy (F-039). Account confirmed flat (0 positions, 0 pending
+# orders) at pin time. Changing this value is a normal, git-reviewed config
+# edit like any other in this file — not something the platform ever does
+# on its own.
+markets:
+  - canonical_symbol: EUR/USD
+    enabled: true
+    expected_spec_version: bcd6a59271173c8fc49f4d88d522a9bd55d9e0e5ba44137b6d8c9b4d00283bd4

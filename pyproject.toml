@@ -31,6 +31,18 @@ dev = [
     "ruff>=0.6",
     "types-pyyaml>=6.0",
     "httpx2>=2.12.0",
+    # tests/unit/test_mt5_readonly_gateway.py's TestTicks/TestBars numpy
+    # regression tests build a real numpy structured array to reproduce
+    # D-040 (MT5's copy_ticks_from/copy_rates_from_pos return numpy rows,
+    # and numpy 2.x's own scalar repr broke Decimal parsing). numpy was
+    # previously only present as a transitive dependency of the `mt5`
+    # extra, so these tests silently passed only on hosts that happened to
+    # have that extra installed and failed with ModuleNotFoundError
+    # everywhere else — including both CI jobs, neither of which installs
+    # `mt5` (found 2026-08-26, first real CI run). A dev dependency here
+    # keeps this regression test running on every platform, not only where
+    # MT5 happens to pull numpy in as a side effect.
+    "numpy>=2.0",
 ]
 
 [build-system]

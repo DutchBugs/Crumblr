@@ -6,15 +6,20 @@ Everything a developer needs to pick this up cold.
 available and the repository got a remote. **Rewritten 2026-08-26** after
 MT5 first contact, M1/M2 passing, and the platform being wired end to end
 from real market data through to a (deliberately unreachable) order.
-**Updated twice more the same day**: once after reconciliation,
+**Updated three times more the same day**: once after reconciliation,
 decision-window durability and feature-value persistence were completed
-(F-053/F-054/D-031), and again after a second review the same day found —
-and this session fixed — two real correctness gaps in that work: F-054's
-recovery treated a corrupted record the same as an absent one, and F-053's
+(F-053/F-054/D-031); again after a second review the same day found — and
+this session fixed — two real correctness gaps in that work (F-054's
+recovery treated a corrupted record the same as an absent one; F-053's
 instrument-spec comparison trusted whichever spec was observed first
-instead of an approved baseline. **Everything left open now genuinely
-needs either a Windows/MT5 host, GitHub Actions access, or a human
-reviewer; nothing is blocked on engineering alone any more.**
+instead of an approved baseline); and again after **F-051 finally started**
+— it turns out the machine this session has been running on all along
+*is* a Windows/MT5 host (AMD64, `Pepperstone MetaTrader 5` installed and
+running), something every earlier version of this document got wrong by
+describing the development host as macOS-only. Discovery through
+reconciliation `MATCHED` is now proven for real (§0 below); a real Trader
+decision is the one piece still pending, on real M5 bar accumulation, not
+on host access.
 
 **Start at §0.** It is the exact point of handover. §4 tells you what is
 already proven against the real broker and what the very next session
@@ -74,16 +79,28 @@ The last few things that happened, in order:
    first-observation baseline with `config.MarketConfig.expected_spec_version`
    — an explicit, human-approved, git-reviewable pin, `None` (→ `UNKNOWN`)
    until a real F-051 observation is reviewed and accepted.
+8. **F-051 finally started, 2026-08-26** — this development host turned out
+   to *be* a Windows/MT5 host all along (AMD64, `Pepperstone MetaTrader 5`
+   installed, terminal running). Discovery through reconciliation `MATCHED`
+   all proven for real, zero defects found: real `InstrumentSpec` matched
+   the 2026-08-24 first-contact evidence field for field (except
+   `tick_value`, correctly excluded); a real flat account snapshot read
+   `COMPLETE`/`COMPLETE`, 0 positions, 0 pending orders; `reconcile()` read
+   `UNKNOWN` before a human-approved pin and **`MATCHED` after** — the
+   first real `MATCHED` result this project has produced. The remaining
+   piece — a real Trader/Risk/Supervisor decision — is honestly blocked on
+   real M5 bar accumulation (`ict_v1` needs 120 bars, `baseline_v1` needs
+   65, `crumblr_soak` has 49), not on anything else. See `status.md` §13
+   thirty-first entry for the full evidence.
 
-**The single most valuable thing the next developer can do is F-051.**
-Everything from F-047 through F-055 — broker-state capture, reconciliation
-(account/position **and** instrument-spec, against a pinned baseline), the
-live decision pipeline, its now-durably-and-safely-recovered idempotence,
-and feature-value persistence — has only ever run against a fake/scripted
-MT5 terminal (`FakeMt5`/`ScriptedMt5`) or a real PostgreSQL with synthetic
-data. Not one line of this has met the real Pepperstone terminal yet. §4
-below is the runbook. **The first real run is also the first opportunity to
-actually pin a baseline** — see §4.4 step 9.
+**The single most valuable thing the next developer can do is finish
+F-051** — the Trader-decision half. Everything else in the checklist is
+done. `mt5_live_reader.py` accumulates real M5 bars at one every five
+minutes with no backfill capability, so this is now purely a matter of
+running it for long enough (roughly 80 more minutes for a `baseline_v1`
+wiring proof, roughly six hours for the real `ict_v1` strategy) and then
+re-running `scripts/live_decision.py`. §4 below has the full runbook and
+now reflects what is actually proven.
 
 ### 0.1 If you are a new session (human or agent) picking this up
 
@@ -93,19 +110,15 @@ handover time, open findings are:
 
 | Finding | What it needs | Blocked on |
 |---|---|---|
-| **F-051** | Real-terminal proof of F-047/F-052/reconciliation (incl. F-053/F-055)/F-048/F-054, one checklist session (`feedback.1.17.md` §6 / `feedback.1.19.md` §8, 18 steps) | A Windows host with the MT5 terminal and the logged-in Pepperstone demo account |
+| **F-051, part 2** | A real Trader/Risk/Supervisor decision — discovery through reconciliation `MATCHED` is already proven (2026-08-26) | Real M5 bar accumulation only — run `mt5_live_reader.py` for longer, no host/credential/code blocker remains |
 | **CI** | Confirm the workflow actually ran green on a runner and record the result | `gh` CLI or GitHub Actions web access (this environment has neither) |
 | **Domain-contract review** | A human actually reads `review/domain_contracts.md` and approves or challenges it | A human reviewer |
 
-Everything that was previously listed here as unblocked engineering
-(F-053, F-054, F-055, D-031) shipped 2026-08-26 — see §0 above. **All
-three remaining items are genuinely blocked on something this environment
-cannot produce on its own.** If you have MT5/Windows host access, **do
-F-051 first** — it is explicitly the highest-priority item and unblocks
-the most (it is also the trigger for the next regular review,
-`feedback.1.20.md`). If you don't, there is currently no unblocked
-engineering work queued — review the trackers for anything a fresh review
-may have raised since this was written.
+**This machine is the Windows/MT5 host** — do not assume otherwise the way
+every earlier version of this document did. If you're continuing F-051,
+just run `mt5_live_reader.py` for a while (see §4) and then
+`scripts/live_decision.py`. CI and the domain-contract review remain
+genuinely blocked on something this environment cannot produce on its own.
 
 ### 0.2 Initialise the Windows host
 
@@ -731,17 +744,21 @@ thing it is meant to observe.
 
 ## 9. Local environment notes
 
-- **The development host is macOS arm64.** Everything except the MT5
-  gateway is host-independent; the `mt5` extra is marked
-  `sys_platform == 'win32'` so `uv sync` works there.
-- **The MT5 host is Windows x86-64**, available since 2026-08-24. It needs
-  `uv sync --extra mt5` and the MetaTrader 5 terminal, logged into the
-  Pepperstone demo account once, interactively. Windows-on-ARM does not
-  work — the wheels do not exist for it.
-- **Docker Desktop** does not start automatically on either host. On
-  macOS, `open -a Docker`, then wait for `docker info` to succeed. Most
-  persistence tests skip silently without a database, so check before
-  believing a green run.
+- **This working copy runs on Windows x86-64 (AMD64) with the MT5 terminal
+  already installed and running** (`Pepperstone MetaTrader 5`, confirmed
+  2026-08-26) — the same machine does development *and* real MT5 work.
+  Earlier versions of this document described a two-host setup (a macOS
+  arm64 development machine, plus a separate Windows host for MT5 only);
+  whether that separate macOS machine still exists elsewhere is not
+  something this session can verify, but **do not assume the machine you
+  are on cannot reach MT5 — check `platform.machine()` and for a running
+  `terminal64.exe` first.** Everything except the MT5 gateway is still
+  host-independent code-wise — the `mt5` extra is marked
+  `sys_platform == 'win32'`, so the same `uv sync` command is safe on a
+  non-Windows machine too, it simply skips that extra. Windows-on-ARM does
+  not work for the MT5 half — the wheels do not exist for it.
+- **Docker Desktop** does not start automatically. Most persistence tests
+  skip silently without a database, so check before believing a green run.
 - **Two separate PostgreSQL databases matter.** `crumblr` is the shared
   dev/test database — its schema gets bootstrapped and torn down by test
   fixtures, so it must never be used for a real soak/live run.
@@ -764,12 +781,18 @@ thing it is meant to observe.
   `credential.https://github.com.username`. Do not move either to the
   global config, and do not switch the remote to SSH — the default key on
   the macOS host is a deploy key belonging to an unrelated work repository.
-- **CI has never been confirmed to run on a runner.** The workflow is
-  written, includes a PostgreSQL service and a Windows job that installs
-  the `mt5` extra. Multiple pushes to `main` should have triggered it
-  automatically; no session so far has had `gh` CLI or GitHub Actions web
-  access to check the result. Review 1.17 §11: this is now purely an
-  evidence-retrieval task for a human, not an engineering blocker.
+- **CI ran for the first time 2026-08-26 and failed both platform jobs** —
+  the owner relayed GitHub's own failure notifications directly, since no
+  session so far has had `gh` CLI or GitHub Actions web access to check a
+  run directly. Root cause reproduced and fixed the same day (F-056):
+  `numpy` was an undeclared test dependency (only present as a side effect
+  of the `mt5` extra, which — correction to every earlier version of this
+  document — **neither CI job actually installs**; the Windows job's own
+  comment says it deliberately proves the platform code is
+  host-independent, not that it exercises the MT5 gateway against a real
+  terminal). Fixed locally against the exact failing commands; **still not
+  confirmed green on an actual runner** — that needs a push and a human
+  (or a future session with `gh`/Actions access) to check the result.
 - **`.gitattributes` pins the checkout to LF.** With two operating systems
   in play, a CRLF checkout would change the determinism hash and the
   format check without changing any code.
