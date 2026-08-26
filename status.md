@@ -195,25 +195,28 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-26 — review 1.18 processed: F-033 reopened
-                a sixth time (four current-state contradictions in this
-                file, found because it is now positioned as onboarding
-                truth for a second developer) and closed again the same
-                day. F-053 (reconciliation now compares the instrument
-                spec), F-054 (durable live-decision idempotence) and D-031
-                (feature-value persistence) all built and shipped the same
-                day, per review 1.18's explicit "build now, do not defer"
-                instructions for the first two. Full quality gate clean
-                (ruff/mypy/pytest), determinism reproven, real-soak smoke
-                test clean
-Next objective: F-051 on the next Windows/MT5 session (the checklist in
-                `feedback.1.17.md` §6/`feedback.1.18.md` §5: real broker
-                snapshot → flat reconciliation MATCHED, now including the
-                instrument-spec comparison → one real closed-M5 decision
-                through F-048, end to end); run CI on a runner and record
-                the result; supply `review/domain_contracts.md` unchanged
-                for the human/reviewer approval it has never actually
-                received (review 1.17 §10/1.18 §9)
+Last meaningful update: 2026-08-26 — review 1.20 processed: a pure
+                acceptance review, no new findings. F-054's fail-closed
+                recovery and F-055's pinned-baseline mechanism (both built
+                in response to review 1.19) are accepted as CLOSED IN
+                IMPLEMENTATION; F-053/D-031 likewise. Reviewer's own words:
+                "additional simulated safety work has diminishing value...
+                run F-051 and answer [whether the stack behaves correctly
+                against Pepperstone] with evidence." No code changed this
+                pass — nothing was requested beyond running F-051, which
+                remains blocked on a Windows/MT5 host this session does
+                not have. Reviewer also authorized Phase 4 (non-sending
+                execution engineering) to start in parallel with F-051
+Next objective: F-051 on the next Windows/MT5 session — `feedback.1.20.md`
+                §6's 26-step sequence: confirm `expected_spec_version`
+                starts unpinned (→ reconciliation `UNKNOWN`), observe the
+                real spec, have a human approve and pin it in versioned
+                config, confirm reconciliation then reads `MATCHED`, then
+                run one real closed-M5 decision through F-048 end to end.
+                Run CI on a runner and record the result; supply
+                `review/domain_contracts.md` unchanged for the
+                human/reviewer approval it has never actually received
+                (review 1.17 §10, reconfirmed 1.18-1.20)
 ```
 
 ## Scope
@@ -4942,6 +4945,72 @@ longer load-bearing for reconciliation.
 - Run CI on a runner and record the result; supply
   `review/domain_contracts.md` unchanged for actual reviewer inspection —
   both remain pure evidence/approval tasks, not engineering.
+- Update `review/FEEDBACK.md` with this result (done alongside this entry).
+
+---
+
+## Update 2026-08-26 (thirtieth entry) — review 1.20 processed: pure acceptance, no code changes requested
+
+**Verdict: F-054's fail-closed recovery and F-055's pinned-baseline**
+**mechanism (both built in response to review 1.19) are accepted as**
+**CLOSED IN IMPLEMENTATION, alongside F-053 and D-031. No new findings**
+**were opened. The reviewer's own words: "additional simulated safety**
+**work has diminishing value... run F-051 and answer [whether the stack**
+**behaves correctly against Pepperstone] with evidence."**
+
+`review/feedback.1.20.md` arrived reviewing the twenty-ninth entry's F-054
+hardening and F-055 work. Nothing in it required a code change — it is
+recorded here in full per `CLAUDE.md` §1 regardless, since every review is
+processed the same way whether or not it asks for engineering.
+
+**The one item it did ask for**, §5: `status.md` §3's "Last meaningful
+update" line still narrated review 1.18's work after review 1.19 had
+already been processed and this file updated for it. The review was
+explicit that this is **not** a reason to reopen F-033 — "fix
+opportunistically the next time `status.md` is touched, do not spend
+another session on this" — so it is fixed as part of this entry rather
+than as its own finding-closure cycle.
+
+**Everything else in review 1.20 is forward guidance, not a finding:**
+a 26-step F-051 sequence (`feedback.1.20.md` §6) that explicitly requires
+starting with `expected_spec_version` unpinned and proving reconciliation
+reads `UNKNOWN` *before* a human observes, verifies and pins the real
+spec — the two-step discover-then-pin behaviour is itself "desirable
+evidence," not something to shortcut; explicit authorization for Phase 4
+(non-sending execution engineering) to proceed in parallel with F-051, not
+after it; and a preview of the one hard invariant Phase 4 must carry
+forward once it exists — durable `order_request_id` idempotence at the
+broker-submission boundary, a different boundary from the decision-window
+idempotence F-054 already protects, and explicitly not yet a finding since
+no execution path exists to raise it against.
+
+**No engineering was undertaken this entry** — there is no unblocked
+engineering work queued (F-053/F-054/F-055/D-031 are all shipped; F-051,
+CI and the domain-contract supply are the only open items, and all three
+are genuinely blocked on something this session does not have: a
+Windows/MT5 host, `gh`/Actions access, and a human reviewer respectively).
+Whether to begin Phase 4 preparation now, ahead of F-051, is a scope
+question put to the user rather than assumed — the reviewer authorizes it
+but does not require it, and it is a substantial new engineering surface
+(execution-capable adapter, `order_check`, `ApprovedOrder`, durable
+`order_request_id`) worth a deliberate decision rather than a default.
+
+**Evidence.** No source code changed this entry beyond the one wording
+fix in this file; the previous (twenty-ninth) entry's gate results stand
+unchanged: 877 passed, 3 skipped, ruff/mypy clean, determinism reproven.
+
+**Decision.** Review 1.20 fully processed; no findings left open by it.
+F-033 not reopened, per the reviewer's explicit instruction, but the
+underlying sentence is fixed.
+
+**Next**
+
+- F-051 on the next Windows/MT5 session — `feedback.1.20.md` §6's 26-step
+  sequence.
+- Run CI on a runner and record the result; supply
+  `review/domain_contracts.md` unchanged for actual reviewer inspection.
+- Phase 4 (non-sending execution engineering) — authorized to start in
+  parallel, pending a decision on scope/timing.
 - Update `review/FEEDBACK.md` with this result (done alongside this entry).
 
 ---
