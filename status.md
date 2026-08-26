@@ -47,7 +47,7 @@ Gate qualification is a separate, human decision recorded in §16.
 
 | Component | Maturity | Gate qualification | Blocker |
 |---|---|---|---|
-| 1. Platform / Application | MT5-INTEGRATED (M1); everything past M1 is REPLAY-TESTED, not yet real-terminal-validated (F-051) | **NOT PASSED** (M0) | M0's own remainder: human contract review, and CI never run on a runner. M1 itself is PASSED — see §16 Promotion history |
+| 1. Platform / Application | MT5-INTEGRATED (M1); F-051 part 1 (discovery through reconciliation `MATCHED`) real-terminal-confirmed 2026-08-26; part 2 (a real Trader decision) and everything else past M1 remain REPLAY-TESTED, not yet real-terminal-validated | **NOT PASSED** (M0) | M0's own remainder: human contract review, and CI confirmation — CI ran for the first time 2026-08-26, both jobs failed, fixed same day (F-056), next run unconfirmed. M1 itself is PASSED — see §16 Promotion history |
 | 2. Trading Agent | REPLAY-TESTED | **NOT PASSED** (M6) | No real EUR/USD evidence; feature-frozen per F-004 |
 | 3. Evaluator / Supervisor | UNIT-TESTED | **NOT PASSED** (M7) | Layer 1 only; post-trade and drift not started |
 
@@ -73,10 +73,14 @@ LIVE-CANARY
 
 ```text
 Engineering health:   AMBER   (lint/types/tests green locally, 877 passed/3
-                                explained skips as of 2026-08-26; CI still
-                                never confirmed executed on a runner — review
-                                1.17 §11 now treats this as a pure evidence-
-                                retrieval task, not an engineering blocker)
+                                explained skips as of 2026-08-26. CI ran for
+                                the first time 2026-08-26 and both platform
+                                jobs failed fast — root cause found and
+                                fixed the same day (F-056: an undeclared
+                                `numpy` test dependency); the fix is pushed
+                                but the next run has not yet been confirmed
+                                green on an actual runner — needs a human
+                                or `gh`/Actions check)
 Safety-state health:  AMBER   (fail-closed, durable, and now recovered on the
                                 normal path; not yet broker-validated)
 Trading health:       GREY    (ict_v1 runs on synthetic data only — no evidence)
@@ -135,10 +139,15 @@ itself requires, and what is local project policy on top of it.
 ### M0 acceptance — build.md §26
 
 - [x] clean install from scratch — `uv sync` from an empty environment
-- [ ] all tests run locally **and in CI** — 604 pass locally; **CI has never
-      executed on a runner**, so this criterion is half met at best. Review 1.6
-      §5 offers a way out: record an explicit M0 exception now, and make CI
-      execution mandatory before `feedback.2.0.md`. That is an owner decision
+- [ ] all tests run locally **and in CI** — 877 pass locally (2026-08-26).
+      **CI ran for the first time 2026-08-26 and both platform jobs
+      failed**; root cause found and fixed the same day (F-056 — an
+      undeclared `numpy` test dependency), fix pushed, **next run not yet
+      confirmed green**. This criterion is closer to met than at any prior
+      point but still not fully met — a human or `gh`/Actions check of the
+      next run is the remaining step. Review 1.6 §5's fallback (an explicit
+      M0 exception, CI mandatory before `feedback.2.0.md`) is now most
+      likely moot rather than needed, pending that confirmation
 - [x] no secrets in repository — `.gitignore`, config-loader rejection, gitleaks job
 
 ### Local project policy — not from build.md §26
@@ -202,26 +211,32 @@ Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
 Gate qualification: M0 NOT PASSED (CI + contract review still open);
                 M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-26 — review 1.20 processed: a pure
-                acceptance review, no new findings. F-054's fail-closed
-                recovery and F-055's pinned-baseline mechanism (both built
-                in response to review 1.19) are accepted as CLOSED IN
-                IMPLEMENTATION; F-053/D-031 likewise. Reviewer's own words:
-                "additional simulated safety work has diminishing value...
-                run F-051 and answer [whether the stack behaves correctly
-                against Pepperstone] with evidence." No code changed this
-                pass — nothing was requested beyond running F-051, which
-                remains blocked on a Windows/MT5 host this session does
-                not have. Reviewer also authorized Phase 4 (non-sending
-                execution engineering) to start in parallel with F-051
-Next objective: F-051 on the next Windows/MT5 session — `feedback.1.20.md`
-                §6's 26-step sequence: confirm `expected_spec_version`
-                starts unpinned (→ reconciliation `UNKNOWN`), observe the
-                real spec, have a human approve and pin it in versioned
-                config, confirm reconciliation then reads `MATCHED`, then
-                run one real closed-M5 decision through F-048 end to end.
-                Run CI on a runner and record the result; supply
-                `review/domain_contracts.md` unchanged for the
+Last meaningful update: 2026-08-26 — **F-051 finally started, part 1
+                complete.** This development host turned out to be the
+                Windows/MT5 host all along (AMD64, `Pepperstone MetaTrader
+                5` installed and running). Discovery through reconciliation
+                proven for real, zero defects found: real `InstrumentSpec`
+                matched the 2026-08-24 first-contact evidence field for
+                field; a real flat account snapshot read
+                `COMPLETE`/`COMPLETE`, 0 positions, 0 pending orders;
+                `reconcile()` read `UNKNOWN` before a pin and **`MATCHED`
+                after** — the first real `MATCHED` result and the first
+                human-approved instrument-spec baseline this project has
+                ever produced (`config/paper.yaml`'s new
+                `expected_spec_version`). Part 2 (a real Trader decision)
+                is honestly blocked on real M5 bar accumulation, not a
+                defect — no backfill capability exists; a background
+                `mt5_live_reader.py` run is in progress. **Separately, CI
+                ran on a real runner for the first time this same day and
+                both platform jobs failed** — the owner relayed GitHub's
+                notifications directly; reproduced and fixed the same day
+                (F-056: an undeclared `numpy` test dependency). Fix pushed;
+                next run not yet confirmed green
+Next objective: finish F-051 part 2 once enough real M5 bars have
+                accumulated (`baseline_v1` needs 65, `ict_v1` needs 120;
+                49 existed at last check); confirm the next CI run is
+                actually green (needs a human or `gh`/Actions check);
+                supply `review/domain_contracts.md` unchanged for the
                 human/reviewer approval it has never actually received
                 (review 1.17 §10, reconfirmed 1.18-1.20)
 ```
@@ -246,7 +261,7 @@ Next objective: F-051 on the next Windows/MT5 session — `feedback.1.20.md`
 
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
-| M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). Remaining: human contract review, CI on a runner |
+| M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). CI ran on a runner for the first time 2026-08-26, both jobs failed, root cause found and fixed the same day (F-056), fix pushed — next run not yet confirmed green. Remaining: that confirmation, plus human contract review |
 | M1 MT5 read-only gateway | MT5-INTEGRATED | **PASSED — review feedback.1.12, 2026-08-24** | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. **Phase B satisfied 2026-08-24**, owner present: two deliberate MT5 terminal closures, both detected, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset) and fresh data resuming within seconds — F-034 closed. Four real defects found and fixed across both phases (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth/seventeenth entries. **Reviewer decision, review 1.12 §7: M1 PASSED.** Recorded in §16 Promotion history. Does not authorize execution — `order_send` remains prohibited |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
@@ -841,7 +856,7 @@ Use this for architectural or risk decisions.
 | A schema change loses data nobody can regenerate | Medium | Alembic baseline, migrated deployment path, proven restore | CLOSED 2026-08-18 — no backup *schedule* exists yet, only a proven restore |
 | A position is carried through the 17:00 rollover | High | entries refused inside the window; a surviving exposure halts | MITIGATED — detection only. The flatten itself is M5 (D-033) |
 | A second EUR/USD exposure is opened | High | hard constant in the risk engine, above the account model | CLOSED 2026-08-18 |
-| The connected account is not the one that was configured | High | server, login, currency, leverage and margin mode all re-checked on every reconnect (`LiveReader`) | **CLOSED for the M1 reconnect path** — Phase B, 2026-08-24, owner present: two real deliberate terminal closures, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset), M1 PASSED on this evidence (review 1.12 §7). The remaining open risk is narrower and belongs to the newer F-047/F-048 paths, not this one: broker-state snapshots, reconciliation and the live decision pipeline built on top of the same reconnect logic have not themselves met the real terminal yet — see F-051 |
+| The connected account is not the one that was configured | High | server, login, currency, leverage and margin mode all re-checked on every reconnect (`LiveReader`) | **CLOSED for the M1 reconnect path** — Phase B, 2026-08-24, owner present: two real deliberate terminal closures, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset), M1 PASSED on this evidence (review 1.12 §7). **CLOSED for broker-state snapshots and reconciliation too** — F-051 part 1, 2026-08-26: a real flat account snapshot and a real `MATCHED` reconciliation, both against the live terminal. The remaining open risk is narrower still: the live *decision* pipeline (F-048) built on the same data has not yet produced a real Trader decision — pending real M5 bar accumulation, F-051 part 2 |
 
 ---
 
@@ -987,10 +1002,18 @@ Next engineering steps once unblocked:
       snapshot
 - [x] ~~F-050 (review 1.16 §3)~~ — done 2026-08-25: `BrokerStateHealth`,
       kept separate from `ReaderStatus`
-- [ ] F-051 (review 1.16 §4, reconfirmed/expanded review 1.17 §6) —
-      real-terminal verification of F-047/F-052/reconciliation/F-048
-      together, as one twelve-step checklist. Still blocked on MT5 host
-      access
+- [ ] F-051 **IN PROGRESS** (review 1.16 §4, expanded through review 1.20
+      §6 into a 26-step checklist) — real-terminal verification of
+      F-047/F-052/reconciliation/F-053/F-054/F-055/F-048/D-031 together.
+      **Part 1 done 2026-08-26** (this development host turned out to be
+      the Windows/MT5 host — steps 1-18: discovery, InstrumentSpec, flat
+      broker snapshot, reconciliation `UNKNOWN`→pin→`MATCHED`, zero
+      defects). **Part 2 in progress**: a real Trader/Risk/Supervisor
+      decision needs more real M5 bars than exist yet
+      (`baseline_v1` 65, `ict_v1` 120, 49 at last check; no backfill
+      capability, so this is real-time accumulation only) — a background
+      `mt5_live_reader.py` run is under way. Full detail: §13 thirty-first
+      entry
 - [x] ~~Phase 3 — attach the agent: F-048 live/shadow decision
       orchestrator~~ — done 2026-08-25.
       `application/live_decision.py::LiveDecisionOrchestrator`, a class
@@ -1066,15 +1089,18 @@ Next engineering steps once unblocked:
       reconciliation → SL presence → closure → audit trail), **not** as
       evidence the strategy is profitable (review 1.15 §13/§14/§16).
 
-Next regular review (`feedback.1.20.md`) triggers on a meaningful package per
-review 1.19 §17 — F-054 hardened, plus F-055 pinned baseline, plus F-051
-real MT5 validation, plus a real shadow decision, plus CI and/or the
-domain-contract package — though the review explicitly also accepts a real
-integration defect exposed by F-051 as its own trigger, without waiting for
-the whole bundle. F-053/F-054/F-055/D-031 are all shipped as of 2026-08-26
-(reviews 1.18 §§6-8 and 1.19 §§4-5); only three genuinely blocked items
-remain: F-051 (Windows/MT5 host), CI (`gh`/Actions access), and the
-domain-contract supply (a human reviewer).
+`feedback.1.20.md` has been processed (pure acceptance, no new findings —
+F-053/F-054/F-055/D-031 all CLOSED IN IMPLEMENTATION). The next regular
+review (`feedback.1.21.md`) triggers per review 1.20 §16 on **F-051, the
+real Pepperstone run** — no longer waiting on the whole original bundle,
+since the review explicitly named this as sufficient on its own, and also
+explicitly welcomes a real integration defect as its own trigger. **F-051
+part 1 is now done** (2026-08-26, discovery through reconciliation
+`MATCHED`, real terminal, zero defects); part 2 (a real Trader decision) is
+in progress, blocked only on real M5 bar accumulation. Two more genuinely
+blocked items remain: CI confirmation (the fix is pushed — F-056 — but the
+next run is not yet confirmed green; needs `gh`/Actions access or a human
+check) and the domain-contract supply (needs a human reviewer).
 
 ---
 
