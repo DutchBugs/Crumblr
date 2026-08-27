@@ -155,8 +155,19 @@ itself requires, and what is local project policy on top of it.
 Recorded separately so the specification's own gates stay legible.
 
 - [ ] domain contracts reviewed by a human — implemented and tested;
-      package assembled 2026-08-25 (`review/domain_contracts.md`); awaiting
-      the human review itself
+      package assembled 2026-08-25 (`review/domain_contracts.md`),
+      refreshed against Phase 4 and commit `6bdb5b1` on 2026-08-27.
+      **Review 1.24 §7: "Reviewer contract verdict: APPROVED for the
+      current Phase-4 codebase"** — but the reviewer explicitly declined
+      to represent itself as the human this item's wording asks for
+      ("I am the independent project reviewer in this workflow, but I
+      should not represent myself as a human reviewer"). Technical/
+      reviewer-level review is PASSED; whether this item's literal
+      wording requires the owner to additionally countersign
+      (review 1.24's suggested form: "Owner reviewed and accepts the
+      current domain-contract package at commit 6bdb5b1") is an open
+      governance question for the owner, not an engineering task —
+      no further contract work is required either way
 - [x] durable safety state and fail-closed startup — added after review 1.0 F-003
 - [x] status semantics separate maturity from qualification — review 1.0 F-001
 
@@ -209,36 +220,42 @@ Status: BUILDING
 Owner:
 Current milestone: M0 (M1/M2 already passed; see §16 Promotion history)
 Implementation maturity: MT5-INTEGRATED (M1); Dashboard v0 shipped
-Gate qualification: M0 NOT PASSED (CI + contract review still open);
-                M1 PASSED; M2 PASSED
-Last meaningful update: 2026-08-26 — **F-051 finally started, part 1
-                complete.** This development host turned out to be the
-                Windows/MT5 host all along (AMD64, `Pepperstone MetaTrader
-                5` installed and running). Discovery through reconciliation
-                proven for real, zero defects found: real `InstrumentSpec`
-                matched the 2026-08-24 first-contact evidence field for
-                field; a real flat account snapshot read
-                `COMPLETE`/`COMPLETE`, 0 positions, 0 pending orders;
-                `reconcile()` read `UNKNOWN` before a pin and **`MATCHED`
-                after** — the first real `MATCHED` result and the first
-                human-approved instrument-spec baseline this project has
-                ever produced (`config/paper.yaml`'s new
-                `expected_spec_version`). Part 2 (a real Trader decision)
-                is honestly blocked on real M5 bar accumulation, not a
-                defect — no backfill capability exists; a background
-                `mt5_live_reader.py` run is in progress. **Separately, CI
-                ran on a real runner for the first time this same day and
-                both platform jobs failed** — the owner relayed GitHub's
-                notifications directly; reproduced and fixed the same day
-                (F-056: an undeclared `numpy` test dependency). Fix pushed;
-                next run not yet confirmed green
-Next objective: finish F-051 part 2 once enough real M5 bars have
-                accumulated (`baseline_v1` needs 65, `ict_v1` needs 120;
-                49 existed at last check); confirm the next CI run is
-                actually green (needs a human or `gh`/Actions check);
-                supply `review/domain_contracts.md` unchanged for the
-                human/reviewer approval it has never actually received
-                (review 1.17 §10, reconfirmed 1.18-1.20)
+Gate qualification: M0 NOT PASSED (hosted CI confirmation is the one
+                remaining technical gate; domain-contract review is
+                reviewer/technical-APPROVED, review 1.24 §7 — an owner
+                countersign is open as a governance question, not an
+                engineering task); M1 PASSED; M2 PASSED
+Last meaningful update: 2026-08-27 — **Phase 4 (the non-sending execution
+                preflight chain) FORMALLY PASSED, review 1.24.** Review
+                1.23's exact four-item hardening bundle (F-058 final-time/
+                session sequencing, F-059 complete approval-chain
+                fingerprint, F-060 real `SUBMISSION_STARTED`-based order-
+                frequency authority, F-061 broker-boundary FINAL-Risk
+                guard) was fixed the same day it was requested (commit
+                `6bdb5b1`) and reviewed against the actual source, not
+                accepted from this document alone. Review 1.24 closed all
+                four with "no further work required" on each, declared
+                Phase 4 architecture and implementation both PASSED, and
+                approved the same-day refreshed `review/domain_contracts.md`
+                at the reviewer/technical level. It additionally
+                AUTHORIZED one controlled real-terminal `order_check`
+                evidence run (non-sending, Pepperstone DEMO only, exact
+                conditions in `feedback.1.24.md` §8) — not yet executed.
+                Phase 4 passing does **not** mean an order can be
+                submitted: `order_send`/`cancel_pending_orders`/
+                `close_all_positions` remain unconditionally refused by
+                every adapter that can reach a real terminal, and
+                `feedback.2.0.md` remains mandatory before the first
+                broker submission
+Next objective: run the authorized real-terminal `order_check` evidence
+                (review 1.24 §8, non-sending only); finish F-051 part 2
+                once enough real M5 bars have accumulated (`baseline_v1`
+                needs 65, `ict_v1` needs 120; 49 existed at last check);
+                confirm the next CI run is actually green (needs a human
+                or `gh`/Actions check); owner risk-policy decisions
+                (review 1.24 §12.A) and, if the M0 wording is read
+                literally, an owner countersign on the domain-contract
+                package
 ```
 
 ## Scope
@@ -261,7 +278,7 @@ Next objective: finish F-051 part 2 once enough real M5 bars have
 
 | Milestone | Maturity | Gate | Evidence / why not qualified |
 |---|---|---|---|
-| M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). CI ran on a runner for the first time 2026-08-26, both jobs failed, root cause found and fixed the same day (F-056), fix pushed — next run not yet confirmed green. Remaining: that confirmation, plus human contract review |
+| M0 Repo / engineering baseline | REPLAY-TESTED | GO WITH CONDITIONS | Logging shipped (F-013). CI ran on a runner for the first time 2026-08-26, both jobs failed, root cause found and fixed the same day (F-056), fix pushed — next run not yet confirmed green. Domain-contract review APPROVED at the reviewer/technical level 2026-08-27 (review 1.24 §7); an owner countersign is open only if the wording is read literally, not an engineering task. Remaining: hosted CI confirmation is the one open technical gate |
 | M1 MT5 read-only gateway | MT5-INTEGRATED | **PASSED — review feedback.1.12, 2026-08-24** | Read-only adapter and first-contact probe, 60+ tests against a fake terminal; execution refused by construction (D-036). First contact made 2026-08-24; account/symbol/instrument/position reads and the account guard all succeeded against the real Pepperstone terminal; D-037 fixed from the observed values. Entity (APP-013/D-034) closed for demo by O-005. **Phase A satisfied 2026-08-24** (sixth real attempt): 30 clean minutes, zero disconnects, 2,920 real ticks + 17 real M5 bars persisted, all `GOOD` quality, zero gaps, every bar on a 5-minute UTC boundary. **Phase B satisfied 2026-08-24**, owner present: two deliberate MT5 terminal closures, both detected, both recovered automatically with full revalidation (symbol, account, instrument spec, broker clock offset) and fresh data resuming within seconds — F-034 closed. Four real defects found and fixed across both phases (D-040, D-041, D-042×2, D-039); see `status.md` §13 sixteenth/seventeenth entries. **Reviewer decision, review 1.12 §7: M1 PASSED.** Recorded in §16 Promotion history. Does not authorize execution — `order_send` remains prohibited |
 | M2 Data/event journal | REPLAY-TESTED | **PASSED on its own acceptance evidence** | build.md's Milestone 2 acceptance is "events can be replayed in original order; gaps/out-of-order data detected; raw data immutable" — all three met and tested against a real PostgreSQL (F-018–F-020, F-022, F-023). Review 1.7/1.8 F-027: real-feed evidence is not an M2 acceptance criterion in build.md — it is what Milestone 1 acceptance ("reads EUR/USD ticks/bars") actually requires. Reassigned there rather than silently holding M2 open for it (the same class of error as F-010). That every row currently in the journal came from a seeded generator is real and tracked, but as an M1 gap, not an M2 one |
 | M3 Replay/backtest | REPLAY-TESTED | NOT PASSED | Deterministic; cost model incomplete (no swap/commission) |
@@ -358,7 +375,17 @@ Per capability, because "implemented" and "validated" are different claims
 | overnight-exposure halt (O-003) | x | x | x | | |
 | account currency / leverage guard | x | x | x | | |
 | automatic flatten at the deadline | | | | | |
-| execution-time revalidation | | | | | |
+| execution-time revalidation | x | x | | | |
+
+Execution-time revalidation (ADR-001's FINAL Risk,
+`risk/policies.py::revalidate_fixed_volume_at_execution_time`) was built
+and unit-tested 2026-08-27 (Phase 4 slice 2, §13 thirty-fifth entry),
+reusing `evaluate()`'s full checklist against freshly observed inputs and
+never resizing — PASS with the original approved volume unchanged, or
+BLOCK/HALT. It is exercised end to end by `ExecutionOrchestrator` against
+a scripted fake terminal (`tests/integration/test_execution_orchestrator.py`)
+but has not yet run against a real MT5 terminal — review 1.24 §8 has now
+authorized that real-terminal `order_check` run, not yet executed.
 
 No risk capability is MT5-integrated or paper-validated yet, but the
 picture is no longer "nothing feeds a live tick into the risk engine" —
@@ -1090,15 +1117,24 @@ Next engineering steps once unblocked:
       accepted F-058/F-059 as real progress but PARTLY CLOSED (one narrow
       gap named in each), REOPENED F-060 (wrong durable authority used),
       and opened F-061 (new, HIGH) — §13 forty-first entry. That exact
-      four-item bundle was fixed the same day (§13 forty-second entry);
-      all four CLOSED, unreviewed pending review 1.24. Phase 4 remains
-      NEAR-PASS, not yet formally passed.** Still open,
-      deliberately out of this phase's scope: automatic flatten actually
-      *submitting* a close (stays halt-only, ADR-004), the real F-049
-      `SubmissionGate` (design stub only, `risk/submission_gate.py`),
-      and everything else in `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s
-      "Later, vóór eerste DEMO-order" list — this checklist item stays open
-      until those land too.
+      four-item bundle was fixed the same day (§13 forty-second entry) and
+      a refreshed `review/domain_contracts.md` delivered alongside it
+      (§13 forty-third entry). Review 1.24 (2026-08-27) reconfirmed all
+      four CLOSED — "no further work required" on each — and declared
+      **Phase 4 (the non-sending preflight chain) FORMALLY PASSED**, both
+      architecture and implementation; approved `domain_contracts.md` at
+      the reviewer/technical level (owner countersign optional, see the
+      M0 local-policy checklist item above and `feedback.1.24.md` §7);
+      and additionally AUTHORIZED one controlled
+      real-terminal `order_check` evidence run (non-sending, Pepperstone
+      DEMO only, under the exact conditions in review 1.24 §8) — §13
+      forty-fourth entry.** Still open, deliberately out of this phase's
+      scope: automatic flatten actually *submitting* a close (stays
+      halt-only, ADR-004), the real F-049 `SubmissionGate` (design stub
+      only, `risk/submission_gate.py`), and everything else in review
+      1.24 §12's "submission-era execution safety" list — this checklist
+      item stays open until those land too, even though the non-sending
+      preflight sub-scope it also covers is now formally passed.
 - [ ] Phase 5 — owner policy: risk per trade, max daily loss/drawdown,
       last-entry cutoff, mandatory flatten deadline, production/demo
       HALT-reset authority — all still open (Q7/Q8, ADR-004 §3).
@@ -6308,6 +6344,91 @@ Next:
 - Await review 1.24. Continue F-051 part 2 in parallel; await a human/`gh`
   check of the next hosted CI run; owner risk-policy decisions remain
   open.
+
+---
+
+## Update 2026-08-27 (forty-fourth entry) — review 1.24 processed: Phase 4 formally PASSED, domain contracts APPROVED, real-terminal order_check AUTHORIZED
+
+Component: Process (review intake), `review/FEEDBACK.md`
+Milestone: Phase 4 formal sign-off + M0 domain-contract review
+Status before: `crumblr_review_1_24_bundle.zip` delivered, awaiting review (forty-third entry)
+Status after: Review 1.24 processed. F-058/F-059/F-060/F-061 all reconfirmed CLOSED. **Phase 4 formally PASSED** (architecture + implementation). `review/domain_contracts.md` APPROVED at the reviewer/technical level. Real-terminal `order_check` evidence AUTHORIZED under controlled conditions — not yet run
+
+Completed:
+- Read `feedback.1.24.md` in full — a narrow, targeted review against
+  `crumblr_review_1_24_bundle.zip`, checked against the actual source, not
+  accepted from `status.md` alone; explicitly not another broad Phase-4
+  audit.
+- Updated `review/FEEDBACK.md`: F-058/F-059/F-060/F-061 rows updated to
+  cite review 1.24's reconfirmation and exact quotes ("no further work
+  required" on each). Registered review 1.24 in the "Reviews received"
+  table with its full verdict. Rewrote "Unreviewed work" (heading now
+  names `feedback.1.25.md` as the next trigger): removed the now-reviewed
+  bundle/domain-contracts rows, added the newly-authorized real-terminal
+  `order_check` evidence run, the CI confirmation gate, and the optional
+  owner countersign as the remaining unreviewed/open items. Updated the
+  "Still open, by the reviewer's own gate decisions" table: marked
+  execution-time revalidation implementation as **Done**.
+- Synced `status.md` opportunistically, per review 1.24 §13's explicit
+  non-blocking instruction (not a dedicated cycle, not a reason to reopen
+  F-033): the Risk capability table's `execution-time revalidation` row
+  (was blank across every column despite the capability being built,
+  unit-tested and integration-tested — now `impl`/`unit` checked, with a
+  paragraph explaining why `replay`/`MT5`/`paper` correctly stay blank);
+  Component 1's "Last meaningful update"/"Next objective"/"Gate
+  qualification" block (still narrated 2026-08-26's F-051 part 1 news,
+  predating the entire Phase-4 review-and-fix arc that followed it); the
+  M0 milestone-tracker row and the M0 domain-contracts checklist item
+  (both still described contract review as unstarted); the Phase 4
+  checklist item in §2 (still said "NEAR-PASS, not yet formally passed").
+- No code changed. No new engineering started — review 1.24 §1 was
+  explicit that this was a narrow verification pass, and §14 was explicit
+  that the next review should wait for a meaningful bundle, not
+  documentation cleanup, so nothing further was built proactively.
+
+Evidence:
+- The quality-gate/test evidence review 1.24 §9 cites is the same
+  forty-second-entry run (939 passed, 3 skipped; ruff/mypy clean;
+  determinism confirmed) — the reviewer explicitly did not re-run the full
+  suite independently from the small bundle and said so (§9), so this
+  entry does not claim a fresh run either.
+
+Problems found:
+- None. Pure acceptance review; no findings reopened, no new findings
+  opened.
+
+Risk impact:
+- None. `order_send` remains structurally unreachable — reconfirmed by
+  review 1.24 §6 independently of this session's own analysis in
+  `domain_contracts.md` §4.
+
+Decision:
+- **Phase 4 is formally PASSED** (review 1.24's own words, §6/§15).
+  `review/domain_contracts.md` is APPROVED at the reviewer/technical
+  level; whether the M0 checklist's literal "reviewed by a human" wording
+  additionally needs an owner countersign is now an open question for the
+  owner (review 1.24's suggested form is recorded in `status.md` §2 and
+  `review/FEEDBACK.md`'s unreviewed-work table), not an engineering task.
+  One controlled real-terminal `order_check` evidence run is AUTHORIZED
+  under the exact conditions in `feedback.1.24.md` §8 — not yet executed;
+  running it is a real action against the live Pepperstone DEMO terminal
+  and needs the user's go-ahead before being attempted, the same as any
+  other action that touches a real external system. Not yet committed —
+  pending the usual per-turn approval.
+
+Next:
+- Ask the user whether to proceed with the authorized real-terminal
+  `order_check` run now, and if so, run it under exactly the conditions
+  review 1.24 §8 lists (non-sending only; do not enable AlgoTrading merely
+  to make it pass — APP-016).
+- Continue F-051 part 2 in parallel; await a human/`gh` check of the next
+  hosted CI run; owner risk-policy decisions (review 1.24 §12.A) and the
+  optional owner countersign remain open, both requiring the owner, not
+  the agent.
+- Do not start review 1.24 §12.B's submission-era execution-safety work
+  (automatic flatten submission, real `SubmissionGate`/F-049, etc.)
+  without the user directing it — it is the next engineering phase, not
+  something this review asked to be started now.
 
 ---
 
