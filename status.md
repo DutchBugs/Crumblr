@@ -1086,7 +1086,11 @@ Next engineering steps once unblocked:
       **Review 1.22 source-reviewed the bundle same day: architecture
       ACCEPTED, four implementation findings opened (F-057 CRITICAL,
       F-058/F-059/F-060 HIGH) and fixed the same day — §13 thirty-ninth/
-      fortieth entries. None of the four fixes reviewed yet.** Still open,
+      fortieth entries. Review 1.23 (same day) reconfirmed F-057 CLOSED,
+      accepted F-058/F-059 as real progress but PARTLY CLOSED (one narrow
+      gap named in each), REOPENED F-060 (wrong durable authority used),
+      and opened F-061 (new, HIGH) — §13 forty-first entry. Phase 4 remains
+      NEAR-PASS, not yet formally passed.** Still open,
       deliberately out of this phase's scope: automatic flatten actually
       *submitting* a close (stays halt-only, ADR-004), the real F-049
       `SubmissionGate` (design stub only, `risk/submission_gate.py`),
@@ -6050,6 +6054,75 @@ Next:
   hosted CI run; `domain_contracts.md` regeneration now unblocked by
   F-057 but still needs a human reviewer; owner risk-policy decisions
   remain open.
+
+---
+
+## Update 2026-08-27 (forty-first entry) — review 1.23 processed: F-057 reconfirmed CLOSED, F-058/F-059 partly closed, F-060 reopened, F-061 opened
+
+Component: Process (review intake), `review/FEEDBACK.md`
+Milestone: Phase 4 — a narrow hardening bundle now stands between this and a formal PASS
+Status before: F-057 through F-060 fixed 2026-08-27 (fortieth entry), unreviewed
+Status after: Review 1.23 processed. F-057 reconfirmed CLOSED. F-058 and F-059 PARTLY CLOSED — real progress accepted, one narrow gap named in each. F-060 REOPENED — the fix used the wrong durable authority. F-061 opened new (HIGH)
+
+Completed:
+- Read `feedback.1.23.md` in full — a follow-up source review against
+  `crumblr_f057_f060_fixes.zip` plus the prior supplement, explicitly
+  scoped as "not another broad Phase-4 source audit."
+- Updated `review/FEEDBACK.md`: F-057's row reconfirmed CLOSED; F-058's row
+  updated to PARTLY CLOSED with the remaining sequencing gap described;
+  F-059's row updated to PARTLY CLOSED with the incomplete-fingerprint gap
+  described; F-060's row REOPENED with the correct required authority
+  described; new F-061 row added (OPEN, HIGH). Registered review 1.23 in
+  the "Reviews received" table. Rewrote "Unreviewed work" (heading now
+  names `feedback.1.24.md` as the next trigger) with review 1.23's own
+  exact next-bundle list.
+
+Evidence:
+- No code changed this entry — process/documentation only.
+
+Problems found (the review's own, now tracked):
+- **F-058 (remaining piece):** `recover_session()` still runs before
+  `final_now` exists and receives `market_day=trading_day(now)` — the
+  earlier `run_once()`-level timestamp. A slow broker interaction could
+  theoretically straddle the 17:00 America/New_York risk-session boundary
+  between the two, recovering the session for the wrong trading day.
+- **F-059 (remaining piece):** `_approval_chain_fingerprint()` manually
+  selects specific fields from `RiskDecision`/`SupervisorDecision` rather
+  than fingerprinting their complete serialized content — omits fields
+  including `SupervisorDecision.uncalibrated_checks`, which "explicitly
+  changes what a Supervisor approval means." A hand-picked field list
+  silently stops covering new material fields as the contracts evolve.
+- **F-060 (reopened):** `count_claimed_since()` counts every claimed
+  `execution_requests` row, including `INELIGIBLE`/`GATE_CLOSED`/
+  `RECONCILIATION_BLOCKED`/`FINAL_RISK_BLOCKED`/`ORDER_CHECK_REJECTED`
+  outcomes and the request currently being evaluated — not actual
+  submission attempts. Fail-safe (moves the limit one step more
+  restrictive) but not the real control the field claims to represent.
+  Required authority: count `ExecutionEventType.SUBMISSION_STARTED`
+  events, honestly `0` today.
+- **F-061 (new):** `OrderCheckMt5Gateway.order_check()` accepts any
+  `ApprovedOrder`, including one with `final_risk_decision_id=None` —
+  not reachable today (`ExecutionOrchestrator` always supplies it), but
+  the broker-facing boundary enforces nothing of its own.
+
+Risk impact:
+- None reachable today — same reasoning as the findings they follow up on:
+  `order_send` remains structurally unreachable regardless of any of these
+  four items.
+
+Decision:
+- Phase 4 remains **NEAR-PASS, NOT YET FORMALLY PASSED** (review 1.23's own
+  verdict). Architecture stays ACCEPTED. Not yet committed — pending the
+  usual per-turn approval once the fix approach is confirmed with the user.
+
+Next:
+- Fix F-058's remaining sequencing gap, F-059's complete-content
+  fingerprint, F-060's `SUBMISSION_STARTED`-based authority, and F-061's
+  fail-closed `order_check` guard — review 1.23's own "exact next
+  engineering bundle" (§13), explicitly scoped as narrow, not a redesign.
+- Continue F-051 part 2 in parallel; await a human/`gh` check of the next
+  hosted CI run; `domain_contracts.md` regeneration still needs a human
+  reviewer; owner risk-policy decisions remain open.
 
 ---
 
