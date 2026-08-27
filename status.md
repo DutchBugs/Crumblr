@@ -5562,6 +5562,90 @@ Next:
 
 ---
 
+## Update 2026-08-27 (thirty-sixth entry) — Phase 4 slice 3: execution eligibility, the two-gate split, and the `SubmissionGate` design stub
+
+Component: `risk/execution_eligibility.py` (new), `risk/execution_preflight_gate.py` (new), `risk/submission_gate.py` (new), `domain/enums.py`
+Milestone: Phase 4, continuing slices 1-2 (thirty-fourth/thirty-fifth entries)
+Status before: no eligibility filter existed; nothing distinguished "may the preflight chain run at all" from "may a real order_send run".
+Status after: three small, pure-function modules exist, each doing exactly one narrow job, none of them wired into a live orchestrator yet.
+
+Completed:
+- `risk/execution_eligibility.py::evaluate_execution_eligibility()` — the
+  cheap, first gate on a sealed `DecisionCapsule`, run before any of the
+  expensive fresh-observation/reconciliation/FINAL-Risk work.
+  Review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md point 6, non-negotiable: an
+  old shadow-mode approval must never become retroactively executable.
+  Checks, all collected rather than short-circuited: the capsule was sealed
+  at or after a human-set `activation_watermark` (`None` means never set,
+  which makes everything ineligible — there is no config path that opens
+  this on its own); `strategy_version`/`risk_config_version` still match
+  what is currently running; the intent has not expired
+  (`TradeIntent.is_expired`, reused rather than re-derived); still within
+  the allowed trading window (`trading_window.permits_new_entry`, reused).
+- `risk/execution_preflight_gate.py::evaluate_preflight_gate()` — the
+  narrower of the two Phase-4 gates (point 2): governs only whether the
+  chain fresh-observation → reconciliation → FINAL Risk → `ApprovedOrder` →
+  `order_check` may run at all. Checks: `Environment.LIVE` is structurally
+  refused (new `ReasonCode.LIVE_EXECUTION_NOT_PERMITTED` — the same
+  no-live-trading rule CLAUDE.md §4 states, enforced one layer further in);
+  symbol is on the allowlist; kill switch is not halted.
+- `risk/submission_gate.py::evaluate_submission_gate()` — deliberately a
+  design-only stub this slice (point 2 again): documents the full F-049
+  multi-gate checklist in its docstring, takes no arguments (nothing could
+  open it yet), and always returns closed with the new
+  `ReasonCode.SUBMISSION_GATE_NOT_IMPLEMENTED`. `order_send` stays
+  technically impossible via `OrderCheckMt5Gateway` regardless of this
+  module — this exists only so the later real gate has a named landing
+  spot instead of being invented from scratch at M5.
+- New reason codes in `domain/enums.py`:
+  `DECISION_PREDATES_EXECUTION_ACTIVATION`, `STRATEGY_VERSION_NOT_CURRENT`,
+  `LIVE_EXECUTION_NOT_PERMITTED`, `SUBMISSION_GATE_NOT_IMPLEMENTED`.
+
+Evidence:
+- tests: new `tests/unit/test_execution_gates.py` — 16 tests across all
+  three modules. Eligibility: no watermark ever set is never eligible; a
+  capsule sealed before the watermark is ineligible; one sealed after
+  passes that leg; superseded strategy/risk-config versions are ineligible;
+  an expired intent is ineligible; every failing leg is reported, not just
+  the first; a capsule with no `trade_intent` raises (a caller error, not a
+  reachable state); the result dataclass rejects an inconsistent
+  eligible/reason_codes combination. Preflight gate: a clean case opens it;
+  `LIVE` is structurally refused; a disallowed symbol is refused; a halted
+  kill switch closes it; every failing leg is reported together. Submission
+  gate stub: always closed; takes no parameters (asserted via
+  `inspect.signature`).
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — 171 files already formatted.
+  `uv run mypy` — success, no issues found in 131 source files.
+  `uv run pytest -q` (solo, no concurrent run this time) — **917 passed, 3
+  skipped** (901 after slice 2, +16 is exactly this slice's new tests, zero
+  regressions).
+
+Problems found:
+- None.
+
+Risk impact:
+- None reachable. None of these three functions is called from anywhere
+  live yet.
+
+Decision:
+- Slice 3 of the reviewed, revised Phase 4 plan is complete and gate-clean.
+  Not yet committed — pending the usual per-turn approval.
+
+Next:
+- Continue Phase 4 with the remaining plan items: the fresh synchronous
+  observation + persisted snapshot + reconciliation step, the
+  immutable-request + append-only-event persistence with atomic claim, and
+  the `ExecutionOrchestrator` that assembles everything built so far
+  (adapter, FINAL Risk, eligibility, preflight gate) into the target flow.
+- Continue monitoring for `ict_v1`'s 120-bar threshold and run the
+  `baseline_v1` wiring-proof for F-051 part 2 once convenient.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` still needs a human reviewer; owner risk-policy
+  decisions remain open per review 1.21 §13.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

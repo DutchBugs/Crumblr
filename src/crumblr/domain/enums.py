@@ -212,6 +212,32 @@ class ReasonCode(StrEnum):
     that over-asks, versus market conditions that moved between decision
     and execution)."""
 
+    # Phase 4 — execution eligibility (`risk/execution_eligibility.py`).
+    DECISION_PREDATES_EXECUTION_ACTIVATION = "DECISION_PREDATES_EXECUTION_ACTIVATION"
+    """A sealed, intent-time-approved capsule was decided before the human-set
+    execution-activation watermark existed. Review 1.21's plan review, point
+    6: an old shadow-mode approval must never become retroactively
+    executable just because a config flag is switched on later — this is
+    the reason code that names exactly that refusal."""
+
+    STRATEGY_VERSION_NOT_CURRENT = "STRATEGY_VERSION_NOT_CURRENT"
+    """The capsule's `strategy_version`/`risk_config_version` no longer
+    matches what is currently running. Executing a decision made under a
+    superseded strategy or risk configuration would submit an order nobody
+    running today actually approved."""
+
+    LIVE_EXECUTION_NOT_PERMITTED = "LIVE_EXECUTION_NOT_PERMITTED"
+    """`Environment.LIVE` reached the execution preflight gate. CLAUDE.md §4:
+    `config/live.yaml` does not exist and must not without a recorded human
+    promotion decision — this is the same rule enforced one layer further
+    in, structurally, rather than trusted to never be reached."""
+
+    SUBMISSION_GATE_NOT_IMPLEMENTED = "SUBMISSION_GATE_NOT_IMPLEMENTED"
+    """`risk/submission_gate.py` is a design-only stub (Phase 4) — the real
+    F-049 multi-gate does not exist yet, so it always refuses. Distinct from
+    every other closed-gate reason: this one says "not built", not "checked
+    and failed"."""
+
     # Operator action.
     MANUAL_HALT = "MANUAL_HALT"
 
