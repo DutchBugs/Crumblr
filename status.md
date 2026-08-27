@@ -1076,11 +1076,19 @@ Next engineering steps once unblocked:
       `order_check`, ADR-001 execution-time risk revalidation, automatic
       intraday flatten, terminal/account execution guard (review 1.15 §12
       Phase 4 — the existing M5 checklist, now sequenced explicitly after
-      Phases 1-3 rather than in parallel with them). **In progress
-      2026-08-27** — slice 1 done: `OrderCheckMt5Gateway` (real `order_check`,
-      `order_send`/`cancel_pending_orders`/`close_all_positions` still always
-      refused). ADR-001, the eligibility/gate checks, execution persistence
-      and the `ExecutionOrchestrator` remain — §13 thirty-fourth entry.
+      Phases 1-3 rather than in parallel with them). **Non-sending
+      preflight complete 2026-08-27** (all five planned slices —
+      `OrderCheckMt5Gateway`, ADR-001's FINAL Risk, execution
+      eligibility/the two-gate split, immutable request + append-only event
+      persistence, and `ExecutionOrchestrator` assembling all of it end to
+      end, proven by an integration test that hard-asserts `order_send` is
+      never called — §13 thirty-fourth through thirty-eighth entries).
+      Still open, deliberately out of this phase's scope: automatic flatten
+      actually *submitting* a close (stays halt-only, ADR-004), the real
+      F-049 `SubmissionGate` (design stub only, `risk/submission_gate.py`),
+      and everything else in `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s
+      "Later, vóór eerste DEMO-order" list — this checklist item stays open
+      until those land too.
 - [ ] Phase 5 — owner policy: risk per trade, max daily loss/drawdown,
       last-entry cutoff, mandatory flatten deadline, production/demo
       HALT-reset authority — all still open (Q7/Q8, ADR-004 §3).
@@ -5737,6 +5745,123 @@ Next:
   reconciliation → preflight gate → FINAL Risk → `ApprovedOrder` →
   `order_check` → append the terminal event. Its own integration test is
   the one that hard-asserts `order_send` is never called end to end.
+- Continue monitoring for `ict_v1`'s 120-bar threshold and run the
+  `baseline_v1` wiring-proof for F-051 part 2 once convenient.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` still needs a human reviewer; owner risk-policy
+  decisions remain open per review 1.21 §13.
+
+---
+
+## Update 2026-08-27 (thirty-eighth entry) — Phase 4 slice 5: `ExecutionOrchestrator` — every prior slice assembled into the target flow, proven end to end
+
+Component: `application/execution.py` (new), `mt5_gateway/execution.py` (clock injection), `review/adr/ADR-001-execution-time-risk-revalidation.md`, `review/DEVIATIONS.md` (D-047, new)
+Milestone: Phase 4, final planned slice — assembles slices 1-4 (thirty-fourth through thirty-seventh entries)
+Status before: adapter, FINAL Risk, eligibility, the preflight gate, and execution persistence all existed but nothing called any of them from anywhere live.
+Status after: `ExecutionOrchestrator.run_once()` runs the full target flow end to end against every claimable, eligible sealed capsule it finds — and, proven by its own integration test against real Postgres and a fake (never real) MT5 terminal, `order_send` is never reached.
+
+Completed:
+- `application/execution.py::ExecutionOrchestrator` — the third pipeline
+  tier `live_decision.py`'s own module docstring names
+  ("Execution service (M5) = later, execute", now built as the *preflight*
+  half of that, non-sending). One capsule at a time: derive
+  `order_request_id` (the same `uuid5` derivation
+  `orchestration.py:444` already uses) → claim (the winning insert) →
+  eligibility → `ExecutionPreflightGate` → a fresh live account/position
+  read plus a separately captured, persisted `capture_broker_state`
+  observation → reconciliation against the pinned instrument-spec baseline
+  → **recover the durable risk-session ledger via `risk/session.py::
+  recover_session()`** (real continuity, not a fresh/discontinuous ledger —
+  see "Problems found" below for why this mattered) → FINAL Risk
+  (`revalidate_fixed_volume_at_execution_time`) → `ApprovedOrder` →
+  `order_check`, never `order_send` → append the terminal event. Every
+  refusal along the way appends exactly one `ExecutionEventType` and moves
+  to the next capsule; only a genuinely unreadable risk-session record trips
+  the shared kill switch, mirroring how `LiveDecisionOrchestrator` already
+  treats that specific failure as system-level.
+- `mt5_gateway/execution.py::OrderCheckMt5Gateway` gained a `clock`
+  constructor parameter (threaded into its internal `ReadOnlyMt5Gateway`),
+  needed so a test can hold simulated time fixed for broker-clock-offset
+  detection — a small, backward-compatible addition to slice 1's adapter.
+- Updated `review/adr/ADR-001-execution-time-risk-revalidation.md`: status
+  now "wired into `ExecutionOrchestrator`", with an explicit note on what
+  still keeps the ADR open (real-terminal `order_check` evidence, and the
+  full M5 `order_send` path, neither of which exists yet).
+- New `review/DEVIATIONS.md` entry **D-047**: `ExecutionOrchestrator` v0's
+  two known, documented gaps — `CapsuleStore.read_all()` scans every
+  capsule every call (harmless at today's scale, needs an indexed query
+  before real volume), and the fresh account/position read and the
+  `capture_broker_state` read are two separate live MT5 calls rather than
+  one shared observation.
+
+Evidence:
+- tests: new `tests/integration/test_execution_orchestrator.py` — 6 tests
+  against real Postgres and a fake MT5 terminal (via a real, unmodified
+  `OrderCheckMt5Gateway` wrapping the fake — genuine adapter-logic coverage,
+  not a bypassed stub): a clean, eligible capsule reaches `ORDER_CHECKED`
+  with the real `order_check` call actually made; **`order_send` is never
+  called even when everything else passes** (the hard assertion the whole
+  slice exists to prove); a capsule sealed before the activation watermark
+  is `INELIGIBLE` and touches no broker method at all; the shipped-config
+  default (`activation_watermark=None`) makes every capsule ineligible,
+  however clean; a second `run_once()` does not reprocess an
+  already-claimed capsule; an unpinned instrument-spec baseline blocks on
+  reconciliation before FINAL Risk is ever reached.
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — 176 files already formatted.
+  `uv run mypy` — success, no issues found in 135 source files.
+  `uv run pytest -q` (solo) — **931 passed, 3 skipped** (925 after slice 4,
+  +6 is exactly this slice's new integration tests, zero regressions).
+
+Problems found:
+- The most significant design correction of the whole Phase-4 effort,
+  caught before writing any orchestrator code: a first draft would have
+  given FINAL Risk a **fresh, discontinuous** `EquityLedger`
+  (`EquityLedger(starting_equity=fresh_equity)`), which would have silently
+  dropped real session-loss/drawdown continuity — exactly the failure mode
+  `risk/session.py`'s own module docstring exists to prevent
+  ("loss consumed → restart → loss forgotten → the gate is further away").
+  Caught by recognising `risk/session.py::recover_session()` is already a
+  reusable, pure, fully-tested function — the same one
+  `LiveDecisionOrchestrator._recover_session()` calls — and wiring it in
+  directly rather than reimplementing session tracking. This was flagged to
+  the user explicitly before proceeding (a scope/complexity checkpoint),
+  who chose to build it properly rather than accept the simplified version.
+- Test-authoring: the first integration-test run failed with
+  `ClockOffsetUnavailableError` — `OrderCheckMt5Gateway` had no way to
+  accept an injected clock, so its internal broker-clock-offset detection
+  compared a fake terminal's fixed-time tick against the *real* wall clock
+  (~10 real days apart from the test's `FIXED_NOW`), reading as an
+  implausible offset. Fixed by adding the `clock` parameter noted above.
+
+Risk impact:
+- None reachable in any shipped configuration. `activation_watermark` is
+  `None` everywhere real, which the eligibility check refuses
+  unconditionally — proven directly by
+  `test_no_watermark_ever_set_means_nothing_is_ever_eligible`. `order_send`
+  remains structurally unreachable regardless: `OrderCheckMt5Gateway.
+  order_send` always raises, with no config read inside it anywhere.
+
+Decision:
+- **All five planned slices of the reviewed, revised Phase 4 plan are now
+  complete, gate-clean, and committed-pending-approval.** Phase 4
+  (non-sending execution engineering) delivers exactly what was authorized:
+  the execution path is built, and it is not enabled. Not yet committed —
+  pending the usual per-turn approval.
+
+Next:
+- Optional polish, not required for this phase's own completeness: a
+  driving script (`scripts/execute.py`, mirroring `scripts/live_decision.py`)
+  to run `ExecutionOrchestrator.run_once()` on a timer against the real
+  Windows/MT5 host, the same way `scripts/live_decision.py` already does for
+  `LiveDecisionOrchestrator`.
+- Everything named in `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s
+  "Later, vóór eerste DEMO-order" list remains open and is *not* part of
+  this phase's scope: automatic flatten submission, submission idempotence/
+  ambiguous-result recovery, post-execution reconciliation, owner-approved
+  risk policy, last-entry cutoff, mandatory flatten deadline, HALT-reset
+  authority, the real `SubmissionGate`/terminal-AlgoTrading gate, explicit
+  execution enablement, and `feedback.2.0` itself.
 - Continue monitoring for `ict_v1`'s 120-bar threshold and run the
   `baseline_v1` wiring-proof for F-051 part 2 once convenient.
 - Await a human/`gh` check of the next hosted CI run (F-056 gate);

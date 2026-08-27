@@ -17,6 +17,7 @@ mistake, because the code simply does not implement them. That is what
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -24,6 +25,7 @@ from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import Side
 from crumblr.domain.events import OrderCheckCompleted
 from crumblr.domain.models import AccountState, ApprovedOrder, InstrumentSpec, PositionState
+from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client
 from crumblr.mt5_gateway.port import ExecutionDisabledError
 from crumblr.mt5_gateway.readonly import ReadOnlyMt5Gateway
@@ -71,9 +73,22 @@ class OrderCheckMt5Gateway:
         guard: AccountGuardConfig,
         *,
         canonical_symbol: str = "EUR/USD",
+        clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         self._client = client
-        self._reader = ReadOnlyMt5Gateway(client, guard, canonical_symbol=canonical_symbol)
+        self._reader = ReadOnlyMt5Gateway(
+            client, guard, canonical_symbol=canonical_symbol, clock=clock
+        )
+
+    @property
+    def reader(self) -> ReadOnlyMt5Gateway:
+        """The underlying M1 gateway, for callers that need it by that type
+
+        — `application/broker_state.py::capture_broker_state` takes a
+        `ReadOnlyMt5Gateway` specifically. Exposed rather than duplicated:
+        every read this class offers already delegates to the same
+        instance."""
+        return self._reader
 
     # ------------------------------------------------------------------ #
     # Read operations — delegated to the M1 read-only gateway

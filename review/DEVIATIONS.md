@@ -11,11 +11,9 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-26, second pass (D-045 and D-046 point 3 updated again
-after review 1.19 §§4-5 reopened F-053's baseline-authority half as F-055
-and F-054's failure semantics, both fixed the same day; no new deviation
-entries — review 1.19's findings are engineering work, tracked in
-`review/FEEDBACK.md`, not new departures from `build.md`).
+Last updated 2026-08-27 — new entry D-047 for `ExecutionOrchestrator`'s two
+known v0 gaps (Phase 4 slice 5, non-sending execution engineering; see
+`status.md` §13's thirty-eighth entry).
 
 ---
 
@@ -914,6 +912,45 @@ mean anything should start here.
   eventual `order_request_id` should connect to when execution lands
 - **Gate affected:** none directly. A prerequisite for evidence-quality
   live-shadow decisions and, later, M5 — not itself claiming to be either
+
+### D-047 — `ExecutionOrchestrator` v0 has two narrower-than-eventual behaviours
+- **Status:** PROVISIONAL
+- **Spec:** `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` — the non-sending
+  execution preflight chain (Phase 4, 2026-08-27)
+- **Original gap:** no Execution Service tier existed at all — sealed,
+  intent-time-approved capsules had nowhere to go past
+  `LiveDecisionOrchestrator`'s "STOP HERE FOR SHADOW MODE" line
+- **Current state:** `application/execution.py::ExecutionOrchestrator`
+  closes the connection: claim → eligibility → fresh observation →
+  reconciliation → `ExecutionPreflightGate` → FINAL Risk → `ApprovedOrder`
+  → `order_check`, never `order_send`. Two narrower-than-eventual
+  behaviours, both already named in the module's own docstring rather than
+  discovered later:
+  1. **`CapsuleStore.read_all()` scans every capsule ever sealed in the
+     configured environment, every `run_once()` call.** Harmless at today's
+     scale — the activation watermark is unset in every shipped config, so
+     the answer is always "nothing eligible" and the scan is cheap — but
+     not fine once real history accumulates. Needs an index-backed
+     "unclaimed since X" query before this runs against volume.
+  2. **The fresh account/position read (for FINAL Risk) and the
+     `capture_broker_state` read (for reconciliation) are two separate live
+     MT5 calls, not one shared observation.** The numbers FINAL Risk judges
+     and the numbers reconciliation judges therefore come from two
+     closely-spaced but distinct broker reads rather than provably the same
+     instant. Acceptable for a non-sending preflight check where nothing is
+     actually placed; worth revisiting if M5 ever needs the two to be
+     provably simultaneous.
+- **Also provisional, by design, not oversight:** `risk/submission_gate.py`
+  is a design-only stub (F-049's full multi-gate is unbuilt); automatic
+  flatten submission stays halt-only (ADR-004); the human-set
+  `activation_watermark` is `None` in every shipped config, so the whole
+  chain provably never reaches `order_check` today outside a test — see
+  `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s own "Later, vóór eerste
+  DEMO-order" list for the complete remaining checklist before
+  `feedback.2.0`.
+- **Gate affected:** none directly. `order_send` remains unreachable
+  through every code path this or any prior Phase-4 slice added — a
+  prerequisite for M5, not itself claiming to be M5.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

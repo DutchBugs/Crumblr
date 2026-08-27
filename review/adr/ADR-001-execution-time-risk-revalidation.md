@@ -1,6 +1,6 @@
 # ADR-001 — Execution-time risk revalidation
 
-**Status:** ACCEPTED · algorithm implemented 2026-08-27, not yet wired into a live orchestrator
+**Status:** ACCEPTED · algorithm implemented 2026-08-27, wired into `ExecutionOrchestrator` the same day
 **Date:** 2026-08-17
 **Raised by:** review finding F-007 (`review/feedback.1.0.md`)
 **Amended:** 2026-08-17 by review finding F-011 (`review/feedback.1.1.md`) —
@@ -195,10 +195,21 @@ step has already confirmed `MATCHED` against the pinned instrument-spec
 baseline (F-055) — a spec change surfaces there, before FINAL Risk is ever
 reached, not as a check duplicated inside it.
 
-**Not yet done:** wiring this function into a live caller. No
-`ExecutionOrchestrator` exists yet — the fresh synchronous
-broker/market observation, the persisted snapshot, the reconciliation step
-immediately before this check, and the `ApprovedOrder`/`order_check` steps
-immediately after it are later slices of the same Phase-4 plan. This ADR
-stays open until that wiring exists and the eight required tests are
-exercised end to end, not only at the function level.
+**Wired in 2026-08-27** (Phase 4 slice 5): `application/execution.py::
+ExecutionOrchestrator._process()` calls this function immediately after a
+fresh synchronous broker/market observation, a persisted broker-state
+snapshot, and a passing reconciliation — exactly the sequence above — then
+constructs `ApprovedOrder` and calls `order_check` only on `PASS`, never
+`order_send`. Proven end to end (not only at the function level) by
+`tests/integration/test_execution_orchestrator.py`, including the hard
+assertion that a fake terminal's `order_send` is never invoked across a
+full run.
+
+This ADR is not fully closed: the eight *Required tests before M5* are
+proven against this function in isolation
+(`tests/unit/test_risk_engine.py::TestExecutionTimeRevalidation`), not yet
+against a real MT5 terminal (that requires `order_check` submission volume
+against a live demo account, still gated closed by the unset
+`activation_watermark` in every shipped config) and not yet against the
+full M5 `order_send` path, which does not exist. Close this ADR only once
+those two remain.
