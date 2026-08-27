@@ -240,8 +240,12 @@ Last meaningful update: 2026-08-27 — **Phase 4 (the non-sending execution
                 at the reviewer/technical level. It additionally
                 AUTHORIZED one controlled real-terminal `order_check`
                 evidence run (non-sending, Pepperstone DEMO only, exact
-                conditions in `feedback.1.24.md` §8) — not yet executed.
-                Phase 4 passing does **not** mean an order can be
+                conditions in `feedback.1.24.md` §8) — **executed
+                2026-08-27 (§13 forty-fifth entry): real `order_check`
+                reached, `ORDER_CHECK_REJECTED` because AlgoTrading is
+                off at the terminal (APP-016, expected, not a defect;
+                AlgoTrading not toggled to force a pass)**. Phase 4
+                passing does **not** mean an order can be
                 submitted: `order_send`/`cancel_pending_orders`/
                 `close_all_positions` remain unconditionally refused by
                 every adapter that can reach a real terminal, and
@@ -375,7 +379,7 @@ Per capability, because "implemented" and "validated" are different claims
 | overnight-exposure halt (O-003) | x | x | x | | |
 | account currency / leverage guard | x | x | x | | |
 | automatic flatten at the deadline | | | | | |
-| execution-time revalidation | x | x | | | |
+| execution-time revalidation | x | x | x | | |
 
 Execution-time revalidation (ADR-001's FINAL Risk,
 `risk/policies.py::revalidate_fixed_volume_at_execution_time`) was built
@@ -384,8 +388,12 @@ reusing `evaluate()`'s full checklist against freshly observed inputs and
 never resizing — PASS with the original approved volume unchanged, or
 BLOCK/HALT. It is exercised end to end by `ExecutionOrchestrator` against
 a scripted fake terminal (`tests/integration/test_execution_orchestrator.py`)
-but has not yet run against a real MT5 terminal — review 1.24 §8 has now
-authorized that real-terminal `order_check` run, not yet executed.
+and, since 2026-08-27, against the real Pepperstone DEMO terminal too
+(review 1.24 §8's authorized evidence run, §13 forty-fifth entry): real
+`FINAL_RISK_PASSED` with a real approved volume and real account equity,
+followed by a real (non-mutating) `order_check` call — `MT5` column
+checked. `paper` stays blank; that is the ongoing paper campaign itself
+(still `NOT STARTED`), a different claim from this one evidence run.
 
 No risk capability is MT5-integrated or paper-validated yet, but the
 picture is no longer "nothing feeds a live tick into the risk engine" —
@@ -6429,6 +6437,134 @@ Next:
   (automatic flatten submission, real `SubmissionGate`/F-049, etc.)
   without the user directing it — it is the next engineering phase, not
   something this review asked to be started now.
+
+---
+
+## Update 2026-08-27 (forty-fifth entry) — review 1.24 §8's real-terminal order_check evidence run: real order_check reached, no defect found
+
+Component: `scripts/run_execution_preflight_evidence.py` (new), `crumblr_soak` (real database — migrated, one evidence capsule sealed, safety state touched twice)
+Milestone: Phase 4's last open evidence item — real-terminal `order_check`
+Status before: Review 1.24 §8 authorized one controlled real-terminal `order_check` run; not yet executed. No entrypoint existed for `ExecutionOrchestrator`; `crumblr_soak` had zero sealed capsules (F-051 part 2 still pending)
+Status after: Real `order_check` reached and recorded against the real Pepperstone DEMO terminal. `ORDER_CHECK_REJECTED` — AlgoTrading is off at the terminal (APP-016, already known), not a defect. No `src/` code changed
+
+Completed:
+- Entered plan mode (real-world, mostly-irreversible action against a live
+  broker account) before writing anything — plan approved by the user,
+  who chose "build a full entrypoint + an explicitly-labeled evidence-only
+  capsule" over waiting for F-051 part 2 or a narrower direct probe.
+- Built `scripts/run_execution_preflight_evidence.py` — a one-shot (not a
+  poller) script that: checks the intraday blackout window first; connects
+  a real `Mt5Client`/`OrderCheckMt5Gateway`; opens `build_durable_runtime`
+  against the real recorded safety state (never forces it); reads the
+  durable `InstrumentSpec` and one fresh live tick; constructs and seals
+  exactly one `DecisionCapsule` labeled `strategy_id=
+  "phase4_order_check_evidence"` (distinct from `ict_v1`/`baseline_v1` —
+  cannot be mistaken for real Trading Agent output or count toward
+  F-051 part 2's bar-accumulation evidence), with the capsule-level
+  `strategy_version`/`risk_config_version` set to the real, currently-
+  loaded config's actual values (required for `evaluate_execution_eligibility`
+  to accept it — not fakeable); runs `ExecutionOrchestrator.run_once()`
+  exactly once against real stores; prints the full durable
+  `execution_events` trail. Quality gate on the new file: `ruff check`
+  clean, `ruff format --check` clean, `uv run mypy` clean (136 source
+  files, up from 135).
+- Running it surfaced two real, expected operational gaps, both cleared
+  with the user's explicit approval before proceeding (each is itself a
+  real, attributed action against a live system, not a code change):
+  1. `crumblr_soak` was missing Phase 4's migration
+     (`execution_requests`/`execution_events` did not exist there — only
+     the shared test database had ever been migrated to that revision).
+     Fixed: `uv run alembic upgrade head` against `crumblr_soak`
+     (`b3f8a2c7d914` → `c9e1d5a3f286`), the same standard step
+     `.env.example` already documents for setting the database up.
+  2. `crumblr_soak`'s safety state was `UNKNOWN` (never recorded there),
+     which `KillSwitch` correctly treats as halted. Per this project's own
+     rule that HALT-reset/safety-state authority is an owner decision, not
+     an agent one, this was not set unilaterally: the user explicitly
+     approved recording a `RUNNING` state via the established
+     `KillSwitch.reset(operator="Levi", incident_note=...)` mechanism,
+     narrowly scoped ("solely to enable this evidence run") and durably
+     logged with that attribution. Reverted to `HALTED` via
+     `KillSwitch.trip(reason_codes=(MANUAL_HALT,), tripped_by="Levi", ...)`
+     immediately after the run, also user-approved, so a future run
+     against this database does not find `RUNNING` without a fresh
+     decision. (First attempt at the reset used a different local
+     `state_file` path than the script's own by mistake, which correctly
+     produced a `journal RUNNING / latch UNKNOWN` disagreement resolving
+     to `HALTED` — caught immediately, re-done against the correct path;
+     the stray file was deleted afterward. Not a defect in the composite
+     store — proof its disagreement-resolves-to-`HALTED` design works.)
+- **First run attempt**: reached `FINAL_RISK_BLOCKED` /
+  `STALE_MARKET_DATA` + `EXECUTION_TIME_RISK_BLOCK` — a real tick that was
+  fractionally older than `config/paper.yaml`'s strict
+  `max_market_data_age_ms: 2000` bound at the exact moment FINAL Risk's
+  own independent fresh-tick read ran. A real, correct refusal (the check
+  did exactly what it is for), not a defect. Asked the user whether to
+  retry manually (the script deliberately does not auto-retry); approved.
+- **Second run attempt**: reached the full chain for the first time ever
+  — `REQUEST_CLAIMED` → `FINAL_RISK_PASSED` (real PASS, `approved_volume
+  =0.01`, real account equity `10000`) → a real, non-mutating `order_check`
+  call against the terminal → `ORDER_CHECK_REJECTED`.
+- Investigated the result rather than accepting or dismissing it: the
+  payload showed `retcode=0`, `accepted=false`, `comment="Done"` — worth
+  checking, since the adapter's code compares `retcode` against
+  `module.TRADE_RETCODE_DONE`. Queried the real `MetaTrader5` module
+  directly (read-only): `TRADE_RETCODE_DONE = 10009`, not `0`, so
+  `accepted=False` was computed correctly, not a bug in the comparison.
+  Queried the real terminal/account state to interpret *why* the real
+  retcode wasn't `10009`: `terminal_health.trade_allowed=False` while
+  `account.trade_allowed=True`/`account.expert_allowed=True` — exactly
+  APP-016's already-documented condition (AlgoTrading deliberately kept
+  off at the terminal, account otherwise fine). Concluded: not a defect —
+  the adapter reported a real, non-`DONE` retcode honestly rather than
+  misreporting acceptance, precisely the "record the result honestly and
+  stop" outcome review 1.24 §8 anticipated. AlgoTrading was not toggled.
+
+Evidence:
+- Durable, permanent, real evidence now on record in `crumblr_soak`: two
+  sealed `decision_capsules` rows (the aborted first attempt, the
+  successful second attempt — both `strategy_id=
+  "phase4_order_check_evidence"`, neither can be mistaken for real
+  Trading Agent output), one full `execution_requests`/`execution_events`
+  trail reaching `ORDER_CHECK_REJECTED` with the real `OrderCheckCompleted`
+  payload (`retcode=0`, `comment="Done"`, real margin figures:
+  `margin=33.4`, `margin_free=9966.6`, `margin_level=29940.12`).
+- No `src/`/`tests/` files changed this entry — investigation and
+  operational steps only. Quality gate re-run after: `ruff check .` clean,
+  `ruff format --check` clean on the new file, `uv run mypy` clean (136
+  source files).
+
+Problems found:
+- None in the code. The `retcode=0`/`TRADE_RETCODE_DONE` investigation
+  above looked like a possible defect at first glance and was chased down
+  fully before concluding it was not one — the real terminal's AlgoTrading
+  setting explains it completely, matching a condition already on record
+  (APP-016) since review 1.9.
+
+Risk impact:
+- None. `order_check` stays non-mutating (no ticket, no fill, no
+  exposure) regardless of outcome. `order_send` remains structurally
+  unreachable — reconfirmed once more by this entry, now with a real
+  adapter genuinely connected to a real terminal, not just by static
+  analysis of the code.
+
+Decision:
+- Real-terminal `order_check` evidence is now on record. Whether this
+  alone is sufficient evidence for review 1.24's own bar, or whether a
+  future attempt should be made once AlgoTrading is deliberately enabled
+  (an owner decision, not made here — APP-016's own qualification: "do
+  not enable AlgoTrading merely to make order_check pass," which this
+  entry did not do), is left to the next review round to judge. Not yet
+  committed — pending the usual per-turn approval.
+
+Next:
+- Update `review/FEEDBACK.md`'s unreviewed-work table (done, this entry).
+- Continue F-051 part 2 in parallel; await a human/`gh` check of the next
+  hosted CI run; owner risk-policy decisions and the optional domain-
+  contract countersign remain open, both requiring the owner.
+- Do not re-run the evidence script again proactively — one honest,
+  complete real-terminal `order_check` result is now on record; further
+  runs are a fresh decision, not routine.
 
 ---
 
