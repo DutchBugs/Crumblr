@@ -68,10 +68,18 @@ ever produce an approval, it still cannot reach `order_send` around this check.
 check, against the clock at that moment, not against the clock when the intent
 was written.
 
-**4. Both decisions are persisted.** The decision capsule records the initial
-risk decision *and* the execution-time one. A trade refused at the final gate
-is evidence about latency and market conditions, and discarding it would hide
-exactly the behaviour this check exists to catch.
+**4. Both decisions are persisted.** A trade refused at the final gate is
+evidence about latency and market conditions, and discarding it would hide
+exactly the behaviour this check exists to catch. **Corrected 2026-08-27
+(review 1.22 F-057):** this does not mean the sealed `DecisionCapsule` is
+mutated to hold the execution-time decision too — capsules are written once
+and never touched again. The intent-time `RiskDecision` stays in the
+capsule, as always; the execution-time (FINAL) `RiskDecision` is persisted
+separately, in the append-only execution audit stream
+(`ExecutionEventType.FINAL_RISK_PASSED`/`FINAL_RISK_BLOCKED`, carrying the
+complete serialized decision) and linked to the order it authorized via
+`ApprovedOrder.final_risk_decision_id`. Both are durable and both are
+linked; neither requires mutating the other.
 
 ### Monetary risk is recomputed at the executable price
 
@@ -205,8 +213,14 @@ constructs `ApprovedOrder` and calls `order_check` only on `PASS`, never
 assertion that a fake terminal's `order_send` is never invoked across a
 full run.
 
+**F-057 fixed 2026-08-27** (review 1.22 §3): constraint 4, "both decisions
+are persisted," is now actually true rather than aspirational — see the
+correction to constraint 4 above. `ApprovedOrder.final_risk_decision_id`
+durably links every checked order to the exact FINAL `RiskDecision` that
+authorized it, without mutating the sealed `DecisionCapsule`.
+
 This ADR is not fully closed: the eight *Required tests before M5* are
-proven against this function in isolation
+proven against `revalidate_fixed_volume_at_execution_time` in isolation
 (`tests/unit/test_risk_engine.py::TestExecutionTimeRevalidation`), not yet
 against a real MT5 terminal (that requires `order_check` submission volume
 against a live demo account, still gated closed by the unset

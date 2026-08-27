@@ -33,7 +33,11 @@ from crumblr.domain.models import DecisionCapsule, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.persistence.broker_state import BrokerStateStore
-from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
+from crumblr.persistence.execution import (
+    ExecutionEventStore,
+    ExecutionRequestConflictError,
+    ExecutionRequestStore,
+)
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
 from crumblr.persistence.risk_session import PostgresRiskSessionStore
@@ -401,8 +405,116 @@ class TestEndToEnd:
         event_types = [event.event_type for event in events]
         assert event_types == [
             ExecutionEventType.REQUEST_CLAIMED,
+            ExecutionEventType.FINAL_RISK_PASSED,
             ExecutionEventType.ORDER_CHECKED,
         ]
+
+        # Review 1.22 F-057: the durable link ADR-001 requires. The
+        # FINAL_RISK_PASSED event carries the complete serialized FINAL
+        # RiskDecision plus a fingerprint binding it to the exact order it
+        # authorized — never by mutating the sealed DecisionCapsule.
+        final_risk_event = events[1]
+        assert final_risk_event.payload is not None
+        assert final_risk_event.payload["final_risk_decision"]["verdict"] == "PASS"
+        assert final_risk_event.payload["order_fingerprint"]
+
+    def test_the_approved_order_is_linked_to_both_risk_decisions(self, engine: Engine) -> None:
+        """F-057: `ApprovedOrder` names the intent-time decision it descends
+
+        from *and* the FINAL Risk decision that actually authorized
+        submission — not the intent-time one standing in for both.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(expected_spec_version=the_spec.spec_version)
+        capsule = sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        outcomes = orch.run_once()
+        assert len(outcomes) == 1
+
+        events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        final_risk_event = next(
+            e for e in events if e.event_type == ExecutionEventType.FINAL_RISK_PASSED
+        )
+        assert final_risk_event.payload is not None
+        final_risk_decision_id = final_risk_event.payload["final_risk_decision"]["decision_id"]
+
+        order_check_event = next(
+            e for e in events if e.event_type == ExecutionEventType.ORDER_CHECKED
+        )
+        assert order_check_event.payload is not None
+        assert order_check_event.payload["order_request_id"] == str(outcomes[0].order_request_id)
+
+        # The two RiskDecisions are genuinely different records: the
+        # intent-time one lives on the capsule; FINAL Risk's is a fresh
+        # decision_id derived from an "execution-pass"/"execution-*"
+        # discriminator (risk/policies.py::_decision_id), never the same id
+        # as the intent-time decision.
+        assert capsule.risk_decision is not None
+        assert final_risk_decision_id != str(capsule.risk_decision.decision_id)
+
+    def test_two_capsules_sharing_an_intent_hash_but_different_approval_content_fail_closed(
+        self, engine: Engine
+    ) -> None:
+        """F-059: `intent.decision_hash` alone does not identify an approved
+
+        execution request — the intent-time `RiskDecision` content is part
+        of what was actually approved. Two capsules built from the *same*
+        `TradeIntent` (so the same `decision_hash`, hence the same derived
+        `order_request_id`) but a different approved volume must conflict,
+        not silently read as "already claimed, harmless retry."
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(expected_spec_version=the_spec.spec_version)
+        shared_intent = make_intent(
+            created_at_utc=FIXED_NOW,
+            expires_at_utc=FIXED_NOW + timedelta(minutes=10),
+            reference_price="1.08500",
+            stop_loss_price="1.08000",
+            take_profit_price="1.09000",
+            requested_risk_fraction="0.005",
+        )
+        sealed_capsule(
+            engine,
+            config,
+            trade_intent=shared_intent,
+            risk_decision=make_risk_decision(
+                shared_intent.intent_id,
+                risk_config_version=config.config_version,
+                approved_volume="0.05",
+                account_equity="10000",
+                stop_distance_points=500,
+                risk_amount="50",
+            ),
+        )
+        sealed_capsule(
+            engine,
+            config,
+            trade_intent=shared_intent,
+            risk_decision=make_risk_decision(
+                shared_intent.intent_id,
+                risk_config_version=config.config_version,
+                approved_volume="0.10",  # different — the same intent was approved differently
+                account_equity="20000",
+                stop_distance_points=500,
+                risk_amount="100",
+            ),
+        )
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+
+        with pytest.raises(ExecutionRequestConflictError):
+            orch.run_once()
+
+        assert fake.order_send_calls == 0
 
     def test_order_send_is_never_called_even_when_everything_passes(self, engine: Engine) -> None:
         """The hard assertion: not "the test passed", but that the one method

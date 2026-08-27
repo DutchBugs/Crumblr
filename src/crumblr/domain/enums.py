@@ -317,6 +317,11 @@ class ExecutionEventType(StrEnum):
     INELIGIBLE = "INELIGIBLE"
     GATE_CLOSED = "GATE_CLOSED"
     RECONCILIATION_BLOCKED = "RECONCILIATION_BLOCKED"
+    FINAL_RISK_PASSED = "FINAL_RISK_PASSED"
+    """Review 1.22 F-057: the durable link ADR-001 requires. Carries the
+    complete serialized FINAL `RiskDecision` (and, once `ApprovedOrder` is
+    built from it, an `order_fingerprint` binding the two) in its payload —
+    the sealed `DecisionCapsule` is never mutated to hold this instead."""
     FINAL_RISK_BLOCKED = "FINAL_RISK_BLOCKED"
     ORDER_CHECKED = "ORDER_CHECKED"
     ORDER_CHECK_REJECTED = "ORDER_CHECK_REJECTED"

@@ -26,8 +26,10 @@ intent-time-approved capsule at a time:
             |
     ExecutionPreflightGate
             |
-    FINAL Risk (same volume, or BLOCK)
-            |
+    FINAL Risk (same volume, or BLOCK)  -> FINAL_RISK_PASSED/BLOCKED event,
+            |                               carrying the full FINAL RiskDecision
+            |                               (review 1.22 F-057 — never by
+            |                               mutating the sealed DecisionCapsule)
     ApprovedOrder -> order_check   (never order_send)
             |
     append the terminal event
@@ -39,19 +41,15 @@ unreadable risk-session record, which `LiveDecisionOrchestrator` already
 treats as halt-worthy for the same reason; this class does the same, since
 both processes read the same durable, shared safety state.
 
-**Known v0 gaps, recorded rather than hidden.**
+**Known v0 gap, recorded rather than hidden.**
 
 - `CapsuleStore.read_all()` reads every capsule ever sealed in this
   environment, every call — fine at today's scale (the activation watermark
   is unset in every shipped config, so the answer is always "nothing
   eligible"), not fine forever. Worth an index-backed "unclaimed since X"
-  query before this runs against real history at volume.
-- The fresh account/position read and the `capture_broker_state` read are
-  two separate live calls rather than one shared observation, so the
-  numbers FINAL Risk judges and the numbers reconciliation judges come from
-  two closely-spaced but distinct broker reads. Acceptable for a
-  non-sending preflight check; worth revisiting if M5 ever needs the two to
-  be provably the same instant.
+  query before this runs against real history at volume (`review/DEVIATIONS.md`
+  D-047's first gap; its second gap — two separate live reads instead of
+  one coherent observation — closed 2026-08-27, review 1.22 F-058).
 """
 
 from __future__ import annotations
@@ -80,6 +78,7 @@ from crumblr.domain.enums import (
     SessionState,
     SupervisorVerdict,
 )
+from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import ApprovedOrder, DecisionCapsule, MarketSnapshot
 from crumblr.domain.money import price_to_points
 from crumblr.domain.timeutils import UtcDatetime, utc_now
@@ -202,7 +201,7 @@ class ExecutionOrchestrator:
                 order_request_id=order_request_id,
                 capsule_id=capsule.capsule_id,
                 intent_id=intent.intent_id,
-                fingerprint=intent.decision_hash,
+                fingerprint=_approval_chain_fingerprint(capsule),
                 claimed_by=self._worker_id,
                 now=now,
             )
@@ -247,12 +246,10 @@ class ExecutionOrchestrator:
                 order_request_id, capsule, ExecutionEventType.GATE_CLOSED, gate.reason_codes, now
             )
 
-        # Fresh, live reads — the account/position numbers FINAL Risk judges.
-        account = self._adapter.account()
-        positions = self._adapter.positions()
-
-        # A separate fresh capture, persisted and reconciled — see the
-        # module docstring's note on why these are two reads, not one.
+        # One coherent, current observation (review 1.22 F-058) — the same
+        # capture serves reconciliation (its persistence-shaped fields) and
+        # FINAL Risk (its raw domain fields), rather than two independent
+        # live reads that could disagree about the broker's actual state.
         observation = capture_broker_state(
             self._adapter.reader,
             environment=capsule.environment,
@@ -260,6 +257,7 @@ class ExecutionOrchestrator:
             clock=self._clock,
         )
         self._broker_state.record(observation)
+        assert observation.account_state is not None
 
         market = self._config.market_for(self._canonical_symbol)
         expectation = ExpectedState.flat(
@@ -287,8 +285,8 @@ class ExecutionOrchestrator:
 
         session_recovery = recover_session(
             self._session_store.load_latest(),
-            live_equity=account.equity,
-            live_open_positions=len(positions),
+            live_equity=observation.account_state.equity,
+            live_open_positions=len(observation.position_states),
             market_day=trading_day(now),
         )
         if session_recovery.must_halt:
@@ -350,14 +348,25 @@ class ExecutionOrchestrator:
             data_quality=tick.data_quality,
         )
 
+        # Real, durable order-frequency history (review 1.22 F-060) — not
+        # MT5, not a hard-coded placeholder.
+        orders_in_last_hour = self._requests.count_claimed_since(now - timedelta(hours=1))
+
         fresh_portfolio = policies.PortfolioState(
-            account=account,
-            open_positions=positions,
+            account=observation.account_state,
+            open_positions=observation.position_states,
             ledger=session_recovery.ledger,
-            orders_in_last_hour=0,
+            orders_in_last_hour=orders_in_last_hour,
             seen_decision_hashes=frozenset(),
-            open_risk_fraction=self._config.risk.max_risk_per_trade * Decimal(len(positions)),
+            open_risk_fraction=self._config.risk.max_risk_per_trade
+            * Decimal(len(observation.position_states)),
         )
+
+        # A fresh timestamp, taken immediately before FINAL Risk (review
+        # 1.22 F-058, part B) — ADR-001 requires intent expiry checked
+        # "against the clock at the final check", not the timestamp
+        # `run_once()` happened to take before iterating every capsule.
+        final_now = self._clock()
 
         final_risk = policies.revalidate_fixed_volume_at_execution_time(
             intent,
@@ -367,7 +376,7 @@ class ExecutionOrchestrator:
             fresh_portfolio,
             risk_context,
             self._kill_switch,
-            now=now,
+            now=final_now,
         )
         if final_risk.verdict is not RiskVerdict.PASS:
             return self._refuse(
@@ -375,7 +384,8 @@ class ExecutionOrchestrator:
                 capsule,
                 ExecutionEventType.FINAL_RISK_BLOCKED,
                 final_risk.reason_codes,
-                now,
+                final_now,
+                payload=final_risk.model_dump(mode="json"),
             )
 
         assert final_risk.approved_volume is not None
@@ -383,7 +393,8 @@ class ExecutionOrchestrator:
         order = ApprovedOrder(
             order_request_id=order_request_id,
             intent_id=intent.intent_id,
-            risk_decision_id=prior_decision.decision_id,
+            intent_risk_decision_id=prior_decision.decision_id,
+            final_risk_decision_id=final_risk.decision_id,
             supervisor_decision_id=capsule.supervisor_decision.decision_id,
             broker_symbol=spec.broker_symbol,
             side=intent.side,
@@ -393,17 +404,40 @@ class ExecutionOrchestrator:
             stop_loss_price=intent.stop_loss_price,
             take_profit_price=intent.take_profit_price,
             max_slippage_points=self._config.execution.max_slippage_points,
-            created_at_utc=now,
+            created_at_utc=final_now,
             expires_at_utc=intent.expires_at_utc,
             environment=capsule.environment,
         )
+
+        # Review 1.22 F-057: the durable link ADR-001 requires, appended
+        # before `order_check` — never by mutating the sealed
+        # `DecisionCapsule`. Carries the complete serialized FINAL
+        # RiskDecision plus a fingerprint binding it to the exact
+        # `ApprovedOrder` it authorized (F-059's second binding).
+        order_fingerprint = fingerprint(
+            {
+                "order_request_id": str(order_request_id),
+                "final_risk_decision_id": str(final_risk.decision_id),
+                "approved_order": order.model_dump(mode="json"),
+            }
+        )
+        self._append(
+            order_request_id,
+            ExecutionEventType.FINAL_RISK_PASSED,
+            final_now,
+            payload={
+                "final_risk_decision": final_risk.model_dump(mode="json"),
+                "order_fingerprint": order_fingerprint,
+            },
+        )
+
         check = self._adapter.order_check(order)
         event_type = (
             ExecutionEventType.ORDER_CHECKED
             if check.accepted
             else ExecutionEventType.ORDER_CHECK_REJECTED
         )
-        self._append(order_request_id, event_type, now, payload=check.model_dump(mode="json"))
+        self._append(order_request_id, event_type, final_now, payload=check.model_dump(mode="json"))
         return ExecutionAttemptOutcome(
             order_request_id=order_request_id, capsule_id=capsule.capsule_id, event_type=event_type
         )
@@ -432,8 +466,16 @@ class ExecutionOrchestrator:
         now: UtcDatetime,
         *,
         detail: str | None = None,
+        payload: dict[str, object] | None = None,
     ) -> ExecutionAttemptOutcome:
-        self._append(order_request_id, event_type, now, reason_codes=reason_codes, detail=detail)
+        self._append(
+            order_request_id,
+            event_type,
+            now,
+            reason_codes=reason_codes,
+            detail=detail,
+            payload=payload,
+        )
         return ExecutionAttemptOutcome(
             order_request_id=order_request_id,
             capsule_id=capsule.capsule_id,
@@ -459,6 +501,42 @@ class ExecutionOrchestrator:
             detail=detail,
             payload=payload,
         )
+
+
+def _approval_chain_fingerprint(capsule: DecisionCapsule) -> str:
+    """Bind the whole pre-execution approval chain, not only the intent.
+
+    Review 1.22 F-059: `intent.decision_hash` alone proves two different
+    `TradeIntent`s cannot collide, but not that two *differently-approved*
+    executions of the same intent (same decision hash, different
+    intent-time `RiskDecision`/`SupervisorDecision` content — genuinely
+    possible, since `decision_hash` is computed from `TradeIntent`'s own
+    fields only) cannot silently collapse into "already claimed, harmless
+    retry." This is that binding, used as `ExecutionRequestStore.claim()`'s
+    fingerprint. `capsule.provenance_fingerprint` is reused rather than
+    re-listing every version field it already binds (strategy/model/
+    feature/risk-config versions, `code_commit`, environment).
+    """
+    assert capsule.trade_intent is not None
+    assert capsule.risk_decision is not None
+    assert capsule.supervisor_decision is not None
+    return fingerprint(
+        {
+            "provenance_fingerprint": capsule.provenance_fingerprint,
+            "decision_hash": capsule.trade_intent.decision_hash,
+            "risk_decision_id": str(capsule.risk_decision.decision_id),
+            "risk_verdict": capsule.risk_decision.verdict.value,
+            "risk_approved_volume": capsule.risk_decision.approved_volume,
+            "risk_config_version": capsule.risk_decision.risk_config_version,
+            "risk_reason_codes": [code.value for code in capsule.risk_decision.reason_codes],
+            "supervisor_decision_id": str(capsule.supervisor_decision.decision_id),
+            "supervisor_verdict": capsule.supervisor_decision.verdict.value,
+            "supervisor_policy_version": capsule.supervisor_decision.policy_version,
+            "supervisor_reason_codes": [
+                code.value for code in capsule.supervisor_decision.reason_codes
+            ],
+        }
+    )
 
 
 def _is_intent_time_approved(capsule: DecisionCapsule) -> bool:

@@ -443,7 +443,7 @@ class ReplayOrchestrator:
         order = ApprovedOrder(
             order_request_id=uuid5(NAMESPACE_URL, f"crumblr:order:{intent.decision_hash}"),
             intent_id=intent.intent_id,
-            risk_decision_id=risk_decision.decision_id,
+            intent_risk_decision_id=risk_decision.decision_id,
             supervisor_decision_id=supervisor_decision.decision_id,
             broker_symbol=self._spec.broker_symbol,
             side=intent.side,

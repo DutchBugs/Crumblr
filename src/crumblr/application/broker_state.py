@@ -26,6 +26,7 @@ from uuid import uuid4
 from crumblr.domain.enums import Environment, SnapshotCompleteness
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import (
+    AccountState,
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
     BrokerPositionSnapshot,
@@ -50,6 +51,21 @@ class BrokerStateObservation:
     account: BrokerAccountSnapshot
     positions: tuple[BrokerPositionSnapshot, ...]
     pending_orders: tuple[BrokerPendingOrderSnapshot, ...]
+    account_state: AccountState | None = None
+    """The raw domain object this capture was built from — the same read
+
+    `account` (above) was derived from, not a second one. Review 1.22
+    F-058: a caller needing both the persistence-shaped snapshot (for
+    `BrokerStateStore.record()`/reconciliation) and the domain-shaped state
+    (for the Risk Engine) from one coherent observation reads both off this
+    single object rather than reading the broker twice. Optional, defaulted
+    `None`, so the many existing tests that construct this purely to
+    exercise `BrokerStateStore`/reconciliation — and never touch this field
+    — do not need updating; `capture_broker_state()`, the only production
+    caller, always populates it."""
+    position_states: tuple[PositionState, ...] = ()
+    """The raw domain positions `positions` (above) were each derived from
+    — same reasoning as `account_state`."""
 
 
 def capture_broker_state(
@@ -149,6 +165,8 @@ def capture_broker_state(
         account=account_snapshot,
         positions=position_snapshots,
         pending_orders=pending_order_snapshots,
+        account_state=account,
+        position_states=positions,
     )
 
 

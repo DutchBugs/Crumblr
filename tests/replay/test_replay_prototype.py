@@ -304,7 +304,7 @@ class TestIdempotency:
         order = ApprovedOrder(
             order_request_id=uuid4(),
             intent_id=uuid4(),
-            risk_decision_id=uuid4(),
+            intent_risk_decision_id=uuid4(),
             supervisor_decision_id=uuid4(),
             broker_symbol=spec.broker_symbol,
             side=Side.BUY,

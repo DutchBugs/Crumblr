@@ -513,7 +513,16 @@ class ApprovedOrder(Contract):
 
     order_request_id: UUID
     intent_id: UUID
-    risk_decision_id: UUID
+    intent_risk_decision_id: UUID
+    """The intent-time `RiskDecision` that first approved this trade
+    (`risk/policies.py::evaluate`) — always present."""
+    final_risk_decision_id: UUID | None = None
+    """The execution-time `RiskDecision` that authorized submission
+    (`risk/policies.py::revalidate_fixed_volume_at_execution_time`, ADR-001)
+    — review 1.22 F-057. `None` only for the replay/paper path
+    (`application/orchestration.py`), which does not yet run a FINAL Risk
+    revalidation step; always set by `application/execution.py::
+    ExecutionOrchestrator`."""
     supervisor_decision_id: UUID
 
     broker_symbol: Symbol

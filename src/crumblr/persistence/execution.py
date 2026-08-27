@@ -158,6 +158,24 @@ class ExecutionRequestStore:
             )
         return ClaimResult(claimed=False)
 
+    def count_claimed_since(self, since: UtcDatetime) -> int:
+        """How many requests this store has claimed at or after `since`.
+
+        Review 1.22 F-060: the durable, real order-frequency count FINAL
+        Risk's `orders_in_last_hour` needs — platform execution history,
+        not MT5 (which has no notion of "requests this platform claimed"
+        at all) and not a hard-coded placeholder.
+        """
+        from sqlalchemy import func
+
+        statement = (
+            select(func.count())
+            .select_from(execution_requests)
+            .where(execution_requests.c.claimed_at_utc >= since)
+        )
+        with self._engine.connect() as connection:
+            return int(connection.execute(statement).scalar_one())
+
 
 class ExecutionEventStore:
     """The append-only half: every lifecycle step, one row each."""

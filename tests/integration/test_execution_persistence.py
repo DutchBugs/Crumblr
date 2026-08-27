@@ -139,6 +139,63 @@ class TestClaim:
         assert second == ClaimResult(claimed=True)
 
 
+class TestCountClaimedSince:
+    """Review 1.22 F-060: the durable, real order-frequency count FINAL Risk
+
+    needs — platform execution history, not a placeholder.
+    """
+
+    def test_zero_when_nothing_has_been_claimed(self, engine: Engine) -> None:
+        store = ExecutionRequestStore(engine)
+        assert store.count_claimed_since(FIXED_NOW) == 0
+
+    def test_counts_claims_at_or_after_the_cutoff(self, engine: Engine) -> None:
+        capsule = sealed_capsule(engine)
+        store = ExecutionRequestStore(engine)
+        store.claim(
+            order_request_id=uuid4(),
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-a",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        store.claim(
+            order_request_id=uuid4(),
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-b",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+
+        assert store.count_claimed_since(FIXED_NOW) == 2
+
+    def test_excludes_claims_before_the_cutoff(self, engine: Engine) -> None:
+        from datetime import timedelta
+
+        capsule = sealed_capsule(engine)
+        store = ExecutionRequestStore(engine)
+        store.claim(
+            order_request_id=uuid4(),
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-old",
+            claimed_by="test-worker",
+            now=FIXED_NOW - timedelta(hours=2),
+        )
+        store.claim(
+            order_request_id=uuid4(),
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-new",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+
+        assert store.count_claimed_since(FIXED_NOW - timedelta(hours=1)) == 1
+
+
 class TestExecutionEvents:
     def test_events_read_back_in_order(self, engine: Engine) -> None:
         capsule = sealed_capsule(engine)

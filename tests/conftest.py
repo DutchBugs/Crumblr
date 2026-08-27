@@ -160,7 +160,8 @@ def make_approved_order(**overrides: Any) -> ApprovedOrder:
     fields: dict[str, Any] = {
         "order_request_id": uuid4(),
         "intent_id": uuid4(),
-        "risk_decision_id": uuid4(),
+        "intent_risk_decision_id": uuid4(),
+        "final_risk_decision_id": uuid4(),
         "supervisor_decision_id": uuid4(),
         "broker_symbol": "EURUSD",
         "side": Side.BUY,

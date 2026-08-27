@@ -1083,9 +1083,13 @@ Next engineering steps once unblocked:
       persistence, and `ExecutionOrchestrator` assembling all of it end to
       end, proven by an integration test that hard-asserts `order_send` is
       never called — §13 thirty-fourth through thirty-eighth entries).
-      Still open, deliberately out of this phase's scope: automatic flatten
-      actually *submitting* a close (stays halt-only, ADR-004), the real
-      F-049 `SubmissionGate` (design stub only, `risk/submission_gate.py`),
+      **Review 1.22 source-reviewed the bundle same day: architecture
+      ACCEPTED, four implementation findings opened (F-057 CRITICAL,
+      F-058/F-059/F-060 HIGH) and fixed the same day — §13 thirty-ninth/
+      fortieth entries. None of the four fixes reviewed yet.** Still open,
+      deliberately out of this phase's scope: automatic flatten actually
+      *submitting* a close (stays halt-only, ADR-004), the real F-049
+      `SubmissionGate` (design stub only, `risk/submission_gate.py`),
       and everything else in `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s
       "Later, vóór eerste DEMO-order" list — this checklist item stays open
       until those land too.
@@ -5955,6 +5959,97 @@ Next:
 - Await a human/`gh` check of the next hosted CI run (F-056 gate);
   `domain_contracts.md` regeneration waits for F-057; owner risk-policy
   decisions remain open.
+
+---
+
+## Update 2026-08-27 (fortieth entry) — F-057 through F-060 fixed, same day as opened, per an approved plan
+
+Component: `application/execution.py`, `domain/models.py`, `domain/enums.py`, `application/broker_state.py`, `persistence/execution.py`, `application/orchestration.py`, ADR-001, `review/DEVIATIONS.md`
+Milestone: Phase 4 — the four implementation findings review 1.22 required before a formal PASS
+Status before: F-057 (CRITICAL), F-058/F-059/F-060 (HIGH) all OPEN, all "before M5"
+Status after: All four CLOSED/SHIPPED, unreviewed. A user-requested planning pass preceded the code (plan mode, approved before any file was touched)
+
+Completed — one coherent revision pass across the four intertwined findings, matching how the reviewer itself presented them:
+- **F-057:** `domain/models.py::ApprovedOrder` renamed `risk_decision_id` →
+  `intent_risk_decision_id`, added `final_risk_decision_id: UUID | None`.
+  New `ExecutionEventType.FINAL_RISK_PASSED`. `ExecutionOrchestrator` now
+  appends `FINAL_RISK_PASSED`/`FINAL_RISK_BLOCKED` carrying the complete
+  serialized FINAL `RiskDecision` (plus, on PASS, an `order_fingerprint`
+  binding it to the exact `ApprovedOrder`) *before* `order_check` — the
+  sealed `DecisionCapsule` is never mutated. ADR-001 constraint 4 corrected
+  to describe this design rather than "the capsule records both."
+- **F-058:** `application/broker_state.py::BrokerStateObservation` gained
+  `account_state`/`position_states`, populated from the raw domain reads
+  `capture_broker_state()` already made internally — zero new MT5 calls.
+  `ExecutionOrchestrator` now captures broker state exactly once per
+  attempt and uses that single observation for both reconciliation and
+  FINAL Risk. A fresh `final_now = self._clock()` is taken immediately
+  before FINAL Risk and used for its decision, the execution events, and
+  `ApprovedOrder.created_at_utc`.
+- **F-059:** new `_approval_chain_fingerprint()`, binding
+  `capsule.provenance_fingerprint` plus the intent-time `RiskDecision`/
+  `SupervisorDecision` content — replaces `intent.decision_hash` as
+  `claim()`'s fingerprint. `order_request_id`'s derivation stays stable, as
+  the reviewer allowed.
+- **F-060:** new `ExecutionRequestStore.count_claimed_since()` — real,
+  durable order-frequency history, replacing the hard-coded
+  `orders_in_last_hour=0`.
+- Discovered while making F-057's field rename: two call sites mypy caught
+  that the plan hadn't anticipated (`tests/unit/test_operator_controls.py`,
+  `tests/replay/test_replay_prototype.py`) — fixed alongside the three
+  planned ones. Also discovered `BrokerStateObservation`'s new fields
+  needed to be optional-with-defaults rather than required: ~13 unrelated
+  existing test call sites (`test_broker_state_store.py`,
+  `test_reconciliation.py`, `test_live_decision.py`) construct it via
+  keyword args without the new fields, and the plan's "safe because
+  appended after the original three" reasoning only covered positional
+  construction, not this.
+
+Evidence:
+- tests: 5 new — `tests/integration/test_execution_orchestrator.py::
+  test_the_approved_order_is_linked_to_both_risk_decisions` (F-057, the two
+  decision ids are genuinely different records),
+  `::test_two_capsules_sharing_an_intent_hash_but_different_approval_content_fail_closed`
+  (F-059's required test, exactly as specified — same intent, different
+  approved volume, second `claim()` raises `ExecutionRequestConflictError`
+  rather than reading as a harmless retry), `tests/integration/
+  test_execution_persistence.py::TestCountClaimedSince` (3, F-060). The
+  existing `test_a_clean_eligible_capsule_reaches_order_checked` extended
+  to assert the new `FINAL_RISK_PASSED` event and its payload.
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — clean except one pre-existing,
+  unrelated finding: `review/feedback.1.22.md` (the reviewer's own document,
+  committed verbatim, untouched by this entry's work) trips the markdown
+  code-block formatter — not "fixed" by editing a reviewer's original text.
+  `uv run mypy` — success, no issues found in 135 source files.
+  `uv run pytest -q` (solo) — **936 passed, 3 skipped** (931 after Phase 4
+  slice 5, +5 is exactly this entry's new tests, zero regressions).
+
+Problems found:
+- None beyond the two mypy-caught call sites and the `BrokerStateObservation`
+  defaults issue above, both caught and fixed before this entry, not left
+  behind.
+
+Risk impact:
+- None reachable. `order_send` remains structurally unreachable through
+  every code path — grepped for after these changes, same as after every
+  prior Phase-4 slice: none found outside `simulated.py`/`orchestration.py`'s
+  pre-existing paper-only path and the adapter's own unconditional-raise
+  methods.
+
+Decision:
+- F-057 through F-060 fixed, same day as opened. None of the four has been
+  seen by a reviewer yet — that is what review 1.23 is for, per review
+  1.22's own framing. Not yet committed — pending the usual per-turn
+  approval.
+
+Next:
+- Await review 1.23 (or a request for another supplementary source ZIP) —
+  do not start a new documentation pass proactively.
+- Continue F-051 part 2 in parallel; await a human/`gh` check of the next
+  hosted CI run; `domain_contracts.md` regeneration now unblocked by
+  F-057 but still needs a human reviewer; owner risk-policy decisions
+  remain open.
 
 ---
 

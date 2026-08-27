@@ -11,9 +11,9 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-27 — new entry D-047 for `ExecutionOrchestrator`'s two
-known v0 gaps (Phase 4 slice 5, non-sending execution engineering; see
-`status.md` §13's thirty-eighth entry).
+Last updated 2026-08-27, second pass — D-047's second gap (two separate
+live MT5 reads) closed same day per review 1.22 F-058; its first gap
+(capsule-table full scan) remains open.
 
 ---
 
@@ -913,7 +913,7 @@ mean anything should start here.
 - **Gate affected:** none directly. A prerequisite for evidence-quality
   live-shadow decisions and, later, M5 — not itself claiming to be either
 
-### D-047 — `ExecutionOrchestrator` v0 has two narrower-than-eventual behaviours
+### D-047 — `ExecutionOrchestrator` v0 has one narrower-than-eventual behaviour
 - **Status:** PROVISIONAL
 - **Spec:** `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` — the non-sending
   execution preflight chain (Phase 4, 2026-08-27)
@@ -923,23 +923,30 @@ mean anything should start here.
 - **Current state:** `application/execution.py::ExecutionOrchestrator`
   closes the connection: claim → eligibility → fresh observation →
   reconciliation → `ExecutionPreflightGate` → FINAL Risk → `ApprovedOrder`
-  → `order_check`, never `order_send`. Two narrower-than-eventual
-  behaviours, both already named in the module's own docstring rather than
-  discovered later:
+  → `order_check`, never `order_send`. Originally recorded two
+  narrower-than-eventual behaviours; the second is now closed:
   1. **`CapsuleStore.read_all()` scans every capsule ever sealed in the
      configured environment, every `run_once()` call.** Harmless at today's
      scale — the activation watermark is unset in every shipped config, so
      the answer is always "nothing eligible" and the scan is cheap — but
      not fine once real history accumulates. Needs an index-backed
-     "unclaimed since X" query before this runs against volume.
-  2. **The fresh account/position read (for FINAL Risk) and the
-     `capture_broker_state` read (for reconciliation) are two separate live
-     MT5 calls, not one shared observation.** The numbers FINAL Risk judges
-     and the numbers reconciliation judges therefore come from two
-     closely-spaced but distinct broker reads rather than provably the same
-     instant. Acceptable for a non-sending preflight check where nothing is
-     actually placed; worth revisiting if M5 ever needs the two to be
-     provably simultaneous.
+     "unclaimed since X" query before this runs against volume. **Still
+     open.**
+  2. ~~The fresh account/position read (for FINAL Risk) and the
+     `capture_broker_state` read (for reconciliation) were two separate
+     live MT5 calls, not one shared observation.~~ **Closed 2026-08-27**
+     (review 1.22 F-058): `application/broker_state.py::BrokerStateObservation`
+     gained `account_state`/`position_states` fields, populated from the
+     same raw domain reads `capture_broker_state()` already made internally
+     before converting them to persistence-shaped snapshots (zero new MT5
+     calls). `ExecutionOrchestrator` now calls `capture_broker_state()`
+     once per attempt and uses that single observation for both
+     reconciliation and FINAL Risk's portfolio. The companion clock-freshness
+     gap (`run_once()`'s one `now` reused through the whole chain) was
+     fixed the same day: a fresh `final_now = self._clock()` is taken
+     immediately before FINAL Risk and used for its decision, the
+     `ApprovedOrder`'s `created_at_utc`, and the FINAL-Risk execution
+     events.
 - **Also provisional, by design, not oversight:** `risk/submission_gate.py`
   is a design-only stub (F-049's full multi-gate is unbuilt); automatic
   flatten submission stays halt-only (ADR-004); the human-set
