@@ -427,6 +427,64 @@ forget: which bar window was last decided, and which decision hashes the
 duplicate-protection check has already seen."""
 
 
+execution_requests = Table(
+    "execution_requests",
+    metadata,
+    # The idempotency key itself is the primary key (uuid5 of the decision
+    # hash, the same derivation `application/orchestration.py` already
+    # uses) — claiming a request *is* the successful `INSERT ... ON
+    # CONFLICT DO NOTHING RETURNING`, not a separate `UPDATE` (this table is
+    # append-only-granted, like every other table here; there is no UPDATE
+    # to grant). Phase 4 plan review point 5.
+    Column("order_request_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column(
+        "capsule_id", UUID(as_uuid=True), ForeignKey("decision_capsules.capsule_id"), nullable=False
+    ),
+    Column("intent_id", UUID(as_uuid=True), nullable=False),
+    # Content fingerprint over the fields that must not change underneath an
+    # idempotency key. A second claim attempt for the same
+    # `order_request_id` with a different fingerprint is a conflict the
+    # store must raise on, never silently drop (point 4).
+    Column("fingerprint", Text, nullable=False),
+    Column("claimed_by", String(128), nullable=False),
+    _utc_column("claimed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("schema_version", Integer, nullable=False),
+    Index("ix_execution_requests_capsule", "capsule_id"),
+)
+"""One immutable row per `order_request_id`, ever (Phase 4). The row's
+existence *is* the claim — see the module docstring in
+`persistence/execution.py`."""
+
+
+execution_events = Table(
+    "execution_events",
+    metadata,
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column(
+        "order_request_id",
+        UUID(as_uuid=True),
+        ForeignKey("execution_requests.order_request_id"),
+        nullable=False,
+    ),
+    Column("event_type", String(64), nullable=False),
+    _utc_column("occurred_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("reason_codes", JSONB, nullable=False),
+    Column("detail", Text, nullable=True),
+    Column("payload", JSONB, nullable=True),
+    Column("schema_version", Integer, nullable=False),
+    Index("ix_execution_events_request", "order_request_id", "sequence"),
+)
+"""Append-only lifecycle log for one execution request (Phase 4): every
+attempt, refusal and outcome, one row each. `event_id` is content-derived
+from `(order_request_id, event_type)`, so a retry after a crash re-emits the
+same logical event rather than duplicating it — the same idempotence
+discipline `domain/events.py::build_event` documents for the main journal."""
+
+
 APPEND_ONLY_TABLES: tuple[str, ...] = (
     "events",
     "decision_capsules",
@@ -441,6 +499,8 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "broker_pending_order_snapshots",
     "decision_window_states",
     "feature_snapshots",
+    "execution_requests",
+    "execution_events",
 )
 """Tables the application role may only insert into and read from."""
 
@@ -468,6 +528,8 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "broker_pending_order_snapshots",
             "decision_window_states",
             "feature_snapshots",
+            "execution_requests",
+            "execution_events",
         )
     ]
     return tuple(statements)

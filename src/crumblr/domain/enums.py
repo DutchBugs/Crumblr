@@ -302,6 +302,34 @@ class IncidentSeverity(StrEnum):
     SEV_3 = "SEV-3"
 
 
+class ExecutionEventType(StrEnum):
+    """Phase 4 — the append-only log of what happened to one execution
+
+    request (`persistence/execution.py::ExecutionEventStore`). `OrderState`
+    above names the full build.md §19 state machine; this is the narrower
+    event vocabulary for *how a request got there, or didn't*. The reserved
+    values below are never emitted by anything this phase builds — they
+    exist so the M5 event log has a named shape to grow into rather than
+    being invented from scratch then.
+    """
+
+    REQUEST_CLAIMED = "REQUEST_CLAIMED"
+    INELIGIBLE = "INELIGIBLE"
+    GATE_CLOSED = "GATE_CLOSED"
+    RECONCILIATION_BLOCKED = "RECONCILIATION_BLOCKED"
+    FINAL_RISK_BLOCKED = "FINAL_RISK_BLOCKED"
+    ORDER_CHECKED = "ORDER_CHECKED"
+    ORDER_CHECK_REJECTED = "ORDER_CHECK_REJECTED"
+
+    # Reserved for M5. Never emitted by anything Phase 4 builds.
+    SUBMISSION_STARTED = "SUBMISSION_STARTED"
+    SUBMITTED = "SUBMITTED"
+    BROKER_ACK = "BROKER_ACK"
+    FILLED = "FILLED"
+    RECONCILED = "RECONCILED"
+    CLOSED = "CLOSED"
+
+
 class SnapshotCompleteness(StrEnum):
     """Whether a broker-state collection query actually completed (review
 

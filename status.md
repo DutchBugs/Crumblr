@@ -5646,6 +5646,105 @@ Next:
 
 ---
 
+## Update 2026-08-27 (thirty-seventh entry) — Phase 4 slice 4: immutable execution requests + append-only execution events, with a real Alembic migration
+
+Component: `persistence/execution.py` (new), `persistence/schema.py`, `domain/enums.py`, `migrations/versions/20260827_c9e1d5a3f286_execution_requests_and_events.py` (new)
+Milestone: Phase 4, continuing slices 1-3 (thirty-fourth through thirty-sixth entries)
+Status before: no persistence existed for execution requests/outcomes at all.
+Status after: two new append-only-granted tables exist — `execution_requests` (one immutable row per `order_request_id`, ever) and `execution_events` (the lifecycle log) — with a real Alembic migration proven equivalent to `schema.py`'s own metadata.
+
+Completed:
+- Discovered, while designing the "atomic claim" the plan review demanded
+  (point 5), that this project enforces append-only *at the database
+  permission layer* (`schema.py::append_only_grants` — `REVOKE ALL` then
+  `GRANT SELECT, INSERT` only, no `UPDATE`, for every table in
+  `APPEND_ONLY_TABLES`). A claim implemented as `UPDATE ... SET claimed_at
+  WHERE claimed_at IS NULL` — the literal reading of the plan review's
+  Dutch text — would need a grant this project deliberately never hands
+  out. Resolved by recognising that **the claim is the winning insert**:
+  `INSERT ... ON CONFLICT (order_request_id) DO NOTHING RETURNING
+  order_request_id` gives exactly one concurrent caller a returned row for
+  a given key, which is Postgres's own atomicity guarantee — no `UPDATE`
+  needed anywhere, and both new tables fit the existing append-only grant
+  model without an exception.
+- `persistence/execution.py::ExecutionRequestStore.claim()` — the immutable
+  half. A losing insert (someone already holds this `order_request_id`)
+  then compares the caller's fingerprint against the stored one: a match is
+  "already registered" (not an error — this is what makes retrying the same
+  decision after a crash safe); a mismatch raises
+  `ExecutionRequestConflictError`, satisfying point 4's "never silently
+  ignored."
+- `persistence/execution.py::ExecutionEventStore` — the append-only half.
+  `event_id` is content-derived from `(order_request_id, event_type)` (new
+  `event_id_for()` helper), so a retry re-logging the same transition
+  converges on the same row rather than duplicating it — the same
+  idempotence discipline `domain/events.py::build_event`'s docstring
+  describes for the main journal.
+- New `domain/enums.py::ExecutionEventType` — `REQUEST_CLAIMED`,
+  `INELIGIBLE`, `GATE_CLOSED`, `RECONCILIATION_BLOCKED`,
+  `FINAL_RISK_BLOCKED`, `ORDER_CHECKED`, `ORDER_CHECK_REJECTED` for this
+  phase; `SUBMISSION_STARTED`/`SUBMITTED`/`BROKER_ACK`/`FILLED`/
+  `RECONCILED`/`CLOSED` reserved, named but never emitted, for M5.
+- `persistence/schema.py`: both tables added to `APPEND_ONLY_TABLES` and
+  their sequence grants; `execution_requests.capsule_id` foreign-keys to
+  `decision_capsules`, `execution_events.order_request_id` foreign-keys to
+  `execution_requests`.
+- New Alembic migration
+  `20260827_c9e1d5a3f286_execution_requests_and_events.py`, chained after
+  the existing head (`b3f8a2c7d914`).
+
+Evidence:
+- tests: new `tests/integration/test_execution_persistence.py` — 8 tests
+  against real Postgres: the first claim wins; a second claim with matching
+  content is not an error; a second claim with different content raises
+  `ExecutionRequestConflictError` naming the `order_request_id`; different
+  `order_request_id`s never collide; events read back in insertion order;
+  reason codes round-trip; re-appending the same transition does not
+  duplicate the row; `event_id_for()` is deterministic (same inputs, same
+  id; a different event type, a different id).
+  `tests/integration/test_migrations.py` (existing, 8 tests, all still
+  pass) — includes `test_a_migrated_database_does_not_disagree_with_the_metadata`
+  and `test_create_all_and_the_migration_produce_the_same_schema`, both of
+  which would have caught any drift between the new migration and
+  `schema.py` — the manually-written migration DDL matches exactly on the
+  first attempt.
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — 174 files already formatted.
+  `uv run mypy` — success, no issues found in 133 source files.
+  `uv run pytest -q` (solo) — **925 passed, 3 skipped** (917 after slice 3,
+  +8 is exactly this slice's new integration tests, zero regressions).
+
+Problems found:
+- None in the shipped code. The append-only-permissions discovery above was
+  caught during design, before any code was written that would have needed
+  correcting — worth recording precisely because it changed the
+  implementation from what a literal reading of the plan review would have
+  produced.
+
+Risk impact:
+- None reachable. Neither store is called from anywhere live yet.
+
+Decision:
+- Slice 4 of the reviewed, revised Phase 4 plan is complete and gate-clean.
+  Not yet committed — pending the usual per-turn approval.
+
+Next:
+- Build the `ExecutionOrchestrator` (`application/execution.py`) — the
+  final slice that assembles everything built so far (the adapter, FINAL
+  Risk, eligibility, the preflight gate, and now this persistence layer)
+  into the target flow: sealed capsule → derive `order_request_id` → claim
+  → eligibility → fresh observation → persisted broker-state snapshot →
+  reconciliation → preflight gate → FINAL Risk → `ApprovedOrder` →
+  `order_check` → append the terminal event. Its own integration test is
+  the one that hard-asserts `order_send` is never called end to end.
+- Continue monitoring for `ict_v1`'s 120-bar threshold and run the
+  `baseline_v1` wiring-proof for F-051 part 2 once convenient.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` still needs a human reviewer; owner risk-policy
+  decisions remain open per review 1.21 §13.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
