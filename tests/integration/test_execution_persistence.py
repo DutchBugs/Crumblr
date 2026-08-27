@@ -139,61 +139,76 @@ class TestClaim:
         assert second == ClaimResult(claimed=True)
 
 
-class TestCountClaimedSince:
-    """Review 1.22 F-060: the durable, real order-frequency count FINAL Risk
+class TestCountEventsSince:
+    """Review 1.23 F-060 (reopened): the durable order-frequency authority
 
-    needs — platform execution history, not a placeholder.
+    is a count of `SUBMISSION_STARTED` events — "the platform committed to
+    attempting one broker submission" — never a count of claimed requests,
+    which includes every refusal outcome along the way.
     """
 
-    def test_zero_when_nothing_has_been_claimed(self, engine: Engine) -> None:
-        store = ExecutionRequestStore(engine)
-        assert store.count_claimed_since(FIXED_NOW) == 0
+    def test_zero_when_nothing_has_happened(self, engine: Engine) -> None:
+        store = ExecutionEventStore(engine)
+        assert store.count_events_since(ExecutionEventType.SUBMISSION_STARTED, FIXED_NOW) == 0
 
-    def test_counts_claims_at_or_after_the_cutoff(self, engine: Engine) -> None:
+    def test_other_event_types_are_never_counted(self, engine: Engine) -> None:
+        """Phase 4 never emits `SUBMISSION_STARTED` — everything it does
+
+        emit (claims, refusals, order_check outcomes) must not be
+        mistaken for a submission attempt.
+        """
         capsule = sealed_capsule(engine)
-        store = ExecutionRequestStore(engine)
-        store.claim(
-            order_request_id=uuid4(),
+        order_request_id = uuid4()
+        ExecutionRequestStore(engine).claim(
+            order_request_id=order_request_id,
             capsule_id=capsule.capsule_id,
             intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
-            fingerprint="fp-a",
+            fingerprint="fp-1",
             claimed_by="test-worker",
             now=FIXED_NOW,
         )
-        store.claim(
-            order_request_id=uuid4(),
-            capsule_id=capsule.capsule_id,
-            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
-            fingerprint="fp-b",
-            claimed_by="test-worker",
-            now=FIXED_NOW,
+        store = ExecutionEventStore(engine)
+        store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.ORDER_CHECKED,
+            occurred_at_utc=FIXED_NOW,
         )
 
-        assert store.count_claimed_since(FIXED_NOW) == 2
+        assert store.count_events_since(ExecutionEventType.SUBMISSION_STARTED, FIXED_NOW) == 0
 
-    def test_excludes_claims_before_the_cutoff(self, engine: Engine) -> None:
+    def test_counts_the_requested_event_type_at_or_after_the_cutoff(self, engine: Engine) -> None:
         from datetime import timedelta
 
         capsule = sealed_capsule(engine)
-        store = ExecutionRequestStore(engine)
-        store.claim(
-            order_request_id=uuid4(),
-            capsule_id=capsule.capsule_id,
-            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
-            fingerprint="fp-old",
-            claimed_by="test-worker",
-            now=FIXED_NOW - timedelta(hours=2),
-        )
-        store.claim(
-            order_request_id=uuid4(),
-            capsule_id=capsule.capsule_id,
-            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
-            fingerprint="fp-new",
-            claimed_by="test-worker",
-            now=FIXED_NOW,
-        )
+        requests = ExecutionRequestStore(engine)
+        events = ExecutionEventStore(engine)
+        for label, when in (("old", FIXED_NOW - timedelta(hours=2)), ("new", FIXED_NOW)):
+            order_request_id = uuid4()
+            requests.claim(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+                fingerprint=f"fp-{label}",
+                claimed_by="test-worker",
+                now=when,
+            )
+            events.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.SUBMISSION_STARTED,
+                occurred_at_utc=when,
+            )
 
-        assert store.count_claimed_since(FIXED_NOW - timedelta(hours=1)) == 1
+        assert (
+            events.count_events_since(
+                ExecutionEventType.SUBMISSION_STARTED, FIXED_NOW - timedelta(hours=1)
+            )
+            == 1
+        )
 
 
 class TestExecutionEvents:

@@ -33,6 +33,20 @@ from crumblr.observability.logging import get_logger
 
 _log = get_logger("mt5_gateway")
 
+
+class MissingFinalRiskDecisionError(RuntimeError):
+    """`order_check` was asked to validate an order with no FINAL Risk
+
+    linkage (review 1.23 F-061). `ApprovedOrder.final_risk_decision_id` is
+    optional on the contract itself, deliberately, so the legacy
+    replay/paper path (which has no execution-time revalidation step) can
+    keep constructing valid orders — but the real broker-facing boundary
+    must not trust every future caller to have remembered to set it. Not a
+    reachable failure today (`ExecutionOrchestrator` always supplies it);
+    defense-in-depth at the one place a real broker call actually happens.
+    """
+
+
 _ORDER_TYPE_CONSTANT_BY_SIDE: dict[Side, str] = {
     Side.BUY: "ORDER_TYPE_BUY",
     Side.SELL: "ORDER_TYPE_SELL",
@@ -123,6 +137,18 @@ class OrderCheckMt5Gateway:
         caller should consult if that is ever observed for real; nothing
         here guesses on its behalf.
         """
+        if order.final_risk_decision_id is None:
+            _log.error(
+                "mt5.order_check_missing_final_risk",
+                order_request_id=str(order.order_request_id),
+            )
+            raise MissingFinalRiskDecisionError(
+                f"order_check refused for order_request_id={order.order_request_id}: "
+                "final_risk_decision_id is None, meaning no FINAL execution-time Risk "
+                "revalidation is on record for this order (ADR-001) — the real broker "
+                "boundary will not validate an order it cannot prove FINAL Risk approved"
+            )
+
         module = self._client.module
         order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
         if order_type_constant is None:

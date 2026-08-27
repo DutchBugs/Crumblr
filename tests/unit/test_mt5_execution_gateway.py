@@ -22,7 +22,7 @@ from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import EntryType, Environment, Side
 from crumblr.domain.models import ApprovedOrder
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Credentials
-from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
+from crumblr.mt5_gateway.execution import MissingFinalRiskDecisionError, OrderCheckMt5Gateway
 from crumblr.mt5_gateway.port import ExecutionDisabledError
 
 GUARD = AccountGuardConfig.model_validate(
@@ -274,6 +274,22 @@ class TestOrderCheck:
         gate.order_check(approved_order())
 
         assert fake.order_send_calls == 0
+
+    def test_an_order_with_no_final_risk_linkage_is_refused(self) -> None:
+        """Review 1.23 F-061: the real broker-facing boundary must not
+
+        trust every caller to have set `final_risk_decision_id` — it
+        enforces its own prerequisite, fails closed, and never reaches
+        MT5's `order_check` at all.
+        """
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(final_risk_decision_id=None)
+
+        with pytest.raises(MissingFinalRiskDecisionError):
+            gate.order_check(order)
+
+        assert not fake.order_check_requests
 
 
 # --------------------------------------------------------------------------- #

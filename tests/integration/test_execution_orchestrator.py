@@ -42,6 +42,8 @@ from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
 from crumblr.persistence.risk_session import PostgresRiskSessionStore
 from crumblr.risk.kill_switch import KillSwitch
+from crumblr.risk.session import RiskSessionState
+from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
 
 pytestmark = pytest.mark.integration
@@ -361,9 +363,13 @@ def orchestrator(
     fake: FakeMt5,
     *,
     activation_watermark: datetime | None,
+    clock: Any = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=5_000_123, password="x", server=SERVER))
+    # The adapter's own clock (broker-clock-offset detection against the
+    # fake terminal's fixed tick timestamp) stays constant regardless of
+    # what the orchestrator's own clock does — the two are independent.
     adapter = OrderCheckMt5Gateway(client, guard(), clock=lambda: FIXED_NOW + timedelta(seconds=1))
     return ExecutionOrchestrator(
         config,
@@ -378,7 +384,7 @@ def orchestrator(
         canonical_symbol="EUR/USD",
         activation_watermark=activation_watermark,
         worker_id="test-worker",
-        clock=lambda: FIXED_NOW + timedelta(seconds=1),
+        clock=clock or (lambda: FIXED_NOW + timedelta(seconds=1)),
     )
 
 
@@ -515,6 +521,152 @@ class TestEndToEnd:
             orch.run_once()
 
         assert fake.order_send_calls == 0
+
+    def test_two_capsules_differing_only_in_uncalibrated_checks_fail_closed(
+        self, engine: Engine
+    ) -> None:
+        """F-059 (review 1.23 §4): the earlier fix hand-selected fields off
+
+        `SupervisorDecision` and omitted `uncalibrated_checks` — a field
+        that "explicitly changes what a Supervisor approval means". Two
+        capsules identical except for that one previously-omitted field
+        must now conflict too, not just a change to `approved_volume`.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(expected_spec_version=the_spec.spec_version)
+        shared_intent = make_intent(
+            created_at_utc=FIXED_NOW,
+            expires_at_utc=FIXED_NOW + timedelta(minutes=10),
+            reference_price="1.08500",
+            stop_loss_price="1.08000",
+            take_profit_price="1.09000",
+            requested_risk_fraction="0.005",
+        )
+        shared_risk_decision = make_risk_decision(
+            shared_intent.intent_id,
+            risk_config_version=config.config_version,
+            approved_volume="0.05",
+            account_equity="10000",
+            stop_distance_points=500,
+            risk_amount="50",
+        )
+        sealed_capsule(
+            engine,
+            config,
+            trade_intent=shared_intent,
+            risk_decision=shared_risk_decision,
+            supervisor_decision=make_supervisor_decision(
+                shared_intent.intent_id, uncalibrated_checks=()
+            ),
+        )
+        sealed_capsule(
+            engine,
+            config,
+            trade_intent=shared_intent,
+            risk_decision=shared_risk_decision,
+            supervisor_decision=make_supervisor_decision(
+                shared_intent.intent_id, uncalibrated_checks=("signal_frequency_anomaly",)
+            ),
+        )
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+
+        with pytest.raises(ExecutionRequestConflictError):
+            orch.run_once()
+
+        assert fake.order_send_calls == 0
+
+    def test_session_recovery_uses_final_now_not_the_earlier_now(self, engine: Engine) -> None:
+        """F-058's remaining gap (review 1.23 §3): `recover_session()`'s
+
+        `market_day` must reflect `final_now` (taken immediately before
+        it), not the earlier `run_once()`-level `now`.
+
+        A pre-existing risk-session record is seeded for the trading day
+        `final_now` belongs to — a day *ahead* of the one the stale, early
+        `now` would resolve to. `recover_session()` halts when the
+        record's `trading_day` is ahead of the `market_day` it is given.
+        With the fix, `market_day=trading_day(final_now)` matches the
+        seeded record exactly, so no halt happens and the capsule reaches
+        `ORDER_CHECKED`. Before the fix, `market_day=trading_day(now)`
+        would have made the seeded record look like it was from the
+        future relative to the stale `now`, and `recover_session` would
+        have halted instead.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        # A generous max market-data age: this test's `late` clock value is
+        # 10 hours past `FIXED_NOW`, and the fake tick's own timestamp
+        # stays fixed at `FIXED_NOW` — FINAL Risk (correctly, per the
+        # already-fixed part of F-058) judges that staleness against
+        # `final_now` too. Widened here purely to isolate *this* test's
+        # target — the session-day sequencing fix — from that other,
+        # already-proven-correct behaviour.
+        config = platform_config(expected_spec_version=the_spec.spec_version).model_copy(
+            update={
+                "execution": ExecutionConfig.model_validate(
+                    {
+                        "max_spread_points": 25,
+                        "max_market_data_age_ms": 50_000_000,
+                        "order_timeout_ms": 5000,
+                        "max_slippage_points": 20,
+                    }
+                )
+            }
+        )
+        # A long expiry: this test's `late` clock value is 10 hours past
+        # `FIXED_NOW`, well beyond `sealed_capsule()`'s default 10-minute
+        # intent expiry — long enough here that intent expiry never
+        # interferes with isolating the session-recovery sequencing fix.
+        long_lived_intent = make_intent(
+            created_at_utc=FIXED_NOW,
+            expires_at_utc=FIXED_NOW + timedelta(hours=24),
+            reference_price="1.08500",
+            stop_loss_price="1.08000",
+            take_profit_price="1.09000",
+            requested_risk_fraction="0.005",
+        )
+        sealed_capsule(engine, config, trade_intent=long_lived_intent)
+        fake = FakeMt5()
+
+        early = FIXED_NOW
+        late = FIXED_NOW + timedelta(hours=10)  # crosses the 17:00 America/New_York rollover
+        call_count = {"n": 0}
+
+        def progressing_clock() -> datetime:
+            call_count["n"] += 1
+            return early if call_count["n"] == 1 else late
+
+        PostgresRiskSessionStore(engine).save(
+            RiskSessionState(
+                trading_day=trading_day(late),
+                session_start_equity=Decimal("10000"),
+                current_equity=Decimal("10000"),
+                peak_equity=Decimal("10000"),
+                realized_pnl=Decimal("0"),
+                max_drawdown_fraction=Decimal("0"),
+                max_session_loss_fraction=Decimal("0"),
+                open_risk_fraction=Decimal("0"),
+                open_position_count=0,
+                recorded_at_utc=early,
+            )
+        )
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            clock=progressing_clock,
+        )
+        outcomes = orch.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.ORDER_CHECKED
 
     def test_order_send_is_never_called_even_when_everything_passes(self, engine: Engine) -> None:
         """The hard assertion: not "the test passed", but that the one method

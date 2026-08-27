@@ -283,29 +283,6 @@ class ExecutionOrchestrator:
                 detail="; ".join(reconciliation.reasons) or None,
             )
 
-        session_recovery = recover_session(
-            self._session_store.load_latest(),
-            live_equity=observation.account_state.equity,
-            live_open_positions=len(observation.position_states),
-            market_day=trading_day(now),
-        )
-        if session_recovery.must_halt:
-            if not self._kill_switch.is_halted:
-                self._kill_switch.trip(
-                    reason_codes=session_recovery.reason_codes,
-                    tripped_by="execution_orchestrator",
-                    occurred_at_utc=now,
-                    detail=session_recovery.detail,
-                )
-            return self._refuse(
-                order_request_id,
-                capsule,
-                ExecutionEventType.FINAL_RISK_BLOCKED,
-                session_recovery.reason_codes,
-                now,
-                detail=session_recovery.detail,
-            )
-
         spec = self._instrument_specs.latest(canonical_symbol=self._canonical_symbol)
         if spec is None:
             return self._refuse(
@@ -348,9 +325,49 @@ class ExecutionOrchestrator:
             data_quality=tick.data_quality,
         )
 
-        # Real, durable order-frequency history (review 1.22 F-060) — not
-        # MT5, not a hard-coded placeholder.
-        orders_in_last_hour = self._requests.count_claimed_since(now - timedelta(hours=1))
+        # A fresh timestamp, taken immediately before the final-stage
+        # authorities that must all share one clock boundary (review 1.23
+        # §3, F-058's remaining gap): recovering which trading day's risk
+        # session applies, FINAL Risk's own now-driven checks, the
+        # execution events, and `ApprovedOrder.created_at_utc`. Taken here
+        # — after every read, right before the checks that consume it —
+        # not at `run_once()`'s start, which a slow broker call could have
+        # left stale enough to straddle a session/expiry boundary.
+        final_now = self._clock()
+
+        session_recovery = recover_session(
+            self._session_store.load_latest(),
+            live_equity=observation.account_state.equity,
+            live_open_positions=len(observation.position_states),
+            market_day=trading_day(final_now),
+        )
+        if session_recovery.must_halt:
+            if not self._kill_switch.is_halted:
+                self._kill_switch.trip(
+                    reason_codes=session_recovery.reason_codes,
+                    tripped_by="execution_orchestrator",
+                    occurred_at_utc=final_now,
+                    detail=session_recovery.detail,
+                )
+            return self._refuse(
+                order_request_id,
+                capsule,
+                ExecutionEventType.FINAL_RISK_BLOCKED,
+                session_recovery.reason_codes,
+                final_now,
+                detail=session_recovery.detail,
+            )
+
+        # Real, durable order-frequency history (review 1.23 F-060 —
+        # reopened after the first fix counted claimed *requests*, which
+        # include every refusal outcome, not actual submission attempts).
+        # `SUBMISSION_STARTED` is the durable authority for "the platform
+        # committed to attempting one broker submission"; Phase 4
+        # structurally never emits one, so this is honestly `0` today, not
+        # a placeholder.
+        orders_in_last_hour = self._events.count_events_since(
+            ExecutionEventType.SUBMISSION_STARTED, final_now - timedelta(hours=1)
+        )
 
         fresh_portfolio = policies.PortfolioState(
             account=observation.account_state,
@@ -361,12 +378,6 @@ class ExecutionOrchestrator:
             open_risk_fraction=self._config.risk.max_risk_per_trade
             * Decimal(len(observation.position_states)),
         )
-
-        # A fresh timestamp, taken immediately before FINAL Risk (review
-        # 1.22 F-058, part B) — ADR-001 requires intent expiry checked
-        # "against the clock at the final check", not the timestamp
-        # `run_once()` happened to take before iterating every capsule.
-        final_now = self._clock()
 
         final_risk = policies.revalidate_fixed_volume_at_execution_time(
             intent,
@@ -413,11 +424,15 @@ class ExecutionOrchestrator:
         # before `order_check` — never by mutating the sealed
         # `DecisionCapsule`. Carries the complete serialized FINAL
         # RiskDecision plus a fingerprint binding it to the exact
-        # `ApprovedOrder` it authorized (F-059's second binding).
+        # `ApprovedOrder` it authorized (F-059's second binding). Review
+        # 1.23 F-059: the fingerprint covers the *complete* serialized
+        # FINAL `RiskDecision`, not only its `decision_id` — the same
+        # "complete content, not a hand-picked field" fix as
+        # `_approval_chain_fingerprint`, for the same reason.
         order_fingerprint = fingerprint(
             {
                 "order_request_id": str(order_request_id),
-                "final_risk_decision_id": str(final_risk.decision_id),
+                "final_risk_decision": final_risk.model_dump(mode="json"),
                 "approved_order": order.model_dump(mode="json"),
             }
         )
@@ -513,9 +528,17 @@ def _approval_chain_fingerprint(capsule: DecisionCapsule) -> str:
     possible, since `decision_hash` is computed from `TradeIntent`'s own
     fields only) cannot silently collapse into "already claimed, harmless
     retry." This is that binding, used as `ExecutionRequestStore.claim()`'s
-    fingerprint. `capsule.provenance_fingerprint` is reused rather than
-    re-listing every version field it already binds (strategy/model/
-    feature/risk-config versions, `code_commit`, environment).
+    fingerprint.
+
+    Review 1.23 F-059 (reopened as "partly closed"): an earlier version of
+    this function hand-selected specific fields off `RiskDecision`/
+    `SupervisorDecision` — a list that silently stops covering a field the
+    moment it is added to either contract without this function being
+    updated too (`SupervisorDecision.uncalibrated_checks` named as the
+    concrete example: it "explicitly changes what a Supervisor approval
+    means" and was not in the original hand-picked list). Fingerprinting
+    each contract's *complete* serialized content instead means this
+    function never needs to change again as those contracts grow.
     """
     assert capsule.trade_intent is not None
     assert capsule.risk_decision is not None
@@ -523,18 +546,17 @@ def _approval_chain_fingerprint(capsule: DecisionCapsule) -> str:
     return fingerprint(
         {
             "provenance_fingerprint": capsule.provenance_fingerprint,
-            "decision_hash": capsule.trade_intent.decision_hash,
-            "risk_decision_id": str(capsule.risk_decision.decision_id),
-            "risk_verdict": capsule.risk_decision.verdict.value,
-            "risk_approved_volume": capsule.risk_decision.approved_volume,
-            "risk_config_version": capsule.risk_decision.risk_config_version,
-            "risk_reason_codes": [code.value for code in capsule.risk_decision.reason_codes],
-            "supervisor_decision_id": str(capsule.supervisor_decision.decision_id),
-            "supervisor_verdict": capsule.supervisor_decision.verdict.value,
-            "supervisor_policy_version": capsule.supervisor_decision.policy_version,
-            "supervisor_reason_codes": [
-                code.value for code in capsule.supervisor_decision.reason_codes
-            ],
+            # `TradeIntent.decision_hash` *is* that model's complete-content
+            # fingerprint (every field but `intent_id`, already used
+            # throughout this codebase as the canonical identity for "this
+            # intent's content") — reused rather than a second
+            # `model_dump(mode="json")` of the same model, which would also
+            # need to survive `TradeIntent.confidence` being a genuine
+            # `float` field (`_canonical()` rejects raw floats on purpose;
+            # `decision_hash` already handles this the same way via `repr()`).
+            "trade_intent_decision_hash": capsule.trade_intent.decision_hash,
+            "intent_risk_decision": capsule.risk_decision.model_dump(mode="json"),
+            "supervisor_decision": capsule.supervisor_decision.model_dump(mode="json"),
         }
     )
 

@@ -72,8 +72,8 @@ LIVE-CANARY
 ## Overall health
 
 ```text
-Engineering health:   AMBER   (lint/types/tests green locally, 877 passed/3
-                                explained skips as of 2026-08-26. CI ran for
+Engineering health:   AMBER   (lint/types/tests green locally, 939 passed/3
+                                explained skips as of 2026-08-27. CI ran for
                                 the first time 2026-08-26 and both platform
                                 jobs failed fast — root cause found and
                                 fixed the same day (F-056: an undeclared
@@ -139,7 +139,7 @@ itself requires, and what is local project policy on top of it.
 ### M0 acceptance — build.md §26
 
 - [x] clean install from scratch — `uv sync` from an empty environment
-- [ ] all tests run locally **and in CI** — 877 pass locally (2026-08-26).
+- [ ] all tests run locally **and in CI** — 939 pass locally (2026-08-27).
       **CI ran for the first time 2026-08-26 and both platform jobs
       failed**; root cause found and fixed the same day (F-056 — an
       undeclared `numpy` test dependency), fix pushed, **next run not yet
@@ -1089,7 +1089,9 @@ Next engineering steps once unblocked:
       fortieth entries. Review 1.23 (same day) reconfirmed F-057 CLOSED,
       accepted F-058/F-059 as real progress but PARTLY CLOSED (one narrow
       gap named in each), REOPENED F-060 (wrong durable authority used),
-      and opened F-061 (new, HIGH) — §13 forty-first entry. Phase 4 remains
+      and opened F-061 (new, HIGH) — §13 forty-first entry. That exact
+      four-item bundle was fixed the same day (§13 forty-second entry);
+      all four CLOSED, unreviewed pending review 1.24. Phase 4 remains
       NEAR-PASS, not yet formally passed.** Still open,
       deliberately out of this phase's scope: automatic flatten actually
       *submitting* a close (stays halt-only, ADR-004), the real F-049
@@ -6123,6 +6125,106 @@ Next:
 - Continue F-051 part 2 in parallel; await a human/`gh` check of the next
   hosted CI run; `domain_contracts.md` regeneration still needs a human
   reviewer; owner risk-policy decisions remain open.
+
+---
+
+## Update 2026-08-27 (forty-second entry) — F-058/F-059/F-060/F-061 fixed: review 1.23's exact next-bundle, built directly per user instruction
+
+Component: `application/execution.py`, `persistence/execution.py`, `mt5_gateway/execution.py`
+Milestone: Phase 4 — review 1.23's own "narrow hold, not another architecture cycle" bundle
+Status before: F-058/F-059 PARTLY CLOSED (one gap each), F-060 REOPENED, F-061 OPEN (forty-first entry)
+Status after: All four CLOSED/SHIPPED, unreviewed pending review 1.24. Built directly, no separate plan — the user's explicit instruction for this round, given the reviewer's own framing that this is narrow hardening, not a redesign
+
+Completed:
+- **F-058 (remaining sequencing gap):** `_process()` reordered so
+  `final_now = self._clock()` and `recover_session(...,
+  market_day=trading_day(final_now))` now run after spec lookup and the
+  fresh tick read, immediately before FINAL Risk — replacing the earlier
+  `run_once()`-level `now` `recover_session` previously received. The
+  must-halt refuse path's event/trip timestamp switched to `final_now` too.
+- **F-059 (complete-content fingerprint):** `_approval_chain_fingerprint()`
+  rewritten to fingerprint `provenance_fingerprint` +
+  `trade_intent.decision_hash` + `risk_decision.model_dump(mode="json")` +
+  `supervisor_decision.model_dump(mode="json")` — complete serialized
+  content, not a manually maintained field list. The post-FINAL-Risk event
+  payload now carries `final_risk_decision.model_dump(mode="json")` in
+  full, not just its id.
+- **F-060 (correct authority):** `ExecutionRequestStore.count_claimed_since()`
+  removed outright (confirmed no other callers). New
+  `ExecutionEventStore.count_events_since(event_type, since)` — a real
+  count against `execution_events`. `orders_in_last_hour` now sourced from
+  `count_events_since(ExecutionEventType.SUBMISSION_STARTED, final_now -
+  timedelta(hours=1))`, matching the reviewer's required authority exactly.
+- **F-061 (fail-closed guard):** `OrderCheckMt5Gateway.order_check()` now
+  checks `final_risk_decision_id is None` at the very start, before
+  building the MT5 request or touching the terminal, and raises a new
+  `MissingFinalRiskDecisionError`.
+- Updated `review/FEEDBACK.md`: all four rows moved to CLOSED with
+  evidence; "Unreviewed work" table row rewritten to reflect the built
+  state and gate/test evidence, pending review 1.24.
+
+Evidence:
+- tests: 3 new — `tests/integration/test_execution_orchestrator.py::
+  test_two_capsules_differing_only_in_uncalibrated_checks_fail_closed`
+  (F-059's required test: two capsules identical except
+  `SupervisorDecision.uncalibrated_checks` now conflict on the second
+  claim), `::test_session_recovery_uses_final_now_not_the_earlier_now`
+  (F-058: a `RiskSessionState` seeded for a later trading day is correctly
+  read as `same_session: true` once `recover_session` runs on `final_now`
+  — log confirms `market_day`/`recorded_day` both `2026-08-18`),
+  `tests/unit/test_mt5_execution_gateway.py::
+  test_an_order_with_no_final_risk_linkage_is_refused` (F-061). Plus
+  `tests/integration/test_execution_persistence.py::TestCountEventsSince`
+  (3, replacing the removed `TestCountClaimedSince`'s 3 — net neutral).
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — clean except the same two pre-existing,
+  unrelated findings as every prior round: `review/feedback.1.22.md` and
+  `review/feedback.1.23.md` (the reviewer's own documents, committed
+  verbatim, untouched by this entry's work) trip the markdown code-block
+  formatter. `uv run mypy` — success, no issues found in 135 source files.
+  `uv run pytest -q` (solo) — **939 passed, 3 skipped** (936 after the
+  fortieth entry, +3 net new, zero regressions).
+- Determinism: `uv run python scripts/run_replay.py --bars 600` run twice;
+  stdout hashed identically both times (stderr structured-log timestamps
+  differ between runs as expected; stdout — the deterministic replay
+  output — matched byte-for-byte).
+
+Problems found:
+- First attempt at F-059's fingerprint followed the reviewer's literal
+  suggested shape (`capsule.trade_intent.model_dump(mode="json")` inline)
+  and crashed: `TypeError: float cannot be fingerprinted deterministically;
+  use Decimal`, from `domain/hashing.py::_canonical()`. `TradeIntent.confidence`
+  is a genuine Python `float`, and `model_dump(mode="json")` leaves floats
+  as floats (unlike `Decimal`, which serializes to a string). Fixed by
+  reusing `capsule.trade_intent.decision_hash` — `TradeIntent`'s own
+  already-tested complete-content fingerprint, which handles `confidence`
+  safely via `repr()` internally — instead of re-dumping the model.
+  `RiskDecision`/`SupervisorDecision` have no float fields, so
+  `model_dump(mode="json")` is safe for those two.
+- F-058's regression test needed two rounds of tuning, not code changes:
+  the default test intent expires 10 minutes after `FIXED_NOW`, but the
+  test's `late` clock value is +10 hours — FINAL Risk correctly blocked on
+  `INTENT_EXPIRED` until the test was given a 24-hour-lived intent. After
+  that, the fake tick's hardcoded timestamp (`FIXED_NOW`) made FINAL Risk
+  correctly flag `STALE_MARKET_DATA` against the now-10-hours-later
+  `final_now`, until `max_market_data_age_ms` was widened in the test's
+  config to isolate the sequencing fix from this unrelated, correctly-firing
+  check. Both are test-construction fixes, not defects in the sequencing
+  fix itself — confirmed by the log line once both were resolved.
+
+Risk impact:
+- None reachable. `order_send` remains structurally unreachable through
+  every code path.
+
+Decision:
+- F-058/F-059/F-060/F-061 all fixed, same day as review 1.23. None of the
+  four has been seen by a reviewer yet. Not yet committed — pending the
+  usual per-turn approval.
+
+Next:
+- Await review 1.24. Continue F-051 part 2 in parallel; await a human/`gh`
+  check of the next hosted CI run; `domain_contracts.md` regeneration
+  still needs a human reviewer; owner risk-policy decisions remain open.
 
 ---
 
