@@ -5870,6 +5870,94 @@ Next:
 
 ---
 
+## Update 2026-08-27 (thirty-ninth entry) — review 1.22 processed: Phase 4 architecture ACCEPTED, four implementation findings opened (F-057…F-060)
+
+Component: Process (review intake), `review/FEEDBACK.md`
+Milestone: Phase 4 — architecture accepted, implementation not yet formally passed
+Status before: Phase 4 all five slices shipped (thirty-fourth through thirty-eighth entries), first source-based review not yet received
+Status after: Review 1.22 processed. Four new findings registered as OPEN (F-057 CRITICAL, F-058/F-059/F-060 HIGH, all "before M5"); a second supplementary source ZIP delivered same day
+
+Completed:
+- Read `feedback.1.22.md` in full — the first Phase-4 review based on the
+  actual source (`crumblr_phase4_review.zip`), not `status.md` alone.
+- Built and delivered a second ZIP (`crumblr_phase4_review_supplement.zip`,
+  15 files, same repo-relative folder structure) per §9's explicit request,
+  to let the reviewer verify F-058/F-059's exact mechanics and the
+  domain-contract Decimal/UTC claims directly: `application/broker_state.py`,
+  `application/reconciliation.py`, `application/recording.py`,
+  `persistence/broker_state.py`, `persistence/instrument_specs.py`,
+  `persistence/risk_session.py`, `persistence/journal.py`,
+  `mt5_gateway/readonly.py`, `risk/session.py`, `risk/kill_switch.py`,
+  `domain/money.py`, `domain/timeutils.py`, `domain/events.py`,
+  `evaluator/pretrade.py`, `tests/integration/test_migrations.py`.
+- Registered review 1.22 in `review/FEEDBACK.md`'s "Reviews received"
+  table; added four new finding rows (F-057/F-058/F-059/F-060, all OPEN);
+  rewrote the "Unreviewed work" section (heading now names
+  `feedback.1.23.md` as the next trigger) with each finding's required fix
+  summarized and its current status.
+
+Evidence:
+- No code changed this entry — process/documentation only. The review
+  itself independently re-verified (not merely accepted the developer's
+  claim) that `activation_watermark` appears nowhere in `config/base.yaml`,
+  `config/paper.yaml` or `config.py`, and that no reachable `order_send`
+  call site exists anywhere in the Phase-4 source — both confirmed by the
+  reviewer's own source grep, matching this session's own findings.
+
+Problems found (the review's own, now tracked as findings):
+- **F-057 (CRITICAL BEFORE M5):** FINAL Risk's `RiskDecision` is computed
+  in `ExecutionOrchestrator._process()` but never durably persisted or
+  linked — `ApprovedOrder.risk_decision_id` still points at the intent-time
+  decision (`prior_decision.decision_id`), not FINAL Risk's own. ADR-001
+  requires both decisions to be persisted; the durable record currently
+  cannot answer which exact FINAL `RiskDecision` authorized a given
+  `ApprovedOrder`.
+- **F-058 (HIGH BEFORE M5):** the fresh `adapter.account()`/`adapter.positions()`
+  read FINAL Risk judges and the separate `capture_broker_state()` read
+  reconciliation judges are two different live MT5 calls, not one coherent
+  observation (already self-documented as D-047's second gap). Compounding
+  this: `run_once()` takes one `now` before iterating capsules and reuses
+  it through the entire chain instead of a fresh timestamp immediately
+  before FINAL Risk, so intent expiry/session-boundary checks could
+  theoretically judge a stale moment if a broker call is slow.
+- **F-059 (HIGH BEFORE M5):** the execution-request fingerprint is only
+  `intent.decision_hash` — proves two different intents can't collide, but
+  not that two differently-approved executions of the *same* intent
+  (different intent-time `RiskDecision`/`SupervisorDecision` content)
+  can't silently read as a harmless retry instead of a conflict.
+- **F-060 (HIGH BEFORE M5):** `ExecutionOrchestrator` still hard-codes
+  `orders_in_last_hour=0` in the `PortfolioState` FINAL Risk evaluates —
+  acceptable under D-046 while no execution path existed; that exception
+  expires now that Phase 4 built one.
+
+Risk impact:
+- None reachable today — all four findings are about audit-trail
+  completeness and defense-in-depth at a boundary `order_send` still can't
+  reach (structurally disabled, unchanged). They matter before M5, not
+  before the next commit.
+
+Decision:
+- **Phase 4 architecture: ACCEPTED** (review 1.22 §14, unchanged from the
+  plan review's own acceptance). **Phase 4 implementation: GO WITH FIXES —
+  not yet formally passed.** Real-terminal `order_check` evidence
+  collection should wait for F-057/F-058 per the reviewer's own
+  instruction — "little value in collecting real evidence against a
+  preflight chain whose final approval evidence is not yet fully durable."
+  `order_send` remains NO-GO, unchanged. Not yet committed — pending the
+  usual per-turn approval once findings are triaged with the user.
+
+Next:
+- Fix F-057 through F-060 (see `review/FEEDBACK.md`'s finding rows for
+  each one's required-fix summary) — the reviewer's own explicit path back
+  to a formal Phase-4 PASS in review 1.23.
+- Continue F-051 part 2 in parallel — review 1.22 §11 explicitly does not
+  block it.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` regeneration waits for F-057; owner risk-policy
+  decisions remain open.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
