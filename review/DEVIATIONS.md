@@ -950,14 +950,44 @@ mean anything should start here.
 - **Also provisional, by design, not oversight:** `risk/submission_gate.py`
   is a design-only stub (F-049's full multi-gate is unbuilt); automatic
   flatten submission stays halt-only (ADR-004); the human-set
-  `activation_watermark` is `None` in every shipped config, so the whole
-  chain provably never reaches `order_check` today outside a test — see
-  `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s own "Later, vóór eerste
-  DEMO-order" list for the complete remaining checklist before
-  `feedback.2.0`.
+  `activation_watermark` is `None` in every shipped config, so the normal
+  live pipeline (`scripts/live_decision.py`) provably never reaches
+  `order_check` today outside a test or a deliberate one-off evidence run
+  — see `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`'s own "Later, vóór
+  eerste DEMO-order" list for the complete remaining checklist before
+  `feedback.2.0`. **Real-terminal `order_check` evidence was gathered
+  2026-08-27** (review 1.24 §8's authorized evidence run,
+  `scripts/run_execution_preflight_evidence.py`, `status.md` §13
+  forty-fifth entry) — a one-shot, explicitly-labeled evidence capsule,
+  not the normal live pipeline reaching it on its own; `order_send` stays
+  unreachable regardless.
 - **Gate affected:** none directly. `order_send` remains unreachable
   through every code path this or any prior Phase-4 slice added — a
   prerequisite for M5, not itself claiming to be M5.
+
+### D-048 — `DecisionCapsule.code_commit` is a hard-coded placeholder, not real code provenance
+- **Status:** PROVISIONAL — named explicitly by review 1.25 §6 as something
+  that should change before an agent-driven promotion, not urgent before
+  that
+- **Spec:** build.md §11/§25.2 — a sealed capsule should bind the exact
+  code that produced it, so a decision from six months ago can be
+  reproduced against the code, config and model that made it
+- **Original gap / current state:** `application/live_decision.py` and
+  `application/orchestration.py` both import a module-level constant,
+  `CODE_COMMIT = "uncommitted-prototype"`, and use it verbatim for every
+  sealed capsule's `code_commit` field. It has never once held a real git
+  SHA — every capsule sealed so far (including the evidence-only ones
+  from the real-terminal `order_check` run) carries this same literal
+  string, not the commit that was actually checked out when it ran.
+- **Remaining gap:** replace the constant with real deployment/code
+  provenance (e.g. the actual git SHA at build/deploy time) before any
+  agent-driven promotion — review 1.25's own framing, not an immediate
+  blocker for Milestone A (Crumblr Execution Proof)
+- **Watch for:** whatever mechanism replaces it must still work from a
+  plain `uv run` invocation on a developer machine (no CI-injected build
+  metadata to rely on there), not only from a packaged deployment
+- **Gate affected:** none directly today; named as a pre-Milestone-B
+  (Agent-Driven MVP) migration item, review 1.25 §6
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

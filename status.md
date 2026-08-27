@@ -8,20 +8,33 @@
 
 ## What's needed next — owner-only or otherwise blocked
 
-Phase 4 is formally passed (review 1.24, `feedback.1.24.md`) and real
-`order_check` evidence has been gathered against the live Pepperstone
-DEMO terminal (§13 forty-fifth entry). Nothing below needs more agent
-engineering by itself — each either needs you specifically, or needs a
-background process (re)started. Full context lives at each citation.
+Phase 4 is formally passed (review 1.24) and remains passed (review 1.25
+§0/§13); real `order_check` evidence has been gathered against the live
+Pepperstone DEMO terminal (§13 forty-fifth entry, does not need repeating
+— review 1.25 §8/§10). **Review 1.25 also changed how reviews get
+requested from here** — see the note right after this table. Nothing
+below needs more agent engineering by itself — each either needs you
+specifically, needs a background process (re)started, or needs a
+document you have that this repository doesn't yet.
 
 | # | What | Why it needs you | Where |
 |---|---|---|---|
 | 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment — the F-056 fix is pushed, but "local green" was never allowed to stand in for "hosted green." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; §2 M0 acceptance below |
 | 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
-| 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround | §3 APP-016 below; §13 forty-fifth entry |
-| 5 | Restart real M5 bar accumulation for F-051 part 2 | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first entry |
-| 6 | Green light for the next engineering phase | Review 1.24 §12.B: automatic flatten *submission*, the real F-049 `SubmissionGate`, durable execution-activation authority, `SUBMISSION_STARTED` emission at the correct pre-side-effect point, ambiguous-`order_send`-outcome recovery, post-fill reconciliation from durable platform history, broker-side SL verification, execution-event content-conflict hardening — all real work, all next, deliberately not started without you saying so | `feedback.1.24.md` §12 |
+| 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
+| 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
+| 6 | Supply `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md`, or point at where it lives | Review 1.25 cites this document as a reviewed input and several of its specific directions (Agent Gateway shape, `TradingAssignment`, `DecisionContextBundle`, `TradeProposal`, `SupervisorReview`) assume its contents — it is not in this repository. Needed before Milestone B (Agent-Driven MVP, review 1.25 §3) work can start against its actual shapes rather than the review's summary of them. Not needed for Milestone A (Crumblr Execution Proof), which continues unchanged | `review/FEEDBACK.md` unreviewed-work table |
+| 7 | Green light for the next engineering phase(s) | Two parallel tracks per review 1.25 §4/§12.B: **core** — `SubmissionGate`/F-049, durable execution-activation authority, `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening; **agent-integration** — external-agent ADR, Agent Gateway, agent identity/assignments, proposal ingress, external Supervisor boundary (blocked on item 6 above). Neither has been started — deliberately, per both review 1.24 and 1.25's "don't jump ahead" instruction | `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
+
+**Review cadence has changed (review 1.25 §9).** Don't request a formal
+reviewer artifact for documentation wording, one extra unit test, normal
+F-051 accumulation, routine refactors, minor dashboard work, or
+individual Agent Gateway files. Bring the reviewer back only for: (1) a
+material safety defect, (2) a proposed change to a Phase-4 invariant, or
+(3) the complete `feedback.2.0` readiness bundle (review 1.25 §10's
+checklist) — at which point the target is `feedback.2.0.md` directly, not
+another `feedback.1.2x.md`.
 
 ---
 
@@ -6647,6 +6660,91 @@ Next:
   needs to be (re)started against `crumblr_soak`, and
   `scripts/live_decision.py` needs to be running alongside it for a real
   decision to ever be produced from the accumulated bars.
+
+---
+
+## Update 2026-08-27 (forty-seventh entry) — review 1.25 processed: external-agent direction adopted, review cadence changed, Phase 4 stays passed
+
+Component: Process (review intake), `review/FEEDBACK.md`, `review/DEVIATIONS.md`, `status.md`
+Milestone: Product direction / working-methodology change
+Status before: Phase 4 formally PASSED (review 1.24); real `order_check` evidence gathered (forty-fifth entry); "What's needed next" table compiled (forty-sixth entry)
+Status after: Review 1.25 processed — GO on adopting an external-agent architecture direction as owner decision (O-007), Phase 4 reconfirmed PASSED and explicitly not reopened, two milestones defined (A: Crumblr Execution Proof, B: Agent-Driven MVP), and the review cadence itself changed: the next formal reviewer artifact is `feedback.2.0.md` directly, not a `feedback.1.26.md`/`.1.27.md` sequence, unless a material safety defect or a Phase-4-invariant change surfaces first
+
+Completed:
+- Read `feedback.1.25.md` in full — the user flagged in advance that the
+  working methodology around reviews and execution would change, and this
+  review is where that happens. Confirmed it cites two inputs neither of
+  which is in this repository: a `status(20260827-131638).md` snapshot
+  (matches this session's own "What's needed next" table from the prior
+  turn almost exactly, including the stalled-reader finding — clearly the
+  same artifact) and `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` (not present
+  here at all — recorded as a new open item, §13/table item 6).
+- Updated `review/FEEDBACK.md`:
+  - Registered review 1.25 in the "Reviews received" table with its full
+    verdict and content summary.
+  - Added **O-007** to the owner-decisions table: adopting the
+    external-agent architecture as product direction, with review 1.25's
+    two MVP clarifications (external Supervisor required-but-never-the-
+    safety-foundation; TP required at the future Agent Gateway, not by
+    tightening `TradeIntent`) recorded alongside it.
+  - No F-numbered findings to register — review 1.25 opened none; it is a
+    direction review, explicitly not a source audit ("no new broad
+    architecture cycle").
+  - Rewrote the "Unreviewed work" section: added a dedicated subsection
+    explaining the review-cadence change (review 1.25 §9's three trigger
+    conditions, next target `feedback.2.0.md`), reworded the heading away
+    from "`feedback.1.25.md` now triggered" (that pattern itself is what
+    changed), and updated each remaining open row to note where review
+    1.25 reinforced or sharpened it (F-051 part 2 especially — "use
+    `baseline_v1`, don't wait for 120").
+- Updated `review/DEVIATIONS.md`:
+  - D-047: fixed a claim that had gone stale the moment the forty-fifth
+    entry's evidence run succeeded — it previously said the chain
+    "provably never reaches `order_check` today outside a test," which
+    stopped being accurate once the real evidence run did exactly that.
+  - Added **D-048**: `DecisionCapsule.code_commit` has always been the
+    literal placeholder `CODE_COMMIT = "uncommitted-prototype"`
+    (`application/live_decision.py`, `application/orchestration.py`),
+    never a real git SHA — including on every capsule sealed by
+    yesterday's real-terminal evidence run. Named explicitly by review
+    1.25 §6 as something to fix before an agent-driven promotion, not an
+    immediate blocker.
+- Updated `status.md`'s "What's needed next" table: sharpened item 5
+  (explicit `baseline_v1`-first instruction), added item 6 (the missing
+  architecture guide), rewrote item 7 to reflect review 1.25 §4's
+  parallel core/agent-integration developer split rather than a single
+  undifferentiated "next phase," and added the review-cadence-change note
+  directly under the table so it isn't only in `review/FEEDBACK.md`.
+
+Evidence:
+- No code changed this entry — process/documentation only.
+
+Problems found:
+- None new. Confirmed (not re-litigated) that `order_send` remains
+  structurally unreachable and that Milestone A's critical path is
+  unchanged by this review — O-007 is additive product direction, not a
+  correction to existing work.
+
+Risk impact:
+- None. No code changed; the architecture direction explicitly preserves
+  the existing Phase-4 chain rather than modifying it.
+
+Decision:
+- External-agent architecture adopted as product direction (O-007). Phase
+  4 stays formally passed and is not reopened. Review cadence changes
+  from here — see the note above and the new `review/FEEDBACK.md`
+  section. Not yet committed — pending the usual per-turn approval.
+
+Next:
+- Ask the owner about `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` (add it to
+  the repo, or point at where it lives) and whether to restart
+  `mt5_live_reader.py`/`live_decision.py` now, per review 1.25 §8's
+  immediate critical path.
+- Do not start Milestone B (Agent Gateway / agent-integration) work
+  without the architecture guide and an explicit go-ahead — review 1.25
+  itself frames this as a second developer's parallel track, not
+  something to begin unprompted.
+- Continue everything already listed in the "What's needed next" table.
 
 ---
 
