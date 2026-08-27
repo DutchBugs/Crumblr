@@ -6228,6 +6228,89 @@ Next:
 
 ---
 
+## Update 2026-08-27 (forty-third entry) — review 1.24 bundle delivered: refreshed domain_contracts.md plus the six F-058/F-059/F-060/F-061 files
+
+Component: Process (reviewer package), `review/domain_contracts.md`
+Milestone: Phase 4 formal sign-off + M0 domain-contract review
+Status before: F-058/F-059/F-060/F-061 fixed and committed (`6bdb5b1`, forty-second entry); `domain_contracts.md` still described the pre-Phase-4 world (commit `f67f341`)
+Status after: `domain_contracts.md` rewritten to describe the actual current contracts at `6bdb5b1`; a review bundle assembled and delivered for review 1.24. No new engineering started
+
+Completed:
+- Rewrote `review/domain_contracts.md` end to end against the actual
+  source at `6bdb5b1` — read `domain/models.py`, `domain/enums.py`,
+  `domain/events.py`, `domain/hashing.py`, `application/execution.py`,
+  `persistence/execution.py`, `mt5_gateway/execution.py`,
+  `application/broker_state.py`, `application/orchestration.py`,
+  `mt5_gateway/simulated.py`, `risk/policies.py` and `ADR-001` directly
+  rather than relying on memory of what Phase 4 was supposed to do.
+  Documentation-only: nothing in `src/` or `tests/` was touched.
+- §2 and §4 changed materially: `ApprovedOrder`/`ExecutionResult` are no
+  longer described as "not yet constructed anywhere" — that claim was
+  already imprecise about the pre-existing replay/paper simulator
+  (`SimulatedBroker`, which has constructed both since before the prior
+  snapshot) and is now also wrong about the real path, since
+  `ExecutionOrchestrator` constructs `ApprovedOrder` too. §4 was rewritten
+  to describe the actual current execution-permission argument: exactly
+  two adapters can hold a real MT5 connection, only one real
+  broker-touching method exists anywhere (`OrderCheckMt5Gateway.order_check`),
+  and the append-only `execution_requests`/`execution_events` audit trail
+  (claim-once, `ExecutionRequestConflictError` on content mismatch,
+  `SUBMISSION_STARTED`-based frequency counting) is described in full,
+  since it is what the "no order can be sent" claim now structurally rests
+  on. §3/§5/§6/§7 updated to match; §1 unchanged (still accurate).
+- Assembled `crumblr_review_1_24_bundle.zip`: the six files review 1.23's
+  bundle touched (`application/execution.py`, `persistence/execution.py`,
+  `mt5_gateway/execution.py`, and their three test files), the refreshed
+  `review/domain_contracts.md`, a `diff_5be8624_to_6bdb5b1.patch` isolating
+  exactly the F-058/F-059/F-060/F-061 fix commit, and a `MANIFEST.txt`.
+  Repo-relative folder structure preserved; verified via
+  `System.IO.Compression.ZipFile` after building.
+- Updated `review/FEEDBACK.md`'s "Unreviewed work" table: the
+  domain-contract row now describes the actual refresh instead of pointing
+  at a stale document; a new row records the bundle delivery.
+
+Evidence:
+- No code changed this entry — process/documentation only. The quality
+  gate and test suite results this bundle cites are the ones already
+  recorded in the forty-second entry (939 passed, 3 skipped; ruff/mypy
+  clean; determinism confirmed) — not re-run, since nothing executable
+  changed.
+- Bundle contents verified by listing the zip's entries directly
+  (`System.IO.Compression.ZipFile::OpenRead`): 9 entries, repo-relative
+  paths intact, `MANIFEST.txt` and the patch file at the archive root,
+  everything else under `src/`, `tests/`, `review/` exactly as in the
+  repository.
+
+Problems found:
+- None in the code. One documentation gap found while researching: the
+  *previous* `domain_contracts.md` (f67f341) already understated
+  `ApprovedOrder`/`ExecutionResult` before Phase 4 existed — it called
+  them "not yet constructed anywhere," which was already false for the
+  replay/paper simulator. Not a code defect (the simulator's behaviour is
+  correct and intentional), but worth naming so this correction reads as
+  "the document was imprecise," not "the document went stale only once,
+  recently."
+
+Risk impact:
+- None. Documentation-only change; `order_send` remains structurally
+  unreachable, confirmed again while researching §4 (grepped `src/` for
+  every `.order_send(` call site: exactly one, `orchestration.py:491`,
+  reachable only through `SimulatedBroker`, which never holds an MT5
+  connection).
+
+Decision:
+- Bundle delivered for review 1.24. `domain_contracts.md`'s rewrite should
+  land in the repository too, not stay a delivery-only artifact, since it
+  is meant to become the current authoritative document — not yet
+  committed, pending the usual per-turn approval.
+
+Next:
+- Await review 1.24. Continue F-051 part 2 in parallel; await a human/`gh`
+  check of the next hosted CI run; owner risk-policy decisions remain
+  open.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
