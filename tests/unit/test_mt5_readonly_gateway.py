@@ -111,6 +111,12 @@ class FakeMt5:
     TIMEFRAME_H1 = 16385
     TIMEFRAME_H4 = 16388
     TIMEFRAME_D1 = 16408
+    TRADE_ACTION_DEAL = 1
+    ORDER_TYPE_BUY = 0
+    ORDER_TYPE_SELL = 1
+    ORDER_TIME_GTC = 0
+    ORDER_FILLING_IOC = 1
+    TRADE_RETCODE_DONE = 0
 
     def __init__(
         self,
@@ -180,6 +186,12 @@ class FakeMt5:
 
     def orders_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...] | None:
         return self._orders
+
+    def order_check(self, request: dict[str, Any]) -> Any:
+        """M1 never calls this — `ReadOnlyMt5Gateway.order_check` refuses
+        before reaching the module. Present only so this fake still
+        structurally satisfies `Mt5Module`."""
+        raise AssertionError("order_check must never be called through the M1 read-only gateway")
 
 
 FAKE_NOW = datetime.fromtimestamp(1_767_000_000, tz=UTC)

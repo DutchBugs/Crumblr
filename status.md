@@ -1076,7 +1076,11 @@ Next engineering steps once unblocked:
       `order_check`, ADR-001 execution-time risk revalidation, automatic
       intraday flatten, terminal/account execution guard (review 1.15 §12
       Phase 4 — the existing M5 checklist, now sequenced explicitly after
-      Phases 1-3 rather than in parallel with them).
+      Phases 1-3 rather than in parallel with them). **In progress
+      2026-08-27** — slice 1 done: `OrderCheckMt5Gateway` (real `order_check`,
+      `order_send`/`cancel_pending_orders`/`close_all_positions` still always
+      refused). ADR-001, the eligibility/gate checks, execution persistence
+      and the `ExecutionOrchestrator` remain — §13 thirty-fourth entry.
 - [ ] Phase 5 — owner policy: risk per trade, max daily loss/drawdown,
       last-entry cutoff, mandatory flatten deadline, production/demo
       HALT-reset authority — all still open (Q7/Q8, ADR-004 §3).
@@ -5359,6 +5363,108 @@ Next:
   last-entry cutoff, flatten deadline, HALT-reset authority) can now be
   decided in parallel per review 1.21 §13 — this requires the owner, not
   further agent action.
+
+---
+
+## Update 2026-08-27 (thirty-fourth entry) — Phase 4 slice 1: `OrderCheckMt5Gateway`, the order-check-capable/order-send-disabled MT5 adapter
+
+Component: `mt5_gateway/execution.py` (new), `mt5_gateway/port.py`, `mt5_gateway/client.py`
+Milestone: Phase 4 (non-sending execution engineering) — authorized by review 1.21 §11-12, plan reviewed and approved with eight corrections (`review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`)
+Status before: Phase 4 not started. `ReadOnlyMt5Gateway` refuses `order_check`/`order_send`/`cancel_pending_orders`/`close_all_positions` unconditionally (M1, by design).
+Status after: A second, separate `BrokerPort` implementation exists — `OrderCheckMt5Gateway` — that performs a real, live `order_check` call (MT5's server-side dry run: validates a request, creates no ticket, no exposure) while `order_send`/`cancel_pending_orders`/`close_all_positions` still always raise. `ReadOnlyMt5Gateway` itself is untouched (D-036: execution is a separate adapter, not a modification of the read-only one).
+
+Completed:
+- A first plan draft was reviewed directly and returned GO WITH TWEAKS
+  (`review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`, 2026-08-27): eight
+  corrections, all non-negotiable per the reviewer's own framing (FINAL Risk
+  never resizes; two separate gates, not one; `ApprovedOrder` built only
+  after FINAL Risk; immutable-request + append-only-events persistence;
+  claim before broker interaction; old shadow approvals never retroactively
+  executable; FINAL Risk uses a fresh synchronous observation; adapter
+  renamed `OrderCheckMt5Gateway`). The revised plan is saved and was
+  approved before any code was written.
+- Built slice 1 of that plan — the adapter itself, the smallest
+  independently-testable, independently-valuable piece and the one that is
+  literally the boundary keeping `order_send` unreachable:
+  - `mt5_gateway/port.py`: added `ExecutionDisabledError`.
+  - `mt5_gateway/client.py`: extended the `Mt5Module` Protocol with
+    `order_check` and the request-parameter constants it needs
+    (`TRADE_ACTION_DEAL`, `ORDER_TYPE_BUY`, `ORDER_TYPE_SELL`,
+    `ORDER_TIME_GTC`, `ORDER_FILLING_IOC`, `TRADE_RETCODE_DONE`) — read from
+    the real module by name at call time (D-037 discipline), never
+    hardcoded as integers.
+  - `mt5_gateway/execution.py` (new): `OrderCheckMt5Gateway`. Delegates
+    `account()`/`instrument()`/`positions()`/`terminal_health()` to an
+    internally held `ReadOnlyMt5Gateway` (composition, not duplication).
+    `order_check()` builds a real MT5 request from an `ApprovedOrder` and
+    calls `module.order_check(...)`. `order_send`/`cancel_pending_orders`/
+    `close_all_positions` always raise `ExecutionDisabledError`,
+    unconditionally — no config flag is read inside any of those three
+    methods, so there is no runtime toggle anywhere in this class that could
+    switch them on.
+  - Updated the three existing fake-terminal test doubles
+    (`test_mt5_readonly_gateway.py::FakeMt5`, `test_mt5_probe.py::FakeMt5`,
+    `test_live_reader.py::ScriptedMt5`) to still structurally satisfy the
+    widened `Mt5Module` Protocol — each gained the new constants and an
+    `order_check` that raises `AssertionError` if ever called, since none of
+    those three call sites should ever reach it.
+
+Evidence:
+- tests: new `tests/unit/test_mt5_execution_gateway.py` — 10 tests: a real
+  `order_check` call reaches the fake module with the correct request shape
+  for BUY and SELL; a rejected check decodes as `accepted=False` with the
+  broker's retcode/comment; a missing response raises
+  `Mt5CallFailedError` naming the terminal's own reason; `order_send` is
+  hard-asserted never called by `order_check`; `order_send`/
+  `cancel_pending_orders`/`close_all_positions` all raise
+  `ExecutionDisabledError` even given a well-formed order; reads
+  (`account()`, `terminal_health()`) delegate correctly to the read-only
+  gateway.
+- Full quality gate, run twice (targeted, then whole repo):
+  `uv run ruff check .` — all checks passed. `uv run ruff format --check .`
+  — 167 files already formatted (1 file auto-formatted during development).
+  `uv run mypy` — success, no issues found in 127 source files.
+  `uv run pytest -q` — **887 passed, 3 skipped** (877 passed/3 skipped
+  before this change, per the thirty-second entry's F-056 evidence; +10 is
+  exactly the new test file, zero regressions elsewhere).
+
+Problems found:
+- None. The Protocol-widening fallout (three unrelated fake terminals no
+  longer structurally satisfying `Mt5Module`) was caught immediately by
+  `mypy --strict` on the first full-repo run, not by a later test failure —
+  exactly what the strict gate exists to catch.
+
+Risk impact:
+- None reachable. `OrderCheckMt5Gateway` is not wired into any running
+  process yet — nothing in `scripts/` constructs it. `order_send` remains
+  unreachable through every existing code path, unchanged from before this
+  slice; this slice adds a class that performs a real (but non-mutating)
+  `order_check` and is not yet called from anywhere live.
+
+Decision:
+- Slice 1 of the reviewed, revised Phase 4 plan is complete and gate-clean.
+  Not yet committed — pending the usual per-turn approval. The remaining
+  plan items (FINAL Risk revalidation with same-volume-or-BLOCK semantics;
+  the two-gate split; the eligibility/activation-watermark check; the fresh
+  synchronous observation + persisted snapshot + reconciliation step;
+  immutable-request + append-only-event persistence with atomic claim; the
+  `ExecutionOrchestrator` that assembles all of it) remain to be built as
+  further slices — deliberately not attempted in one pass, consistent with
+  this project's standing rule against half-finished implementations.
+
+Next:
+- Continue Phase 4 with the next slice of the approved, revised plan
+  (`review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` and the plan file it
+  produced), most naturally FINAL Risk's same-volume-or-BLOCK revalidation
+  in `risk/policies.py` next, since the eligibility/gate/persistence/
+  orchestrator pieces all consume its output.
+- Continue monitoring for `ict_v1`'s 120-bar threshold (real M5 bars stood
+  at 82 as of this session, past `baseline_v1`'s 65 but short of `ict_v1`'s
+  120) and run the `baseline_v1` wiring-proof for F-051 part 2 once
+  convenient.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` still needs a human reviewer; owner risk-policy
+  decisions remain open per review 1.21 §13.
 
 ---
 

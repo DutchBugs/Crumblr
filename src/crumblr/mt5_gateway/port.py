@@ -23,6 +23,17 @@ from crumblr.domain.models import (
 )
 
 
+class ExecutionDisabledError(RuntimeError):
+    """Something asked an execution-capable gateway to submit, cancel or close.
+
+    Raised unconditionally by every `BrokerPort` implementation that can
+    perform a real `order_check` but must not reach `order_send` yet (Phase
+    4 — non-sending execution engineering). `order_send` stays technically
+    impossible until a future, separate, human-approved `SubmissionGate`
+    exists — see ADR-001 and `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`.
+    """
+
+
 class BrokerPort(Protocol):
     """Broker operations the platform depends on."""
 

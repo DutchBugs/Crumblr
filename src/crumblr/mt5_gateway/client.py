@@ -45,6 +45,11 @@ class Mt5Module(Protocol):
     def copy_ticks_from(self, *args: Any, **kwargs: Any) -> Any: ...
     def positions_get(self, *args: Any, **kwargs: Any) -> tuple[Any, ...] | None: ...
     def orders_get(self, *args: Any, **kwargs: Any) -> tuple[Any, ...] | None: ...
+    # Server-side dry run: validates a request without creating a ticket or
+    # any market exposure. Phase 4 (`mt5_gateway/execution.py`) is the only
+    # caller — `order_send` is not part of this protocol, deliberately, so
+    # there is nothing here for a future caller to reach for by accident.
+    def order_check(self, request: dict[str, Any]) -> Any: ...
 
     # Request-parameter constants for copy_ticks_from / copy_rates_from_pos.
     # Declared here rather than hardcoded at the call site: these are read off
@@ -59,6 +64,14 @@ class Mt5Module(Protocol):
     TIMEFRAME_H1: int
     TIMEFRAME_H4: int
     TIMEFRAME_D1: int
+
+    # order_check request-parameter constants (Phase 4).
+    TRADE_ACTION_DEAL: int
+    ORDER_TYPE_BUY: int
+    ORDER_TYPE_SELL: int
+    ORDER_TIME_GTC: int
+    ORDER_FILLING_IOC: int
+    TRADE_RETCODE_DONE: int
 
 
 class Mt5UnavailableError(RuntimeError):
