@@ -1,10 +1,29 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.7  
-**Last updated:** 2026-08-26  
+**Status document version:** 1.8  
+**Last updated:** 2026-08-27  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
+
+## What's needed next — owner-only or otherwise blocked
+
+Phase 4 is formally passed (review 1.24, `feedback.1.24.md`) and real
+`order_check` evidence has been gathered against the live Pepperstone
+DEMO terminal (§13 forty-fifth entry). Nothing below needs more agent
+engineering by itself — each either needs you specifically, or needs a
+background process (re)started. Full context lives at each citation.
+
+| # | What | Why it needs you | Where |
+|---|---|---|---|
+| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment — the F-056 fix is pushed, but "local green" was never allowed to stand in for "hosted green." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; §2 M0 acceptance below |
+| 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
+| 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
+| 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround | §3 APP-016 below; §13 forty-fifth entry |
+| 5 | Restart real M5 bar accumulation for F-051 part 2 | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first entry |
+| 6 | Green light for the next engineering phase | Review 1.24 §12.B: automatic flatten *submission*, the real F-049 `SubmissionGate`, durable execution-activation authority, `SUBMISSION_STARTED` emission at the correct pre-side-effect point, ambiguous-`order_send`-outcome recovery, post-fill reconciliation from durable platform history, broker-side SL verification, execution-event content-conflict hardening — all real work, all next, deliberately not started without you saying so | `feedback.1.24.md` §12 |
+
+---
 
 ## For the reviewer
 
@@ -6565,6 +6584,69 @@ Next:
 - Do not re-run the evidence script again proactively — one honest,
   complete real-terminal `order_check` result is now on record; further
   runs are a fresh decision, not routine.
+
+---
+
+## Update 2026-08-27 (forty-sixth entry) — consolidated "what's needed next" for the owner; found real bar accumulation has stalled
+
+Component: `status.md` (documentation only)
+Milestone: Process — making the current blocked-on-owner items legible in one place
+Status before: Owner-facing open items scattered across §2, §11, §12, `review/FEEDBACK.md`'s unreviewed-work table and several §13 entries — each individually accurate, nowhere consolidated
+Status after: A single "What's needed next" table added directly under the document header, ahead of §1, listing exactly what's blocked on the owner or on a background process, with citations. Also found and recorded: real M5 bar accumulation for F-051 part 2 has stalled
+
+Completed:
+- Added the consolidated table (six items: CI confirmation, owner risk-
+  policy decisions, optional domain-contract countersign, the AlgoTrading
+  enablement decision, restarting bar accumulation, and the go-ahead for
+  review 1.24 §12.B's next engineering phase) — requested directly by the
+  user ("zet alles wat je nog nodig hebt in de status.md").
+- While compiling item 5, queried `crumblr_soak` (read-only) rather than
+  relying on the last recorded count: **82 real M5 bars now exist**
+  (up from 49 at the last check, 2026-08-26), but the latest bar's
+  `received_time_utc` is **2026-08-27 06:20 UTC** — roughly seven hours
+  stale at the time of this check (13:06 UTC) — so `mt5_live_reader.py`
+  is not currently running against this database, or has stopped.
+  `baseline_v1`'s 65-bar threshold is already cleared; `ict_v1` still
+  needs 120. Also checked `decision_capsules`: only the three evidence-
+  only capsules from the forty-fifth entry's real-terminal run exist —
+  no real Trading-Agent-produced capsule has ever been sealed, meaning
+  `scripts/live_decision.py` has also never run against this data for
+  long enough to produce one (or has never been started against it at
+  all). Both facts are now recorded in the new table rather than only
+  living in a query result.
+- Bumped the document header's version (1.7 → 1.8) and last-updated date
+  (2026-08-26 → 2026-08-27), both of which had drifted behind a full
+  day's worth of review 1.24 processing and the real-terminal evidence
+  run.
+
+Evidence:
+- No code changed. The bar-count/capsule-count claims above are from
+  direct, read-only SQL queries against `crumblr_soak` run in this
+  session (not inferred from an older log line).
+
+Problems found:
+- Real M5 bar accumulation had silently stalled — nothing alerted to
+  this; it was only found by directly querying the database while
+  compiling this list. Worth the owner's attention specifically because
+  F-051 part 2 cannot progress at all while it stays stopped.
+
+Risk impact:
+- None. Purely an accumulation-of-evidence gap, not a safety-relevant
+  one — the kill switch in `crumblr_soak` is `HALTED` (forty-fifth
+  entry), consistent with `mt5_live_reader.py` (read-only) not requiring
+  it to be `RUNNING` in the first place.
+
+Decision:
+- No code/engineering decision. Not yet committed — pending the usual
+  per-turn approval.
+
+Next:
+- Owner to work through the six items in the new table at the top of
+  this document.
+- If bar accumulation is meant to continue, `scripts/mt5_live_reader.py`
+  needs to be (re)started against `crumblr_soak`, and
+  `scripts/live_decision.py` needs to be running alongside it for a real
+  decision to ever be produced from the accumulated bars.
 
 ---
 
