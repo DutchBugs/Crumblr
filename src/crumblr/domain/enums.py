@@ -201,6 +201,17 @@ class ReasonCode(StrEnum):
     MT5_CONNECTION_FAILURE = "MT5_CONNECTION_FAILURE"
     CORRUPTED_VERSION_REFERENCE = "CORRUPTED_VERSION_REFERENCE"
 
+    # Phase 4 — ADR-001 execution-time (FINAL) risk revalidation.
+    EXECUTION_TIME_RISK_BLOCK = "EXECUTION_TIME_RISK_BLOCK"
+    """Appended alongside the specific reason(s) whenever FINAL Risk refuses
+    an already intent-time-approved order (`risk/policies.py::
+    revalidate_fixed_volume_at_execution_time`). Never the only reason: it
+    marks *when* the refusal happened, not *why* — an operator seeing
+    `RISK_PER_TRADE_LIMIT` alone cannot tell an intent-time BLOCK from a
+    final-gate one, and the two point at different questions (a strategy
+    that over-asks, versus market conditions that moved between decision
+    and execution)."""
+
     # Operator action.
     MANUAL_HALT = "MANUAL_HALT"
 

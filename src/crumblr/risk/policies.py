@@ -259,6 +259,119 @@ def evaluate(
     )
 
 
+def revalidate_fixed_volume_at_execution_time(
+    intent: TradeIntent,
+    prior_decision: RiskDecision,
+    fresh_snapshot: MarketSnapshot,
+    spec: InstrumentSpec,
+    fresh_portfolio: PortfolioState,
+    context: RiskContext,
+    kill_switch: KillSwitch,
+    *,
+    now: UtcDatetime,
+) -> RiskDecision:
+    """ADR-001 — the FINAL, execution-time risk check, immediately before
+    `order_check`/`order_send`.
+
+    Reuses `evaluate()` verbatim for every check it already performs against
+    freshly observed inputs — system/account state, market data quality and
+    spread, session window, intent expiry, exposure, order frequency, and
+    loss gates — rather than reimplementing any of them (ADR-001's own
+    requirement). `evaluate()`'s sizing decision is used only as a safety
+    *ceiling* below; it is never adopted as the answer.
+
+    **This function never resizes.** The outcome is always exactly one of:
+    PASS with `prior_decision.approved_volume` unchanged, or BLOCK/HALT
+    (`review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` point 1). A fresh
+    evaluation that would size a *smaller* volume than the one already
+    approved is exactly the situation this function must refuse into, not
+    silently shrink into.
+
+    `evaluate()` derives stop distance from `intent.reference_price`, which
+    is intent-time and may now be stale. This function prices the stop
+    against the current executable side of the book instead (point 7): a BUY
+    fills at the ask, a SELL at the bid.
+
+    **Caller responsibility.** `fresh_portfolio.seen_decision_hashes` must
+    exclude `intent.decision_hash` itself — this call is deliberately
+    re-evaluating the one decision that hash already names, not treating it
+    as a duplicate of itself. `prior_decision` must be a `PASS`.
+    """
+    assert prior_decision.verdict is RiskVerdict.PASS
+    assert prior_decision.approved_volume is not None
+    assert intent.stop_loss_price is not None  # guaranteed for a PASSed directional intent
+
+    fresh = evaluate(intent, fresh_snapshot, spec, fresh_portfolio, context, kill_switch, now=now)
+
+    executable_price = fresh_snapshot.ask if intent.side is Side.BUY else fresh_snapshot.bid
+    fresh_stop_distance = abs(executable_price - intent.stop_loss_price)
+    fresh_stop_distance_points = price_to_points(fresh_stop_distance, spec.point)
+
+    execution_time_reasons: list[ReasonCode] = []
+    if (
+        fresh_stop_distance <= ZERO
+        or fresh_stop_distance_points < context.risk.min_stop_distance_points
+    ):
+        execution_time_reasons.append(ReasonCode.INVALID_STOP)
+    elif fresh_stop_distance_points < spec.stops_level:
+        execution_time_reasons.append(ReasonCode.STOP_DISTANCE_VIOLATION)
+
+    if fresh.verdict is not RiskVerdict.PASS or execution_time_reasons:
+        reasons = [
+            *fresh.reason_codes,
+            *execution_time_reasons,
+            ReasonCode.EXECUTION_TIME_RISK_BLOCK,
+        ]
+        return _refuse_at_execution_time(intent, reasons, context, now)
+
+    assert fresh.risk_amount is not None
+    carried = realised_risk(prior_decision.approved_volume, fresh_stop_distance, spec)
+    if carried > fresh.risk_amount:
+        # The fixed volume now carries more risk than a fresh sizing would
+        # currently allow (equity dropped, the executable price moved
+        # against the stop, or both). Refuse — never resize into a smaller
+        # volume.
+        return _refuse_at_execution_time(
+            intent,
+            [ReasonCode.RISK_PER_TRADE_LIMIT, ReasonCode.EXECUTION_TIME_RISK_BLOCK],
+            context,
+            now,
+        )
+
+    return RiskDecision(
+        decision_id=_decision_id(intent, "execution-pass"),
+        intent_id=intent.intent_id,
+        verdict=RiskVerdict.PASS,
+        reason_codes=(),
+        decided_at_utc=now,
+        risk_config_version=context.risk_config_version,
+        approved_volume=prior_decision.approved_volume,
+        account_equity=fresh_portfolio.account.equity,
+        stop_distance_points=fresh_stop_distance_points,
+        risk_amount=carried,
+    )
+
+
+def _refuse_at_execution_time(
+    intent: TradeIntent,
+    reasons: list[ReasonCode],
+    context: RiskContext,
+    now: UtcDatetime,
+) -> RiskDecision:
+    """`_refuse()`, with a `decision_id` distinct from an intent-time refusal.
+
+    `_decision_id` is derived from `decision_hash` plus a discriminator; an
+    intent-time BLOCK and an execution-time BLOCK for the same intent would
+    otherwise collide on the same id, which would look like the same
+    decision recorded twice rather than two different judgements made at two
+    different times.
+    """
+    decision = _refuse(intent, reasons, context, now)
+    return decision.model_copy(
+        update={"decision_id": _decision_id(intent, f"execution-{decision.verdict.value}")}
+    )
+
+
 def _overnight_breach(
     positions: tuple[PositionState, ...], moment: UtcDatetime, policy: IntradayPolicy
 ) -> bool:

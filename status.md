@@ -5468,6 +5468,100 @@ Next:
 
 ---
 
+## Update 2026-08-27 (thirty-fifth entry) — Phase 4 slice 2: ADR-001's FINAL execution-time risk revalidation, `risk/policies.py`
+
+Component: `risk/policies.py`, `domain/enums.py`, `review/adr/ADR-001-execution-time-risk-revalidation.md`
+Milestone: Phase 4 (non-sending execution engineering), continuing slice 1 (thirty-fourth entry). ADR-001, ACCEPTED 2026-08-17, "required before M5" — ADR-001's own algorithm now built, tested against its own required-test list, and reused (not duplicated) exactly as its Implementation Notes require.
+Status before: ADR-001 accepted but not implemented. `risk/policies.py` had one entry point, `evaluate()`, used only at intent time.
+Status after: `revalidate_fixed_volume_at_execution_time()` exists, reuses `evaluate()` for every check it already performs, and adds the two things ADR-001 requires on top: repricing the stop against the current executable side of the book (BUY→ask, SELL→bid) instead of the intent's stale reference price, and refusing — never resizing — when the fixed, already-approved volume no longer fits the freshly computed budget.
+
+Completed:
+- Added `ReasonCode.EXECUTION_TIME_RISK_BLOCK` (`domain/enums.py`) — appended
+  alongside the specific reason(s) whenever FINAL Risk refuses, so an
+  operator can tell a final-gate refusal from an intent-time one.
+- Added `risk/policies.py::revalidate_fixed_volume_at_execution_time()` and
+  its `_refuse_at_execution_time()` helper (gives an execution-time refusal
+  its own `decision_id`, distinct from the intent-time one for the same
+  intent, so the two never collide when both get persisted).
+- Design follows `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` point 1
+  exactly: **same volume, or BLOCK — never resize.** A fresh evaluation that
+  would size a *smaller* volume than the one already approved is refused
+  into, not silently shrunk into.
+- Updated `review/adr/ADR-001-execution-time-risk-revalidation.md`'s status:
+  algorithm implemented, evidence pointer added, explicitly **not yet
+  wired into a live orchestrator** — the ADR stays open until the fresh
+  observation → persisted snapshot → reconciliation → this check →
+  `ApprovedOrder` → `order_check` chain exists end to end (later slices of
+  the same plan).
+
+Evidence:
+- tests: `tests/unit/test_risk_engine.py::TestExecutionTimeRevalidation` —
+  14 new tests, including one `test_adr001_N_*` per applicable item of
+  ADR-001's own eight-item "Required tests before M5" list (7 of 8 apply
+  directly to this function; item 5, symbol-spec changes, is the caller's
+  reconciliation step's responsibility, not this function's — documented
+  as such in the ADR). Covers: unchanged volume on a clean revalidation;
+  BUY and SELL BLOCKed when the executable price moves away from the stop
+  (mirror cases); a favourable move keeps the volume unchanged rather than
+  growing it; a widened spread BLOCKs; an equity drop refuses rather than
+  resizing down; an intent that expired since approval BLOCKs; a kill
+  switch tripped since approval is refused; a property test that the
+  outcome is always exactly `None` or the originally approved volume across
+  four varied scenarios; and that an execution-time refusal's `decision_id`
+  never collides with an intent-time one for the same intent.
+- Full quality gate: `uv run ruff check .` — all checks passed.
+  `uv run ruff format --check .` — 167 files already formatted.
+  `uv run mypy` — success, no issues found in 127 source files.
+  `uv run pytest tests/unit/test_risk_engine.py -v` — 51 passed (37 existing
+  + 14 new), zero regressions. Full-repo `uv run pytest -q` — **901 passed,
+  3 skipped** (887 passed/3 skipped after slice 1, +14 is exactly this
+  slice's new tests, zero regressions). A first full-suite attempt run
+  concurrently with a second one (both launched against the real Postgres
+  integration test database at nearly the same time, a self-inflicted
+  mistake) produced two different spurious schema-race failures
+  (`DROP TABLE` on an already-dropped table, an unrelated subprocess
+  assertion) — not real regressions, confirmed by a clean solo rerun.
+
+Problems found:
+- Two test-authoring mistakes, caught and fixed before this entry: (1) an
+  initial "clean, nothing changed" test used `make_snapshot`'s default ask
+  (1.08512), which differs from the intent's reference price (1.08500) by
+  design (realistic spread) — correctly BLOCKed rather than passing, which
+  is the function working as intended, not a bug; fixed by pricing the test
+  snapshot's ask to exactly match the reference price to isolate a genuinely
+  unchanged scenario. (2) a kill-switch test assumed `SYSTEM_HALTED` alone
+  escalates `evaluate()`'s verdict to HALT; it does not — `SYSTEM_HALTED` is
+  not a member of `HALT_REASONS`, since the halt already happened when the
+  kill switch was tripped, and `evaluate()` enforces it as an ordinary BLOCK
+  rather than re-declaring a HALT that add nothing new. Fixed the test's
+  expectation to match this existing, correct `evaluate()` convention rather
+  than changing the convention.
+
+Risk impact:
+- None reachable. `revalidate_fixed_volume_at_execution_time` is not called
+  from anywhere live yet — no orchestrator constructs it. Pure addition to
+  `risk/policies.py`; `evaluate()` itself is untouched.
+
+Decision:
+- Slice 2 of the reviewed, revised Phase 4 plan is complete and gate-clean,
+  full suite confirmed green solo. Not yet committed — pending the usual
+  per-turn approval.
+
+Next:
+- Continue Phase 4 with the remaining plan items: the execution
+  eligibility/activation-watermark check, the two-gate split
+  (`ExecutionPreflightGate` now, `SubmissionGate` design-stub), the fresh
+  synchronous observation + persisted snapshot + reconciliation step, the
+  immutable-request + append-only-event persistence with atomic claim, and
+  the `ExecutionOrchestrator` that assembles all of it.
+- Continue monitoring for `ict_v1`'s 120-bar threshold and run the
+  `baseline_v1` wiring-proof for F-051 part 2 once convenient.
+- Await a human/`gh` check of the next hosted CI run (F-056 gate);
+  `domain_contracts.md` still needs a human reviewer; owner risk-policy
+  decisions remain open per review 1.21 §13.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

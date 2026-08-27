@@ -488,3 +488,356 @@ class TestTheAccountGuardChecksWhatItWasTold:
         assert guard.expected_login is None, (
             "an account identity belongs in the secret store, not in config"
         )
+
+
+class TestExecutionTimeRevalidation:
+    """ADR-001's FINAL Risk check (Phase 4): same volume, or BLOCK. Never resize."""
+
+    def test_a_clean_revalidation_passes_with_the_unchanged_volume(self) -> None:
+        """Nothing moved: the fresh executable ask matches the intent's own
+
+        reference price exactly, so the fresh stop distance and the
+        intent-time one agree and the same volume is still affordable.
+        """
+        prior_decision = evaluate()
+        assert prior_decision.verdict is RiskVerdict.PASS
+        assert prior_decision.approved_volume is not None
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08488"), ask=Decimal("1.08500")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.approved_volume == prior_decision.approved_volume
+        assert result.reason_codes == ()
+
+    def test_a_meaningfully_wider_executable_price_refuses_rather_than_absorbing_it(self) -> None:
+        """The ask sits far enough beyond the intent-time reference price
+
+        that the true (executable-price) stop distance no longer fits the
+        original budget at the fixed volume. Even though this is "only" a
+        market-data difference, not an equity drop, the outcome is the same:
+        refuse, never silently absorb the extra risk into the same volume.
+        """
+        prior_decision = evaluate()
+        assert prior_decision.approved_volume is not None
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08560"), ask=Decimal("1.08575")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.RISK_PER_TRADE_LIMIT in result.reason_codes
+        assert result.approved_volume is None
+
+    def test_a_fresh_condition_that_would_block_intent_time_also_blocks_here(self) -> None:
+        """A HALT-worthy account mismatch surfaces here exactly as it would at intent time."""
+        prior_decision = evaluate()
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(account=make_account_state(equity=EQUITY, balance=EQUITY, server="wrong")),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.HALT
+        assert ReasonCode.WRONG_ACCOUNT in result.reason_codes
+        assert ReasonCode.EXECUTION_TIME_RISK_BLOCK in result.reason_codes
+        assert result.approved_volume is None
+
+    def test_a_shrunk_equity_refuses_rather_than_resizing_down(self) -> None:
+        """The fixed volume now costs more of a smaller equity than the budget
+
+        allows. A fresh sizing would happily approve a *smaller* volume —
+        FINAL Risk must not adopt it; it must BLOCK instead
+        (review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md point 1).
+        """
+        prior_decision = evaluate()
+        assert prior_decision.approved_volume is not None
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(
+                account=make_account_state(
+                    equity=EQUITY / 2, balance=EQUITY / 2, server="DemoBroker-Demo"
+                )
+            ),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.RISK_PER_TRADE_LIMIT in result.reason_codes
+        assert ReasonCode.EXECUTION_TIME_RISK_BLOCK in result.reason_codes
+        assert result.approved_volume is None, "a refusal must never carry a smaller volume"
+
+    def test_the_stop_is_priced_from_the_executable_side_not_the_stale_reference_price(
+        self,
+    ) -> None:
+        """The market moved toward the stop since the intent was decided.
+
+        `intent.reference_price` (1.08500) is still comfortably far from the
+        stop (1.08000). The current ask (1.08010) is not. Only checking the
+        fresh executable price catches this.
+        """
+        prior_decision = evaluate()
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.07998"), ask=Decimal("1.08010")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.INVALID_STOP in result.reason_codes
+        assert ReasonCode.EXECUTION_TIME_RISK_BLOCK in result.reason_codes
+
+    def test_a_sell_is_priced_from_the_bid(self) -> None:
+        intent = healthy_intent(
+            side=Side.SELL,
+            reference_price=Decimal("1.08500"),
+            stop_loss_price=Decimal("1.09000"),
+            take_profit_price=Decimal("1.08000"),
+        )
+        prior_decision = policies.evaluate(
+            intent,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert prior_decision.verdict is RiskVerdict.PASS
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        # bid=1.08500 (make_snapshot default) vs stop 1.09000 -> 500 points.
+        assert result.stop_distance_points == 500
+
+    def test_execution_time_block_never_collides_with_the_intent_time_decision_id(self) -> None:
+        prior_decision = evaluate()
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(account=make_account_state(equity=EQUITY, balance=EQUITY, server="wrong")),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        blocked_intent_time = policies._refuse(
+            healthy_intent(), [ReasonCode.WRONG_ACCOUNT], context(), FIXED_NOW
+        )
+        assert result.decision_id != blocked_intent_time.decision_id
+
+    # -- ADR-001 "Required tests before M5" -------------------------------- #
+    # Not all eight apply to this function directly (#5, symbol-spec change,
+    # is the caller's reconciliation step's job — FINAL Risk runs only after
+    # reconciliation MATCHED in the target Phase-4 flow). The rest are
+    # covered here explicitly, even though several are also exercised
+    # indirectly by reusing `evaluate()`: the ADR names them as the
+    # behaviour that must hold for *this* function, not only for `evaluate`.
+
+    def test_adr001_1_a_buy_whose_ask_moved_away_from_the_stop_blocks(self) -> None:
+        prior_decision = evaluate()
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08560"), ask=Decimal("1.08575")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert result.verdict is RiskVerdict.BLOCK
+
+    def test_adr001_2_a_sell_whose_bid_moved_away_from_the_stop_blocks(self) -> None:
+        # Stop above entry, as build.md requires for SELL: 500 points away at
+        # intent time, exactly mirroring the BUY case above.
+        intent = healthy_intent(
+            side=Side.SELL,
+            reference_price=Decimal("1.08500"),
+            stop_loss_price=Decimal("1.09000"),
+            take_profit_price=Decimal("1.08000"),
+        )
+        prior_decision = policies.evaluate(
+            intent,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08500"), ask=Decimal("1.08512")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert prior_decision.verdict is RiskVerdict.PASS
+
+        # The bid (where a SELL fills) has drifted down — a worse fill for a
+        # SELL, and it widens the distance to the stop above (500 -> 575
+        # points, the same magnitude as the BUY/ask case above).
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08425"), ask=Decimal("1.08437")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert result.verdict is RiskVerdict.BLOCK
+
+    def test_adr001_3_a_favourable_move_keeps_the_volume_unchanged_not_increased(self) -> None:
+        """The ask moved *toward* the reference price used for intent-time
+
+        sizing, so the true risk at the fixed volume is now smaller than
+        budgeted. FINAL Risk must still return exactly the original volume —
+        not a larger one a fresh sizing could now afford.
+        """
+        prior_decision = evaluate()
+        assert prior_decision.approved_volume is not None
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08480"), ask=Decimal("1.08490")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.approved_volume == prior_decision.approved_volume
+
+    def test_adr001_4_a_spread_beyond_the_configured_limit_blocks(self) -> None:
+        prior_decision = evaluate()
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(
+                event_time_utc=FIXED_NOW,
+                bid=Decimal("1.08500"),
+                ask=Decimal("1.09000"),
+                spread_points=500,
+            ),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SPREAD_TOO_WIDE in result.reason_codes
+
+    def test_adr001_6_an_intent_that_expired_since_approval_blocks(self) -> None:
+        prior_decision = evaluate()
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(seconds=45),  # past the 30s expiry
+        )
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.INTENT_EXPIRED in result.reason_codes
+
+    def test_adr001_7_a_kill_switch_tripped_since_approval_is_refused(self) -> None:
+        """`evaluate()`'s own convention: an already-halted system is enforced
+
+        as a BLOCK, not a fresh HALT escalation — the halt already happened
+        when the kill switch was tripped, and re-declaring it here would add
+        nothing. FINAL Risk reuses that convention rather than inventing a
+        different one.
+        """
+        prior_decision = evaluate()
+        kill_switch = KillSwitch()
+        kill_switch.trip(
+            reason_codes=(ReasonCode.MANUAL_HALT,), tripped_by="operator", occurred_at_utc=FIXED_NOW
+        )
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            healthy_intent(),
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(),
+            context(),
+            kill_switch,
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in result.reason_codes
+        assert result.approved_volume is None
+
+    def test_adr001_8_never_returns_a_volume_other_than_none_or_the_approved_one(self) -> None:
+        """Property check across every scenario above: the outcome is always
+
+        exactly `prior_decision.approved_volume` (PASS) or `None` (refused).
+        Never anything larger, and never a different, smaller number either.
+        """
+        prior_decision = evaluate()
+        scenarios = [
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08488"), ask=Decimal("1.08500")),
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08480"), ask=Decimal("1.08490")),
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08560"), ask=Decimal("1.08575")),
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.07998"), ask=Decimal("1.08010")),
+        ]
+        for snapshot in scenarios:
+            result = policies.revalidate_fixed_volume_at_execution_time(
+                healthy_intent(),
+                prior_decision,
+                snapshot,
+                SPEC,
+                portfolio(),
+                context(),
+                KillSwitch(),
+                now=FIXED_NOW + timedelta(milliseconds=100),
+            )
+            assert result.approved_volume in (None, prior_decision.approved_volume)

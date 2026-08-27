@@ -1,6 +1,6 @@
 # ADR-001 — Execution-time risk revalidation
 
-**Status:** ACCEPTED · not yet implemented
+**Status:** ACCEPTED · algorithm implemented 2026-08-27, not yet wired into a live orchestrator
 **Date:** 2026-08-17
 **Raised by:** review finding F-007 (`review/feedback.1.0.md`)
 **Amended:** 2026-08-17 by review finding F-011 (`review/feedback.1.1.md`) —
@@ -171,5 +171,34 @@ gate is one-directional: it can refuse, never enlarge.
 
 ## Status of implementation
 
-Not started. This ADR records the decision so it is settled before the
-execution engine is written; the code lands with M5.
+**Algorithm implemented 2026-08-27** (Phase 4 slice 2, non-sending execution
+engineering — `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md`):
+`risk/policies.py::revalidate_fixed_volume_at_execution_time`. Reuses
+`evaluate()` verbatim for every check it already performs (constraint from
+*Implementation notes* above); adds only the executable-price-based stop
+repricing and the fixed-volume-vs-fresh-budget comparison. New reason code
+`ReasonCode.EXECUTION_TIME_RISK_BLOCK` distinguishes a final-gate refusal
+from an intent-time one, appended alongside the specific reason(s) —
+satisfying *Implementation notes*' "a new reason code distinguishes refused
+at the final gate from refused up front."
+
+Of the eight *Required tests before M5*, seven are covered directly by
+`tests/unit/test_risk_engine.py::TestExecutionTimeRevalidation` (a
+`test_adr001_N_*` test per item): 1 (BUY, ask moves away, BLOCK), 2 (SELL,
+mirror case, BLOCK), 3 (favourable move, volume unchanged not increased),
+4 (spread widens, BLOCK), 6 (intent expires, BLOCK), 7 (kill switch trips,
+refused), 8 (property: never returns a volume other than `None` or the
+approved one). Item 5 (symbol specification changes between the checks →
+BLOCK pending re-registration) is **not** this function's responsibility in
+the Phase-4 design: FINAL Risk only runs after the caller's reconciliation
+step has already confirmed `MATCHED` against the pinned instrument-spec
+baseline (F-055) — a spec change surfaces there, before FINAL Risk is ever
+reached, not as a check duplicated inside it.
+
+**Not yet done:** wiring this function into a live caller. No
+`ExecutionOrchestrator` exists yet — the fresh synchronous
+broker/market observation, the persisted snapshot, the reconciliation step
+immediately before this check, and the `ApprovedOrder`/`order_check` steps
+immediately after it are later slices of the same Phase-4 plan. This ADR
+stays open until that wiring exists and the eight required tests are
+exercised end to end, not only at the function level.
