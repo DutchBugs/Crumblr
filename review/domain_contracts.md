@@ -22,6 +22,14 @@ and Phase 4 has since added a second, real (non-sending) producer of
 that changed materially; §1, §3, §5 changed only in wording; §6/§7 are
 updated to match.
 
+**Post-approval update, not yet re-reviewed.** Review 1.24 §7 approved
+this package at the reviewer/technical level against commit `6bdb5b1`.
+Since then, `risk/submission_gate.py::evaluate_submission_gate()` (F-049)
+became a real function instead of an always-refusing stub — §4 updated to
+describe it accurately. This is routine implementation progress under
+review 1.25 §9's changed cadence (no formal review requested for this
+alone); it will be part of the eventual `feedback.2.0` readiness bundle.
+
 ---
 
 ## 1. Cross-cutting guarantees
@@ -316,10 +324,21 @@ once, acted on once" durable**, not merely in-process discipline:
   named refusal (`ReasonCode.LIVE_EXECUTION_NOT_PERMITTED`,
   `risk/execution_preflight_gate.py`) — the same rule enforced one layer
   further in, structurally, rather than trusted to never be reached.
-- `risk/submission_gate.py` — the real F-049 multi-gate `order_send` would
-  eventually need — is still a design-only stub that always refuses
-  (`ReasonCode.SUBMISSION_GATE_NOT_IMPLEMENTED`); nothing calls it yet
-  because nothing calls `order_send` on a real adapter yet.
+- `risk/submission_gate.py::evaluate_submission_gate()` — the real F-049
+  multi-gate `order_send` would eventually need — is now a real, tested,
+  pure function (no longer the always-refusing stub this document
+  described as of `6bdb5b1`; see the note below). It checks all nine of
+  review 1.15 §14's required conditions simultaneously, three of them
+  (`RiskConfig.approved_config_version`, `ExecutionConfig
+  .submission_enabled`, `ExecutionConfig.feedback_2_0_approved`) against
+  new, durable config fields that default to the closed/unapproved state
+  and that no shipped `config/*.yaml` file sets — proven closed against
+  the actual shipped configuration by
+  `tests/unit/test_execution_gates.py::TestSubmissionGate
+  ::test_the_gate_is_closed_against_the_actual_shipped_config`. **Nothing
+  calls this function anywhere in `src/`** — there is no
+  `SubmissionOrchestrator` — so it remains exactly as unreachable as the
+  stub was; only the function itself stopped being a placeholder.
 
 ---
 

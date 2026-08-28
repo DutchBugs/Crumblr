@@ -232,11 +232,31 @@ class ReasonCode(StrEnum):
     promotion decision — this is the same rule enforced one layer further
     in, structurally, rather than trusted to never be reached."""
 
-    SUBMISSION_GATE_NOT_IMPLEMENTED = "SUBMISSION_GATE_NOT_IMPLEMENTED"
-    """`risk/submission_gate.py` is a design-only stub (Phase 4) — the real
-    F-049 multi-gate does not exist yet, so it always refuses. Distinct from
-    every other closed-gate reason: this one says "not built", not "checked
-    and failed"."""
+    RISK_POLICY_NOT_APPROVED = "RISK_POLICY_NOT_APPROVED"
+    """`SubmissionGate` (F-049): the risk-config version in force has not
+
+    been explicitly approved by the owner for real submission
+    (`config.RiskConfig.approved_config_version`, modeled on F-055's
+    instrument-spec pin). `None` — every shipped config today — reads as
+    unapproved, never as "assume yes"."""
+
+    EXECUTION_NOT_EXPLICITLY_ENABLED = "EXECUTION_NOT_EXPLICITLY_ENABLED"
+    """`SubmissionGate` (F-049): `config.ExecutionConfig.submission_enabled`
+
+    is `False` — the default, and the value in every shipped config."""
+
+    ALGOTRADING_DISABLED = "ALGOTRADING_DISABLED"
+    """`SubmissionGate` (F-049): the real terminal does not currently report
+
+    AlgoTrading enabled. Distinct from `EXPERT_TRADING_DISABLED` (the
+    account-level flag `evaluate()` already checks at intent time) — this
+    is the terminal-level toggle APP-016 explicitly says must never be
+    flipped just to make a check pass."""
+
+    FEEDBACK_2_0_NOT_APPROVED = "FEEDBACK_2_0_NOT_APPROVED"
+    """`SubmissionGate` (F-049): `config.ExecutionConfig.feedback_2_0_approved`
+
+    is `False` — `feedback.2.0.md` has not given its GO yet."""
 
     # Operator action.
     MANUAL_HALT = "MANUAL_HALT"

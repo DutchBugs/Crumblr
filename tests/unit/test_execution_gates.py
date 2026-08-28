@@ -15,17 +15,26 @@ from uuid import uuid4
 
 import pytest
 
-from crumblr.domain.enums import Environment, ReasonCode
-from crumblr.domain.models import DecisionCapsule
+from crumblr.domain.enums import DataQuality, Environment, ReasonCode, ReconciliationStatus
+from crumblr.domain.models import DecisionCapsule, MarketTick
 from crumblr.risk.execution_eligibility import (
     EligibilityDecision,
     evaluate_execution_eligibility,
 )
 from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.submission_gate import evaluate_submission_gate
+from crumblr.risk.submission_gate import (
+    SubmissionGateContext,
+    evaluate_submission_gate,
+)
 from crumblr.risk.trading_window import IntradayPolicy
-from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
+from tests.conftest import (
+    FIXED_NOW,
+    make_account_state,
+    make_intent,
+    make_risk_decision,
+    make_supervisor_decision,
+)
 
 STRATEGY_VERSION = "0.1.0"
 RISK_CONFIG_VERSION = "cfg-v1"
@@ -221,16 +230,190 @@ class TestPreflightGate:
         assert ReasonCode.SYMBOL_NOT_ALLOWED in decision.reason_codes
 
 
-class TestSubmissionGateStub:
-    """Design-only this slice: it must always refuse, unconditionally."""
+def fresh_tick(**overrides: Any) -> MarketTick:
+    fields: dict[str, Any] = {
+        "tick_id": uuid4(),
+        "source": "test",
+        "canonical_symbol": "EUR/USD",
+        "broker_symbol": "EURUSD",
+        "event_time_utc": FIXED_NOW,
+        "received_time_utc": FIXED_NOW,
+        "bid": "1.08500",
+        "ask": "1.08512",
+        "data_quality": DataQuality.GOOD,
+    }
+    fields.update(overrides)
+    return MarketTick(**fields)
 
-    def test_it_always_returns_closed(self) -> None:
-        decision = evaluate_submission_gate()
+
+def submission_context(**overrides: Any) -> SubmissionGateContext:
+    """All nine legs pass by default — every test overrides exactly the
+
+    leg(s) it means to fail, proving the gate closes independently on
+    each."""
+    fields: dict[str, Any] = {
+        "environment": Environment.PAPER,
+        "account": make_account_state(),
+        "reconciliation_status": ReconciliationStatus.MATCHED,
+        "fresh_tick": fresh_tick(),
+        "max_market_data_age_ms": 2_000,
+        "kill_switch": KillSwitch(),
+        "risk_config_version": "cfg-v1",
+        "approved_risk_config_version": "cfg-v1",
+        "submission_enabled": True,
+        "terminal_trade_allowed": True,
+        "feedback_2_0_approved": True,
+        "now": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return SubmissionGateContext(**fields)
+
+
+class TestSubmissionGate:
+    """F-049: nine conditions, all required simultaneously (review 1.15
+
+    §14). `submission_context()` is fully open by default; every test
+    below fails exactly one leg to prove it alone closes the gate — the
+    same "one leg failing closes the whole gate" discipline
+    `TestPreflightGate` already exercises above."""
+
+    def test_a_fully_satisfied_context_opens_the_gate(self) -> None:
+        decision = evaluate_submission_gate(submission_context())
+        assert decision.open is True
+        assert decision.reason_codes == ()
+
+    def test_live_environment_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(environment=Environment.LIVE))
         assert decision.open is False
-        assert ReasonCode.SUBMISSION_GATE_NOT_IMPLEMENTED in decision.reason_codes
+        assert ReasonCode.LIVE_EXECUTION_NOT_PERMITTED in decision.reason_codes
 
-    def test_it_takes_no_arguments_because_nothing_could_open_it_yet(self) -> None:
-        import inspect
+    def test_a_non_demo_account_closes_it(self) -> None:
+        decision = evaluate_submission_gate(
+            submission_context(account=make_account_state(is_demo=False))
+        )
+        assert decision.open is False
+        assert ReasonCode.LIVE_ACCOUNT_IN_PAPER_MODE in decision.reason_codes
 
-        signature = inspect.signature(evaluate_submission_gate)
-        assert not signature.parameters
+    def test_a_disconnected_account_closes_it(self) -> None:
+        decision = evaluate_submission_gate(
+            submission_context(account=make_account_state(connected=False))
+        )
+        assert decision.open is False
+        assert ReasonCode.ACCOUNT_NOT_CONNECTED in decision.reason_codes
+
+    def test_mismatched_reconciliation_closes_it(self) -> None:
+        decision = evaluate_submission_gate(
+            submission_context(reconciliation_status=ReconciliationStatus.MISMATCHED)
+        )
+        assert decision.open is False
+        assert ReasonCode.RECONCILIATION_MISMATCH in decision.reason_codes
+
+    def test_unknown_reconciliation_closes_it(self) -> None:
+        decision = evaluate_submission_gate(
+            submission_context(reconciliation_status=ReconciliationStatus.UNKNOWN)
+        )
+        assert decision.open is False
+        assert ReasonCode.RECONCILIATION_UNKNOWN in decision.reason_codes
+
+    def test_no_fresh_tick_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(fresh_tick=None))
+        assert decision.open is False
+        assert ReasonCode.STALE_MARKET_DATA in decision.reason_codes
+
+    def test_a_stale_tick_closes_it(self) -> None:
+        stale = fresh_tick(event_time_utc=FIXED_NOW - timedelta(seconds=30))
+        decision = evaluate_submission_gate(submission_context(fresh_tick=stale))
+        assert decision.open is False
+        assert ReasonCode.STALE_MARKET_DATA in decision.reason_codes
+
+    def test_a_suspect_tick_closes_it(self) -> None:
+        suspect = fresh_tick(data_quality=DataQuality.SUSPECT)
+        decision = evaluate_submission_gate(submission_context(fresh_tick=suspect))
+        assert decision.open is False
+        assert ReasonCode.INVALID_QUOTE in decision.reason_codes
+
+    def test_a_halted_kill_switch_closes_it(self) -> None:
+        kill_switch = KillSwitch()
+        kill_switch.trip(
+            reason_codes=(ReasonCode.MANUAL_HALT,), tripped_by="operator", occurred_at_utc=FIXED_NOW
+        )
+        decision = evaluate_submission_gate(submission_context(kill_switch=kill_switch))
+        assert decision.open is False
+        assert ReasonCode.SYSTEM_HALTED in decision.reason_codes
+
+    def test_an_unapproved_risk_config_version_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(approved_risk_config_version=None))
+        assert decision.open is False
+        assert ReasonCode.RISK_POLICY_NOT_APPROVED in decision.reason_codes
+
+    def test_a_risk_config_version_mismatch_closes_it(self) -> None:
+        """An approval on record for a *different* version does not carry
+
+        over — a config edit invalidates the prior approval, exactly like
+        F-055's spec pin."""
+        decision = evaluate_submission_gate(
+            submission_context(approved_risk_config_version="cfg-v0")
+        )
+        assert decision.open is False
+        assert ReasonCode.RISK_POLICY_NOT_APPROVED in decision.reason_codes
+
+    def test_submission_not_enabled_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(submission_enabled=False))
+        assert decision.open is False
+        assert ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED in decision.reason_codes
+
+    def test_algotrading_disabled_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(terminal_trade_allowed=False))
+        assert decision.open is False
+        assert ReasonCode.ALGOTRADING_DISABLED in decision.reason_codes
+
+    def test_no_feedback_2_0_approval_closes_it(self) -> None:
+        decision = evaluate_submission_gate(submission_context(feedback_2_0_approved=False))
+        assert decision.open is False
+        assert ReasonCode.FEEDBACK_2_0_NOT_APPROVED in decision.reason_codes
+
+    def test_every_failing_leg_is_reported_not_just_the_first(self) -> None:
+        decision = evaluate_submission_gate(
+            submission_context(
+                environment=Environment.LIVE,
+                submission_enabled=False,
+                feedback_2_0_approved=False,
+            )
+        )
+        assert ReasonCode.LIVE_EXECUTION_NOT_PERMITTED in decision.reason_codes
+        assert ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED in decision.reason_codes
+        assert ReasonCode.FEEDBACK_2_0_NOT_APPROVED in decision.reason_codes
+
+    def test_the_gate_is_closed_against_the_actual_shipped_config(self) -> None:
+        """The concrete proof, not just the design intent: build a context
+
+        from `load_config`'s real, current `config/paper.yaml` values —
+        the gate must stay closed, because none of the three durable
+        approval fields are set in any shipped config file."""
+        from pathlib import Path
+
+        from crumblr.config import load_config
+
+        repo_config_dir = Path(__file__).resolve().parents[2] / "config"
+        config = load_config(Environment.PAPER, config_dir=repo_config_dir)
+        decision = evaluate_submission_gate(
+            submission_context(
+                environment=config.environment,
+                risk_config_version=config.config_version,
+                approved_risk_config_version=config.risk.approved_config_version,
+                submission_enabled=config.execution.submission_enabled,
+                feedback_2_0_approved=config.execution.feedback_2_0_approved,
+            )
+        )
+        assert decision.open is False
+        assert ReasonCode.RISK_POLICY_NOT_APPROVED in decision.reason_codes
+        assert ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED in decision.reason_codes
+        assert ReasonCode.FEEDBACK_2_0_NOT_APPROVED in decision.reason_codes
+
+    def test_decision_is_internally_consistent(self) -> None:
+        from crumblr.risk.submission_gate import SubmissionGateDecision
+
+        with pytest.raises(ValueError):
+            SubmissionGateDecision(open=False, reason_codes=())
+        with pytest.raises(ValueError):
+            SubmissionGateDecision(open=True, reason_codes=(ReasonCode.SYSTEM_HALTED,))

@@ -25,7 +25,7 @@ document you have that this repository doesn't yet.
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
 | 6 | Green light to start the §11 design package `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` asks for next | The guide (supplied 2026-08-27, now in the repository) asks specifically for a small, reviewable package before any Agent Gateway code: an ADR for external agents/trust boundaries, a threat model for the gateway, first-draft versions of the five new contracts (`AgentIdentity`, `TradingAssignment`, `DecisionContextBundle`, `TradeProposal`, `SupervisorReview`), a migration plan preserving the existing `DecisionCapsule`→execution chain, a test matrix, and an explicit before/after-canary scope split. Not started — awaiting the go-ahead, per review 1.24/1.25's "don't jump ahead" instruction | `review/EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` §5/§8/§11 |
-| 7 | Green light for the core (non-agent) submission-safety phase | Review 1.25 §4/§12.B: `SubmissionGate`/F-049, durable execution-activation authority, `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening. Not started — deliberately, per both review 1.24 and 1.25's "don't jump ahead" instruction | `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
+| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; seven items remain | `SubmissionGate` is real and tested (`review/adr/ADR-006-submission-gate.md`), called by nobody yet. Still open: durable execution-activation authority *wiring* (the config fields exist; nothing sets/reads them from a real orchestrator), `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
 reviewer artifact for documentation wording, one extra unit test, normal
@@ -6745,6 +6745,136 @@ Next:
   itself frames this as a second developer's parallel track, not
   something to begin unprompted.
 - Continue everything already listed in the "What's needed next" table.
+
+---
+
+## Update 2026-08-28 (forty-eighth entry) — DEV1/DEV2 track split discovered live; F-049 SubmissionGate shipped as Dev 1's first core-track slice
+
+Component: Process (DEV1/DEV2 track split), `src/crumblr/risk/submission_gate.py`, `src/crumblr/config.py`, `src/crumblr/domain/enums.py`, `review/adr/ADR-006-submission-gate.md`
+Milestone: Core (Dev 1) submission-safety phase, first item
+Status before: External-agent design package built by this session (agent_gateway contracts, ADR-005, threat model) — see the previous, now-superseded attempt
+Status after: Discovered a second, concurrently-running session ("Dev 2") independently building the same agent-integration deliverable in the same working tree. Handed that entire area to Dev 2 per the owner's direction; reverted this session's own claims to it. Picked up Dev 1's actual scope instead: F-049 `SubmissionGate` is now real and tested
+
+Completed:
+- Two `CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md`/
+  `CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` files appeared
+  mid-turn, splitting work into a Core/Execution track and an
+  Agent-Integration track with separate status/feedback files, git
+  branch/commit conventions, and a protected-files list per track. While
+  investigating, found direct evidence of a second, live session already
+  active: `review/THREAT_MODEL_AGENT_GATEWAY.md` (written by this session
+  minutes earlier) had been overwritten on disk, and a `review/AGENT_STATUS.md`
+  appeared describing the same Step-A deliverable this session had just
+  built, independently, and explicitly waiting on the owner before
+  committing. The owner confirmed: this session is Dev 1; the other
+  session is Dev 2 and owns `src/crumblr/agent_gateway/**`,
+  `review/adr/ADR-005-*.md`, `review/THREAT_MODEL_AGENT_GATEWAY.md`,
+  `review/AGENT_STATUS.md`, `review/AGENT_FEEDBACK.md`.
+- Reverted this session's own `status.md`/`review/FEEDBACK.md` edits that
+  had narrated the agent_gateway package as its own work (`git checkout --
+  status.md review/FEEDBACK.md`, confirmed via `git diff --stat` first
+  that only those edits would be discarded). Left every agent_gateway/
+  ADR-005/threat-model file exactly as found on disk — did not commit,
+  did not modify, did not delete — for the Dev-2 session to handle
+  entirely on its own.
+- Asked the owner what Dev-1-scoped work to pick up; chosen: start the
+  core submission-safety phase, specifically F-049 `SubmissionGate` (the
+  most foundational item — several of the others assume it exists).
+  Entered plan mode given the safety-criticality (this is the literal
+  last gate before anything `order_send`-adjacent) and researched
+  `evaluate_preflight_gate`'s pure-function style, F-055's
+  `expected_spec_version` durable-pin pattern, and existing `ReasonCode`
+  members before proposing a scoped plan — approved by the owner.
+- Rewrote `risk/submission_gate.py::evaluate_submission_gate()` from an
+  always-refusing stub into a real, pure function checking all nine of
+  review 1.15 §14's required conditions simultaneously (`review/adr/ADR-006-submission-gate.md`
+  has the full mapping): environment/account/reconciliation/market-data/
+  safety-state checks reuse existing `ReasonCode`s and pre-observed
+  signals (mirrors `evaluate_preflight_gate`'s style exactly — nothing
+  fetched by the gate itself); the three governance legs
+  (owner-approved risk policy, execution adapter explicitly enabled,
+  `feedback.2.0` GO) needed genuinely new durable config surface, since
+  none existed: `RiskConfig.approved_config_version` (same pattern as
+  F-055's `expected_spec_version`, checked against `config_version`),
+  `ExecutionConfig.submission_enabled`, `ExecutionConfig.feedback_2_0_approved`
+  — all default closed, none set by any shipped config file. Added four
+  new `ReasonCode` members (`RISK_POLICY_NOT_APPROVED`,
+  `EXECUTION_NOT_EXPLICITLY_ENABLED`, `ALGOTRADING_DISABLED`,
+  `FEEDBACK_2_0_NOT_APPROVED`); reused six existing ones.
+- Rewrote `tests/unit/test_execution_gates.py`'s `TestSubmissionGateStub`
+  class (which asserted the old always-closed, no-argument stub) into
+  `TestSubmissionGate` (17 tests): one leg failing closes the gate
+  independently, for each of the nine; all nine simultaneously true
+  opens it; every failing leg reports together, not just the first; and
+  — the concrete safety proof, not just design intent — a test builds a
+  `SubmissionGateContext` from `load_config()`'s real, current
+  `config/paper.yaml` values and asserts the gate stays closed with all
+  three new governance reason codes present.
+- Updated `review/domain_contracts.md` (§4's `submission_gate.py`
+  bullet, plus a new "post-approval update, not yet re-reviewed" note —
+  the document was reviewer-approved at `6bdb5b1`; this is routine
+  progress under review 1.25 §9's changed cadence, not something
+  requiring an immediate new review round), `review/FEEDBACK.md` (F-049
+  → CLOSED/SHIPPED with full evidence; trimmed the
+  `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` unreviewed-work row down to a
+  pointer at Dev-2's own tracking, per Dev-1 instructions §10/§15 —
+  "do not copy Dev-2 implementation detail into these documents
+  continuously"), `review/DEVIATIONS.md` (D-047's submission-gate mention
+  corrected).
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` — clean on every
+  touched file.
+- `uv run mypy` — success, 145 source files.
+- `uv run pytest tests/unit/test_execution_gates.py -v` — **32 passed**
+  (9 eligibility + 5 preflight-gate + 1 pre-existing + 17 new submission-
+  gate tests — the file's `TestExecutionEligibility`/`TestPreflightGate`
+  classes untouched and still green).
+- `uv run pytest -m "not integration" -q` — **834 passed, 1 skipped**,
+  zero regressions.
+- Full suite solo (`uv run pytest -q`) attempted twice; both runs failed
+  with a *different* set of integration tests each time (13 failed/34
+  errors, then 25 failed/56 errors) — the signature of the known
+  concurrent-shared-Postgres-database race (D-042), not a real
+  regression: none of this entry's changes touch migrations, the
+  journal, or persistence, and the non-integration suite (which exercises
+  everything this entry actually changed) is fully clean. Very likely
+  caused by the concurrently-running Dev-2 session also hitting the
+  shared test database. **Full-suite confirmation deliberately deferred**
+  — the owner asked to wait for a signal that Dev 2 has stopped before
+  re-running it, rather than retrying blindly.
+
+Problems found:
+- None in the shipped code. The test-suite instability above is an
+  environment/concurrency condition, not a defect introduced by this
+  entry — isolated by running the non-integration suite alone.
+
+Risk impact:
+- None. `evaluate_submission_gate()` is called by nobody in `src/` —
+  confirmed by the same "grep for a new caller, expect none" discipline
+  used for the agent_gateway package. `order_send` remains structurally
+  unreachable regardless (`OrderCheckMt5Gateway.order_send` still
+  unconditionally raises).
+
+Decision:
+- F-049 is CLOSED/SHIPPED. Not yet committed — pending the owner's
+  signal that the full integration suite can be confirmed cleanly
+  (Dev 2 no longer running concurrently), then the usual per-turn commit
+  approval.
+
+Next:
+- Wait for the owner's signal, then re-run `uv run pytest -q` solo for a
+  clean full-suite confirmation before committing.
+- Once committed, continue the core submission-safety phase: durable
+  execution-activation authority *wiring* (a `SubmissionOrchestrator` or
+  equivalent that actually reads the new config fields), then
+  `SUBMISSION_STARTED` emission timing, `order_send` idempotence,
+  ambiguous-outcome recovery, automatic flatten submission, post-fill
+  reconciliation, broker-side SL verification, execution-event
+  content-conflict hardening — each its own slice, not one giant pass.
+- Continue everything else already listed in "What's needed next": CI
+  confirmation, owner risk-policy decisions, restarting bar accumulation,
+  the optional domain-contract countersign.
 
 ---
 

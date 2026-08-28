@@ -78,6 +78,19 @@ class RiskConfig(ConfigSection):
     max_open_positions: int = Field(ge=0)
     min_stop_distance_points: int = Field(ge=0)
 
+    approved_config_version: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    """The risk policy version an owner has explicitly approved for real
+
+    submission — F-049 (`review/FEEDBACK.md`), one of `SubmissionGate`'s
+    nine required conditions. Same pattern as
+    `MarketConfig.expected_spec_version` (F-055): `None` (the default, and
+    every shipped config today) means unapproved, and `SubmissionGate`
+    reads that as closed, never as "assume yes." Checked against
+    `PlatformConfig.config_version` — set this only after the owner has
+    reviewed the actual numbers this `RiskConfig` carries (`max_risk_per_trade`,
+    `max_daily_loss`, `max_drawdown`, the intraday deadlines, HALT-reset
+    authority — build.md §29 Q7/Q8/Q12), not merely after config validates."""
+
     @model_validator(mode="after")
     def _check_budget_ordering(self) -> Self:
         if self.max_risk_per_trade > self.max_open_risk:
@@ -98,6 +111,23 @@ class ExecutionConfig(ConfigSection):
     max_market_data_age_ms: int = Field(gt=0)
     order_timeout_ms: int = Field(gt=0)
     max_slippage_points: int = Field(ge=0)
+
+    submission_enabled: bool = False
+    """Whether the execution adapter is explicitly enabled for real
+
+    `order_send` — F-049's own required condition, never inferred from any
+    other setting. Defaults to `False`, and no shipped config file sets it
+    to `True`; flipping it is a deliberate, git-reviewed, owner-made
+    change, not something that follows automatically from any other flag
+    in this file being set."""
+
+    feedback_2_0_approved: bool = False
+    """Whether `feedback.2.0.md` has given its explicit GO — F-049's final
+
+    required condition. Defaults to `False`. This field records that the
+    formal pre-submission review happened and passed; it is not itself
+    that review, and setting it to `True` without `feedback.2.0.md`
+    actually having done so defeats the entire point of the gate."""
 
 
 class TradingAgentConfig(ConfigSection):

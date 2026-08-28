@@ -948,8 +948,10 @@ mean anything should start here.
      `ApprovedOrder`'s `created_at_utc`, and the FINAL-Risk execution
      events.
 - **Also provisional, by design, not oversight:** `risk/submission_gate.py`
-  is a design-only stub (F-049's full multi-gate is unbuilt); automatic
-  flatten submission stays halt-only (ADR-004); the human-set
+  ::`evaluate_submission_gate()` is now real and tested (F-049,
+  `review/adr/ADR-006-submission-gate.md`, 2026-08-28) but called by
+  nobody — no `SubmissionOrchestrator` exists to call it before a real
+  `order_send`; automatic flatten submission stays halt-only (ADR-004); the human-set
   `activation_watermark` is `None` in every shipped config, so the normal
   live pipeline (`scripts/live_decision.py`) provably never reaches
   `order_check` today outside a test or a deliberate one-off evidence run
