@@ -41,7 +41,35 @@ file touched, no existing call site broken (confirmed: full suite green,
 future agent-track change needs one of the four new ReasonCode members
 (e.g. a Gateway-side submission-readiness check), reuse these rather
 than adding parallel ones.
-Relevant commit: (this commit)
+Relevant commit: a1a2770
+```
+
+---
+
+```text
+2026-08-28 — DEV1
+Changed: Process note, not a code change. Dev 1's SubmissionGate commit
+was first created while "agent/contracts" (Dev 2's own topic branch, per
+DEV2 instructions section 11's own naming example) was the checked-out
+branch in this shared working tree — both sessions operate on the same
+physical .git, and neither had switched branches explicitly before
+starting work. The commit landed stacked on top of Dev 2's two commits
+instead of on main. Caught before pushing (nothing was on origin yet).
+Fixed by: creating core/submission-gate from main, cherry-picking the
+Dev-1 commit onto it (clean, no conflicts — file sets are fully
+disjoint from Dev 2's), force-moving agent/contracts back to Dev 2's own
+tip (2f7c921, dropping the misplaced commit from it), then
+fast-forwarding main onto core/submission-gate and pushing. No commit
+was rewritten or lost — the original stacked commit's content is
+identical to what merged, only its ancestry/branch placement changed.
+Impact: none on either track's actual code. Recorded so the git history
+around this date is legible to a later reader — agent/contracts
+briefly, locally, contained a Dev-1 commit that was never pushed.
+Action required: both sessions should explicitly confirm/switch to the
+intended branch before starting work in this shared working tree,
+rather than trusting whatever was last checked out.
+Relevant commit: a1a2770 (final, on main); agent/contracts restored to
+2f7c921
 ```
 
 ---

@@ -6878,6 +6878,89 @@ Next:
 
 ---
 
+## Update 2026-08-28 (forty-ninth entry) — F-049 committed and pushed; a shared-working-tree branch mixup found and fixed first
+
+Component: Process (git state), `review/INTEGRATION_NOTICES.md`
+Milestone: Core submission-safety phase, F-049 landed on `main`
+Status before: F-049 `SubmissionGate` complete and quality-gate clean (forty-eighth entry); full-suite confirmation deliberately deferred until Dev 2 stopped
+Status after: Full suite confirmed clean solo (Dev 2 stopped); F-049 committed and pushed to `main` as `a1a2770` — after finding and fixing a branch mixup caused by the two sessions sharing one working directory
+
+Completed:
+- Owner signaled Dev 2 had stopped. Re-ran `uv run pytest -q` solo:
+  **1014 passed, 3 skipped**, zero failures — confirms the two unstable
+  runs recorded in the forty-eighth entry were genuinely the concurrent-
+  database race (D-042), not a defect in this work.
+- Ran the whole-project quality gate once more (`ruff check .`, `mypy`)
+  against the now-larger tree (Dev 2's merged `agent_gateway` package
+  included) — clean, 147 source files.
+- Created `review/INTEGRATION_NOTICES.md` (new, Dev-1-owned per
+  `CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md` §7) and logged the
+  domain/enums.py shared-contract change (four new `ReasonCode` members,
+  one removed, confirmed unused anywhere including Dev 2's new code),
+  plus a reconstructed notice for Dev 2's already-merged commits
+  (`cc16e4f`, `2f7c921` — the `agent_gateway` package and its migration,
+  `20260828_d4b6e2f81a37_agent_gateway_step_b.py`, correctly chained
+  after Phase 4's own head).
+- Committed with the Dev-1 convention (`[core]` prefix,
+  `IMPACT: SHARED-CONTRACT` label) — and the commit landed on
+  `agent/contracts`, Dev 2's own local topic branch, instead of `main`.
+  Both sessions operate on the same physical working directory/`.git`;
+  neither had explicitly switched to its own branch first, so whatever
+  Dev 2 last checked out (`agent/contracts`, matching their own branch-
+  naming convention) is what the commit stacked onto. Caught immediately
+  by the commit output itself (`[agent/contracts 3d13f30] ...`) before
+  anything was pushed — `origin/main` was still at the pre-Dev-2-and-
+  pre-this-entry commit, so nothing public was affected.
+- Fixed cleanly, nothing rewritten or lost: created `core/submission-gate`
+  from `main`, cherry-picked the misplaced commit onto it (applied
+  without conflict — this entry's files and Dev 2's are fully disjoint),
+  force-moved `agent/contracts` back to Dev 2's own real tip (`2f7c921`,
+  dropping the stray commit from it), fast-forwarded `main` onto
+  `core/submission-gate`, deleted the temporary branch, pushed. Logged
+  the whole incident in `review/INTEGRATION_NOTICES.md` for anyone
+  reading this git history later.
+
+Evidence:
+- `git push origin main` — `86873a6..a1a2770 main -> main`, fast-forward,
+  confirmed via `git log`/`git branch -a` after.
+- `git log --oneline agent/contracts -3` — confirmed restored to exactly
+  Dev 2's two commits, nothing of Dev 1's mixed in.
+- Full suite (1014 passed/3 skipped) and quality gate (ruff/mypy clean)
+  both re-confirmed above, on the final, correctly-placed commit.
+
+Problems found:
+- The branch mixup above — caught and fixed before any push, no lasting
+  effect. Root cause recorded in `review/INTEGRATION_NOTICES.md` with an
+  explicit action item: both sessions should confirm/switch to the
+  intended branch explicitly before starting work in this shared working
+  tree.
+
+Risk impact:
+- None. `agent/contracts` (Dev 2's own work: the `agent_gateway`
+  package, ADR-005, threat model, Step B gateway/persistence) remains
+  local and unpushed — merging it into `main` is Dev 2's/the owner's
+  decision, not made here. `order_send` remains structurally
+  unreachable regardless of any of this.
+
+Decision:
+- F-049 `SubmissionGate` is committed and pushed to `main` (`a1a2770`).
+  `agent/contracts` is intact, correctly separated, and waiting on its
+  own owner to merge or continue.
+
+Next:
+- Continue the core submission-safety phase's remaining items (durable
+  execution-activation wiring, `SUBMISSION_STARTED` timing, `order_send`
+  idempotence, ambiguous-outcome recovery, automatic flatten submission,
+  post-fill reconciliation, broker-side SL verification, execution-event
+  conflict hardening) — each its own slice.
+- Continue everything else already listed in "What's needed next": CI
+  confirmation, owner risk-policy decisions, restarting bar accumulation,
+  the optional domain-contract countersign.
+- Before starting the next slice, explicitly confirm/switch branch first
+  given the shared-working-tree lesson just learned.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
