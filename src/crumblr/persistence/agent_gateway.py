@@ -21,10 +21,12 @@ exactly what a long-running one would.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import Engine, and_, desc, func, select
+from sqlalchemy import Connection, Engine, and_, desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from crumblr.agent_gateway.contracts import (
@@ -51,6 +53,15 @@ from crumblr.persistence.schema import (
     agent_identities,
     agent_trading_assignments,
 )
+
+
+def _event_id_for(*, outcome_id: UUID, event_type: AgentDecisionEventType) -> UUID:
+    """Derived, not random — mirrors `persistence/execution.py::event_id_for`:
+
+    a retry that re-appends the same logical event (e.g. `RECEIVED` on a
+    resumed, previously-interrupted claim) converges on the same row
+    instead of duplicating it."""
+    return uuid5(NAMESPACE_URL, f"crumblr:agent_decision_event:{outcome_id}:{event_type.value}")
 
 
 class PostgresAgentIdentityStore:
@@ -214,8 +225,36 @@ class PostgresAgentDecisionOutcomeStore:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        with self._engine.begin() as connection:
+            yield connection
+
+    def lock_assignment(self, assignment_id: UUID, *, connection: Connection | None = None) -> None:
+        """Serializes the whole claim→count→evaluate→settle sequence for one
+
+        `assignment_id` (`AgentGateway.submit_trade_proposal`/`submit_no_trade`
+        hold this for the duration of the call, via `transaction()`). A
+        Postgres transaction-scoped advisory lock — released automatically
+        at commit/rollback, never needs an explicit unlock. Fixes a real
+        race a self-review caught: reading the proposal-rate-limit count
+        and then claiming in two separate transactions let two concurrent
+        proposals for the same assignment both observe a below-limit count
+        and both get accepted. Requires an active transaction (a caller
+        must be inside `transaction()`) — there is no meaningful "lock
+        outside a transaction" for an advisory *transaction* lock.
+        """
+        if connection is None:
+            raise RuntimeError(
+                "lock_assignment() requires a connection from an open transaction() -- "
+                "an advisory transaction lock has no effect outside one"
+            )
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": str(assignment_id)}
+        )
+
     def claim_trade_proposal(
-        self, proposal: TradeProposal, *, now: UtcDatetime
+        self, proposal: TradeProposal, *, now: UtcDatetime, connection: Connection | None = None
     ) -> OutcomeClaimResult:
         return self._claim(
             outcome_id=proposal.proposal_id,
@@ -225,9 +264,12 @@ class PostgresAgentDecisionOutcomeStore:
             fingerprint_value=proposal.proposal_fingerprint,
             payload=proposal.model_dump(mode="json"),
             now=now,
+            connection=connection,
         )
 
-    def claim_no_trade(self, decision: NoTradeDecision, *, now: UtcDatetime) -> OutcomeClaimResult:
+    def claim_no_trade(
+        self, decision: NoTradeDecision, *, now: UtcDatetime, connection: Connection | None = None
+    ) -> OutcomeClaimResult:
         return self._claim(
             outcome_id=decision.decision_id,
             outcome_type=AgentOutcomeType.NO_TRADE,
@@ -236,6 +278,7 @@ class PostgresAgentDecisionOutcomeStore:
             fingerprint_value=decision.decision_fingerprint,
             payload=decision.model_dump(mode="json"),
             now=now,
+            connection=connection,
         )
 
     def _claim(
@@ -248,6 +291,7 @@ class PostgresAgentDecisionOutcomeStore:
         fingerprint_value: str,
         payload: dict[str, Any],
         now: UtcDatetime,
+        connection: Connection | None,
     ) -> OutcomeClaimResult:
         statement = (
             pg_insert(agent_decision_outcomes)
@@ -263,22 +307,29 @@ class PostgresAgentDecisionOutcomeStore:
             .on_conflict_do_nothing(index_elements=["outcome_id"])
             .returning(agent_decision_outcomes.c.outcome_id)
         )
-        with self._engine.begin() as connection:
-            won = connection.execute(statement).first() is not None
-            if won:
-                return OutcomeClaimResult(claimed=True)
-            existing_fingerprint = connection.execute(
-                select(agent_decision_outcomes.c.fingerprint).where(
-                    agent_decision_outcomes.c.outcome_id == outcome_id
-                )
-            ).scalar_one()
-            if existing_fingerprint != fingerprint_value:
-                raise DecisionConflictError(
-                    f"outcome id {outcome_id} was already claimed with a different "
-                    f"fingerprint ({existing_fingerprint!r} != {fingerprint_value!r}) -- "
-                    "the same idempotency key would refer to two different decisions"
-                )
-            return OutcomeClaimResult(claimed=False)
+        if connection is not None:
+            return self._run_claim(connection, statement, outcome_id, fingerprint_value)
+        with self._engine.begin() as own_connection:
+            return self._run_claim(own_connection, statement, outcome_id, fingerprint_value)
+
+    def _run_claim(
+        self, connection: Connection, statement: Any, outcome_id: UUID, fingerprint_value: str
+    ) -> OutcomeClaimResult:
+        won = connection.execute(statement).first() is not None
+        if won:
+            return OutcomeClaimResult(claimed=True)
+        existing_fingerprint = connection.execute(
+            select(agent_decision_outcomes.c.fingerprint).where(
+                agent_decision_outcomes.c.outcome_id == outcome_id
+            )
+        ).scalar_one()
+        if existing_fingerprint != fingerprint_value:
+            raise DecisionConflictError(
+                f"outcome id {outcome_id} was already claimed with a different "
+                f"fingerprint ({existing_fingerprint!r} != {fingerprint_value!r}) -- "
+                "the same idempotency key would refer to two different decisions"
+            )
+        return OutcomeClaimResult(claimed=False)
 
     def outcome_type(self, outcome_id: UUID) -> AgentOutcomeType | None:
         statement = select(agent_decision_outcomes.c.outcome_type).where(
@@ -288,7 +339,9 @@ class PostgresAgentDecisionOutcomeStore:
             row = connection.execute(statement).first()
         return None if row is None else AgentOutcomeType(row[0])
 
-    def count_claimed_since(self, *, assignment_id: UUID, since: UtcDatetime) -> int:
+    def count_claimed_since(
+        self, *, assignment_id: UUID, since: UtcDatetime, connection: Connection | None = None
+    ) -> int:
         statement = (
             select(func.count())
             .select_from(agent_decision_outcomes)
@@ -299,8 +352,10 @@ class PostgresAgentDecisionOutcomeStore:
                 )
             )
         )
-        with self._engine.connect() as connection:
+        if connection is not None:
             return int(connection.execute(statement).scalar_one())
+        with self._engine.connect() as own_connection:
+            return int(own_connection.execute(statement).scalar_one())
 
     def append_event(
         self,
@@ -310,17 +365,25 @@ class PostgresAgentDecisionOutcomeStore:
         occurred_at_utc: UtcDatetime,
         reason_codes: tuple[str, ...] = (),
         detail: str | None = None,
+        connection: Connection | None = None,
     ) -> None:
-        statement = agent_decision_events.insert().values(
-            event_id=uuid4(),
-            outcome_id=outcome_id,
-            event_type=event_type.value,
-            occurred_at_utc=occurred_at_utc,
-            reason_codes=list(reason_codes),
-            detail=detail,
+        statement = (
+            pg_insert(agent_decision_events)
+            .values(
+                event_id=_event_id_for(outcome_id=outcome_id, event_type=event_type),
+                outcome_id=outcome_id,
+                event_type=event_type.value,
+                occurred_at_utc=occurred_at_utc,
+                reason_codes=list(reason_codes),
+                detail=detail,
+            )
+            .on_conflict_do_nothing(index_elements=["event_id"])
         )
-        with self._engine.begin() as connection:
+        if connection is not None:
             connection.execute(statement)
+            return
+        with self._engine.begin() as own_connection:
+            own_connection.execute(statement)
 
     def events_for(self, outcome_id: UUID) -> tuple[AgentDecisionEventRecord, ...]:
         statement = (
@@ -339,4 +402,32 @@ class PostgresAgentDecisionOutcomeStore:
                 detail=row["detail"],
             )
             for row in rows
+        )
+
+    def settlement_for(
+        self, outcome_id: UUID, *, connection: Connection | None = None
+    ) -> AgentDecisionEventRecord | None:
+        statement = (
+            select(agent_decision_events)
+            .where(
+                agent_decision_events.c.outcome_id == outcome_id,
+                agent_decision_events.c.event_type.in_(
+                    [AgentDecisionEventType.ACCEPTED.value, AgentDecisionEventType.REJECTED.value]
+                ),
+            )
+            .limit(1)
+        )
+        if connection is not None:
+            row = connection.execute(statement).mappings().first()
+        else:
+            with self._engine.connect() as own_connection:
+                row = own_connection.execute(statement).mappings().first()
+        if row is None:
+            return None
+        return AgentDecisionEventRecord(
+            outcome_id=row["outcome_id"],
+            event_type=AgentDecisionEventType(row["event_type"]),
+            occurred_at_utc=row["occurred_at_utc"],
+            reason_codes=tuple(row["reason_codes"]),
+            detail=row["detail"],
         )

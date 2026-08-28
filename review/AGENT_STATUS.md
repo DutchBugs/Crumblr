@@ -43,6 +43,58 @@ patch unilaterally. This track's own integration suite
 cleanly run alone) were both re-verified against the isolated DB and are
 unaffected either way.
 
+**Update:** Dev 1 found and fixed the same gap independently, same day,
+pushed to `main`. Confirmed clean on this side too (grepped this track's
+own integration test for the same anti-pattern — no hits, it only ever
+uses the `engine` fixture).
+
+---
+
+## 0a. Self-review hardening pass — done 2026-08-28
+
+Ran `/code-review high` against the whole `agent_gateway` package (code,
+persistence, tests) between the Step A/B merge and starting on AG-006 —
+not requested by anyone, done because solid test coverage doesn't rule out
+logic bugs a second look catches. Found five real issues, all fixed same
+day; three were genuine correctness bugs, not style. Full detail and
+evidence: `review/AGENT_FEEDBACK.md` AG-007/AG-008/AG-009 (the two closed
+without a new AG number — a stale package docstring and duplicated
+validation logic — are folded into the commit, not separately tracked).
+
+- **AG-007 (rate-limit TOCTOU race, HIGH).** Reading the proposal-rate-
+  limit count and claiming in separate transactions let concurrent
+  proposals for one assignment each observe a stale below-limit count and
+  all get accepted. Fixed with a Postgres advisory transaction lock
+  (`pg_advisory_xact_lock`) serializing the whole claim→count→evaluate→
+  settle sequence per `assignment_id`. Verified the fix is real, not
+  incidental: manually disabled the lock, confirmed the new concurrency
+  test (10 real threads, real PostgreSQL) actually fails (10/10 or 7/10
+  accepted instead of the configured 3), then restored it and re-confirmed
+  green.
+- **AG-008 (fail-open retry replay, HIGH).** The idempotent-retry path
+  read "no `REJECTED` event" as proof of acceptance, so an outcome claimed
+  but never settled (a crash between claim and verdict) would make every
+  future retry silently report `accepted=True` without ever running
+  authorization. Fixed by making an unsettled claim resume evaluation with
+  fresh inputs rather than assuming a verdict — genuinely fail-closed, not
+  merely refusing forever (a raise-based fix was considered and rejected
+  as unrecoverable). Event ids also switched to content-derived, so a
+  resumed attempt's re-appended `RECEIVED` event can't duplicate.
+- **AG-009 (unchecked `required_evidence_fields`, MEDIUM).** A Step-A
+  contract field with no enforcement anywhere — a proposal with zero
+  evidence was accepted even against an assignment that names required
+  evidence. Fixed with a conservative check (some evidence must be cited
+  when required; content-level verification is explicitly out of scope,
+  same as AG-005).
+
+Evidence: 5 new/changed tests (`tests/unit/test_agent_gateway.py::TestInterruptedClaimIsResumedNotAssumedAccepted`
+×2, `::TestRequiredEvidence` ×3), plus 1 new real-concurrency integration
+test (`tests/integration/test_agent_gateway_store.py::TestRateLimitIsAtomicUnderRealConcurrency`).
+Full re-verification after the fixes: 24→29 unit tests still pass
+unchanged (no regressions from the transaction/connection-threading
+refactor), 6→7 integration tests pass, full non-integration suite
+839 passed/1 skipped, ruff/mypy clean.
+
 ---
 
 ## 1. Where this track actually stands
@@ -143,7 +195,11 @@ head `c9e1d5a3f286`):
 
 ---
 
-## 2. Evidence, this session (2026-08-28)
+## 2. Evidence, at the Step A/B merge point (2026-08-28)
+
+**Superseded by §0a's counts after the self-review hardening pass** (5
+more tests, one more integration test file). Kept as-is below as the
+historical record of what was true at the merge itself.
 
 - `uv run pytest tests/unit/test_agent_gateway_contracts.py -q` — **29
   passed** (was 27 at Step A; +2 for the new `decision_fingerprint`
@@ -196,7 +252,10 @@ See `review/AGENT_FEEDBACK.md` for the full register with evidence. Summary:
 | AG-003 | Supervisor response-handling / fail-closed-on-timeout | OPEN — Step C |
 | AG-004 | Assignment-scope server-side enforcement | **CLOSED** |
 | AG-005 | Evidence/news ingestion path (SSRF mitigation unproven, no exposure yet) | OPEN — deferred to Step D by design |
-| AG-006 | `TradeIntent.feature_snapshot_id` semantics for agent-originated intents — blocks `TradeProposal → TradeIntent` mapping | OPEN — needs a Dev-1 handshake (shared contract) |
+| AG-006 | `TradeIntent.feature_snapshot_id` semantics for agent-originated intents — blocks `TradeProposal → TradeIntent` mapping | OPEN — handshake in progress with Dev 1 (see §5) |
+| AG-007 | Proposal-rate-limit check was a check-then-act race under concurrent submission | **CLOSED** (self-review, §0a) |
+| AG-008 | Idempotent-retry path defaulted to `accepted=True` for a claimed-but-never-settled outcome | **CLOSED** (self-review, §0a) |
+| AG-009 | `TradingAssignment.required_evidence_fields` was defined but never enforced | **CLOSED** (self-review, §0a) |
 
 ---
 
@@ -213,16 +272,23 @@ mapping. Not yet created — see §5.
 
 ## 5. Next actions (V3 §18 sequence, steps D onward — A/B/C already done)
 
-1. **D — raise AG-006 with Dev 1.** V3 §5 already gives explicit
-   direction (do not make `feature_snapshot_id` optional; `DecisionContextBundle`
-   should carry a trusted platform-issued `feature_snapshot_id` that the
-   Gateway copies into the `TradeIntent` it constructs) — but the exact
-   field addition to `DecisionContextBundle` and its mapping tests still
-   need Dev-1 acknowledgment per the shared-contract handshake (instructions
-   §4): identify exact need (done, this section) → propose the exact
-   schema/field change → Dev 1 acknowledges → both suites updated → merge.
+1. **D — raise AG-006 with Dev 1. In progress, live handshake underway
+   2026-08-28** (cross-session messages, not just this document). Dev 1
+   agreed with the proposed shape (reuse `feature_snapshots`, never a
+   distinct "kind" for agent-originated decisions, never fabricate an id)
+   but found a real structural gap I didn't know about: there is no
+   standalone `compute_features(snapshot, history, spec) -> FeatureEvidence`
+   entry point today — feature computation is fused into each strategy's
+   own `StrategyCallable.evaluate()` (`trading_agent/base.py`). Dev 1 is
+   extracting a standalone `compute_features()` (their territory:
+   `trading_agent/`, `application/live_decision.py`) that both
+   `decide_once()` and this Gateway can call; my Gateway will call it
+   directly to populate `DecisionContextBundle.feature_snapshot_id` before
+   ever asking an agent anything. Not urgent enough to block Dev 1's
+   current execution-activation work — told them to finish that first and
+   ping me when `compute_features()` lands.
 2. **E — implement `TradeProposal → TradeIntent` mapping** on a new
-   `agent/tradeintent-mapping` branch, once D is acknowledged.
+   `agent/tradeintent-mapping` branch, once D lands.
 3. **F — run the shared integration path** (V3 §15) once the mapping
    exists — not available yet, correctly not attempted this pass.
 4. **G/H/I** (external Trader against genuine shadow context, Supervisor
@@ -239,26 +305,27 @@ mapping. Not yet created — see §5.
 ## 6. Summary for Dev 1 (canonical `status.md`, when next handed over)
 
 > Agent Integration track, Step A + Step B (Agent Gateway ingestion+audit
-> layer, ADR-005 §8's "first proof target") are merged to `main` and
-> pushed to `origin/main` (`ba658c5`, `bf18ec5` — rebased from the
-> original `cc16e4f`/`2f7c921` onto your F-049 work first, clean, no
-> conflicts). Identity/credential authentication, assignment authorization,
-> context-hash binding + expiry, idempotent proposal/NO_TRADE claiming
-> with conflict detection, fail-closed audit trail. Six new PostgreSQL
-> tables via migration `d4b6e2f81a37` (off your confirmed head
-> `c9e1d5a3f286`) — `agent_identities`, `agent_credentials`,
-> `agent_trading_assignments`, `agent_decision_context_bundles`,
-> `agent_decision_outcomes`, `agent_decision_events`, all in
-> `APPEND_ONLY_TABLES`. 30 new/changed tests (24 unit + 6 integration),
-> plus 29 Step-A contract tests. Full non-integration suite (834 tests)
-> and the migration-equivalence suite both green, re-verified again
-> post-rebase in an isolated worktree/DB; nothing outside this track's own
-> files imports any of it. **One open item needs your input: AG-006** —
-> see §5 above; V3 already gave me direction on the shape of the fix
-> (`DecisionContextBundle` carries the trusted `feature_snapshot_id`), I
-> just need your acknowledgment on the exact field/schema before touching
-> `TradeIntent`'s construction path. **Also flagged (§0 above):** five of
-> your integration test files bypass `CRUMBLR_DATABASE_URL` via a
-> hardcoded `DEFAULT_TEST_URL`, which will keep causing cross-session
-> database collisions until parameterized — not fixed here since those
-> are your files.
+> layer, ADR-005 §8's "first proof target") are merged to `main`/`origin/main`
+> (`ba658c5`, `bf18ec5`, rebased onto your F-049 work first, clean). A
+> same-day self-review then caught and fixed three real bugs, not style:
+> a proposal-rate-limit check-then-act race under concurrent submission
+> (fixed with a Postgres advisory transaction lock serializing claim→
+> count→evaluate→settle per assignment — verified by confirming the new
+> concurrency test actually fails with the lock disabled, then passes with
+> it restored), an idempotent-retry path that defaulted to `accepted=True`
+> for a claimed-but-never-settled outcome (fixed by resuming evaluation
+> with fresh inputs instead of assuming a verdict), and an unenforced
+> `required_evidence_fields` contract field. Full detail: `review/AGENT_FEEDBACK.md`
+> AG-007/008/009. 35 new/changed tests total, full non-integration suite
+> 839 passed/1 skipped, migration suite green, nothing outside this
+> track's own files imports any of it.
+>
+> **AG-006 handshake is live** (direct cross-session messages, not just
+> this document) — Dev 1 found a real gap in my original proposal
+> (`compute_features()` doesn't exist standalone yet, only fused into
+> each strategy's `evaluate()`) and is extracting it; not blocking their
+> current execution-activation work, they'll ping me when it's ready.
+>
+> **Already resolved, no action needed:** the `DEFAULT_TEST_URL`-bypasses-
+> `CRUMBLR_DATABASE_URL` gap I flagged — you found and fixed it
+> independently the same day, confirmed clean on my end too.

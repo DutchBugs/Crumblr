@@ -14,6 +14,7 @@ Postgres-store objects pointed at the same engine, replaces one that
 
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -280,3 +281,51 @@ class TestConcurrentClaimIsAtomic:
 
         assert first.claimed is True
         assert second.claimed is False
+
+
+class TestRateLimitIsAtomicUnderRealConcurrency:
+    """Regression coverage for a self-review finding: the original design
+
+    read the proposal-rate-limit count and claimed in two separate
+    transactions, letting concurrent submissions for the same assignment
+    each observe a stale below-limit count and all get accepted. The fix is
+    a per-assignment Postgres advisory lock held for the whole claim→count→
+    evaluate→settle sequence (`AgentDecisionOutcomeStore.lock_assignment()`).
+    This test only proves anything under a real database — a single
+    Postgres instance's real lock manager, real concurrent connections."""
+
+    def test_only_max_proposals_per_hour_are_ever_accepted_under_real_concurrent_submission(
+        self, engine: Engine
+    ) -> None:
+        admin = build_gateway(engine)
+        admin.register_identity(identity(), credential_secret=SECRET)
+        admin.issue_assignment(assignment(max_proposals_per_hour=3))
+        bundle = admin.issue_context_bundle(context_bundle())
+
+        proposals = [proposal(context_hash=bundle.content_hash) for _ in range(10)]
+        results: list[Any] = []
+        results_lock = threading.Lock()
+
+        def submit(one_proposal: TradeProposal) -> None:
+            # Each thread gets its own AgentGateway/store objects sharing
+            # only the engine -- the same shape two genuinely separate
+            # concurrent Gateway processes would have, not two threads
+            # sharing one connection.
+            worker_gateway = build_gateway(engine)
+            result = worker_gateway.submit_trade_proposal(
+                agent_id=AGENT_ID, credential_secret=SECRET, proposal=one_proposal, now=FIXED_NOW
+            )
+            with results_lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=submit, args=(p,)) for p in proposals]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        accepted = [result for result in results if result.accepted]
+        rejected = [result for result in results if not result.accepted]
+        assert len(accepted) == 3
+        assert len(rejected) == 7
+        assert all(result.reason is AgentRejectionReason.RATE_LIMIT_EXCEEDED for result in rejected)

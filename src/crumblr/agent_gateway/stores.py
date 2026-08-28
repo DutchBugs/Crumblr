@@ -10,12 +10,27 @@ Every "register/issue/claim" method here is content-addressed and
 fail-closed on conflict (`review/THREAT_MODEL_AGENT_GATEWAY.md` §5): the
 same id with the same content is a safe no-op or an idempotent claim; the
 same id with *different* content always raises, never silently overwrites.
+
+`AgentDecisionOutcomeStore.transaction()`/`.lock_assignment()` exist so
+`AgentGateway` can run one assignment's whole claim→evaluate→settle
+sequence as a single serialized critical section (mirrors
+`persistence/execution.py`'s optional `connection` parameter, extended
+with a per-assignment advisory lock) — the fix for a real race a
+self-review caught: reading a proposal-rate-limit count and then claiming
+in two separate transactions let two concurrent proposals for the same
+assignment both observe a below-limit count and both get accepted. The
+in-memory implementation's lock/transaction are no-ops (tests run
+single-threaded; there is nothing to serialize), but it exposes the same
+shape so `AgentGateway`'s code does not need to know which backend it is
+talking to.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from crumblr.agent_gateway.contracts import (
@@ -165,7 +180,11 @@ class OutcomeClaimResult:
 
     `False` with no exception means an earlier attempt already holds this
     `outcome_id` with matching content — a safe retry, the same semantics
-    `persistence/execution.py::ClaimResult` documents."""
+    `persistence/execution.py::ClaimResult` documents. This does **not**
+    mean the outcome was ever settled (`ACCEPTED`/`REJECTED`) — an
+    interrupted first attempt can leave a claimed-but-unsettled outcome;
+    callers resume evaluation for that case rather than assuming
+    acceptance (see `AgentGateway.submit_trade_proposal`)."""
 
 
 @dataclass(frozen=True)
@@ -187,18 +206,27 @@ class _StoredOutcome:
     events: list[AgentDecisionEventRecord] = field(default_factory=list)
 
 
+_SETTLING_EVENT_TYPES = (AgentDecisionEventType.ACCEPTED, AgentDecisionEventType.REJECTED)
+
+
 class AgentDecisionOutcomeStore(Protocol):
+    def transaction(self) -> AbstractContextManager[Any]: ...
+
+    def lock_assignment(self, assignment_id: UUID, *, connection: Any = None) -> None: ...
+
     def claim_trade_proposal(
-        self, proposal: TradeProposal, *, now: UtcDatetime
+        self, proposal: TradeProposal, *, now: UtcDatetime, connection: Any = None
     ) -> OutcomeClaimResult: ...
 
     def claim_no_trade(
-        self, decision: NoTradeDecision, *, now: UtcDatetime
+        self, decision: NoTradeDecision, *, now: UtcDatetime, connection: Any = None
     ) -> OutcomeClaimResult: ...
 
     def outcome_type(self, outcome_id: UUID) -> AgentOutcomeType | None: ...
 
-    def count_claimed_since(self, *, assignment_id: UUID, since: UtcDatetime) -> int: ...
+    def count_claimed_since(
+        self, *, assignment_id: UUID, since: UtcDatetime, connection: Any = None
+    ) -> int: ...
 
     def append_event(
         self,
@@ -208,18 +236,42 @@ class AgentDecisionOutcomeStore(Protocol):
         occurred_at_utc: UtcDatetime,
         reason_codes: tuple[str, ...] = (),
         detail: str | None = None,
+        connection: Any = None,
     ) -> None: ...
 
     def events_for(self, outcome_id: UUID) -> tuple[AgentDecisionEventRecord, ...]: ...
+
+    def settlement_for(
+        self, outcome_id: UUID, *, connection: Any = None
+    ) -> AgentDecisionEventRecord | None:
+        """The `ACCEPTED` or `REJECTED` event for `outcome_id`, if the claim
+
+        was ever fully settled — `None` if it was claimed but the process
+        that claimed it never got as far as recording a verdict (a
+        crashed/interrupted attempt). Distinct from "no such outcome at
+        all"; a caller checks `claim_trade_proposal`'s own result first to
+        tell the two apart."""
+        ...
 
 
 class InMemoryAgentDecisionOutcomeStore:
     def __init__(self) -> None:
         self._outcomes: dict[UUID, _StoredOutcome] = {}
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """No real transaction: tests run single-threaded, there is nothing
+
+        concurrent to serialize against."""
+        yield None
+
+    def lock_assignment(self, assignment_id: UUID, *, connection: Any = None) -> None:
+        del assignment_id, connection  # no-op; see `transaction()`
+
     def claim_trade_proposal(
-        self, proposal: TradeProposal, *, now: UtcDatetime
+        self, proposal: TradeProposal, *, now: UtcDatetime, connection: Any = None
     ) -> OutcomeClaimResult:
+        del connection
         return self._claim(
             outcome_id=proposal.proposal_id,
             outcome_type=AgentOutcomeType.TRADE_PROPOSAL,
@@ -229,7 +281,10 @@ class InMemoryAgentDecisionOutcomeStore:
             now=now,
         )
 
-    def claim_no_trade(self, decision: NoTradeDecision, *, now: UtcDatetime) -> OutcomeClaimResult:
+    def claim_no_trade(
+        self, decision: NoTradeDecision, *, now: UtcDatetime, connection: Any = None
+    ) -> OutcomeClaimResult:
+        del connection
         return self._claim(
             outcome_id=decision.decision_id,
             outcome_type=AgentOutcomeType.NO_TRADE,
@@ -271,7 +326,10 @@ class InMemoryAgentDecisionOutcomeStore:
         stored = self._outcomes.get(outcome_id)
         return None if stored is None else stored.outcome_type
 
-    def count_claimed_since(self, *, assignment_id: UUID, since: UtcDatetime) -> int:
+    def count_claimed_since(
+        self, *, assignment_id: UUID, since: UtcDatetime, connection: Any = None
+    ) -> int:
+        del connection
         return sum(
             1
             for outcome in self._outcomes.values()
@@ -286,10 +344,18 @@ class InMemoryAgentDecisionOutcomeStore:
         occurred_at_utc: UtcDatetime,
         reason_codes: tuple[str, ...] = (),
         detail: str | None = None,
+        connection: Any = None,
     ) -> None:
+        del connection
         stored = self._outcomes.get(outcome_id)
         if stored is None:
             raise KeyError(f"cannot append an event for an unclaimed outcome_id {outcome_id}")
+        # Content-derived identity, same discipline as
+        # `persistence/execution.py::event_id_for` -- re-appending the same
+        # (outcome_id, event_type) pair (a resumed, interrupted attempt) is
+        # a no-op, never a duplicate row.
+        if any(event.event_type == event_type for event in stored.events):
+            return
         stored.events.append(
             AgentDecisionEventRecord(
                 outcome_id=outcome_id,
@@ -303,3 +369,14 @@ class InMemoryAgentDecisionOutcomeStore:
     def events_for(self, outcome_id: UUID) -> tuple[AgentDecisionEventRecord, ...]:
         stored = self._outcomes.get(outcome_id)
         return () if stored is None else tuple(stored.events)
+
+    def settlement_for(
+        self, outcome_id: UUID, *, connection: Any = None
+    ) -> AgentDecisionEventRecord | None:
+        del connection
+        stored = self._outcomes.get(outcome_id)
+        if stored is None:
+            return None
+        return next(
+            (event for event in stored.events if event.event_type in _SETTLING_EVENT_TYPES), None
+        )

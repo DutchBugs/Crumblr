@@ -495,3 +495,117 @@ class TestNoTradeIsDistinctFromNoResponse:
             gateway.submit_no_trade(
                 agent_id=AGENT_ID, credential_secret=SECRET, decision=conflicting, now=FIXED_NOW
             )
+
+
+class TestInterruptedClaimIsResumedNotAssumedAccepted:
+    """Regression coverage for a self-review finding: the original `_replay`
+
+    treated "no REJECTED event found" as proof of acceptance. A claim can be
+    durably recorded with no settling event at all if the process that made
+    it crashed between the claim and the verdict -- a retry must resume
+    evaluation with fresh inputs, never default to `accepted=True`."""
+
+    def test_a_claimed_but_unsettled_proposal_is_evaluated_fresh_not_assumed_accepted(
+        self, gateway: AgentGateway, outcomes: InMemoryAgentDecisionOutcomeStore
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        # A longer proposal lifetime than the bundle's isolates
+        # CONTEXT_EXPIRED from PROPOSAL_EXPIRED (both default to the same
+        # FIXED_NOW+5min window otherwise).
+        original = proposal(
+            context_hash=bundle.content_hash,
+            expires_at_utc=bundle.expires_at_utc + timedelta(hours=1),
+        )
+        # Simulate an interrupted first attempt: claim directly via the
+        # store, bypassing the Gateway's evaluate+settle steps entirely --
+        # exactly the state a crash between claim and verdict would leave.
+        outcomes.claim_trade_proposal(original, now=FIXED_NOW)
+        assert outcomes.settlement_for(original.proposal_id) is None
+
+        # If the bug were still present, this would incorrectly return
+        # accepted=True regardless of "now" -- the fix must actually run
+        # the context-expiry check fresh, using this call's own inputs.
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=original,
+            now=bundle.expires_at_utc + timedelta(seconds=1),
+        )
+        assert result.accepted is False
+        assert result.reason is AgentRejectionReason.CONTEXT_EXPIRED
+
+    def test_resuming_an_unsettled_claim_does_not_duplicate_the_received_event(
+        self, gateway: AgentGateway, outcomes: InMemoryAgentDecisionOutcomeStore
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        original = proposal(context_hash=bundle.content_hash)
+        outcomes.claim_trade_proposal(original, now=FIXED_NOW)
+
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+
+        received = [
+            event
+            for event in outcomes.events_for(original.proposal_id)
+            if event.event_type is AgentDecisionEventType.RECEIVED
+        ]
+        assert len(received) == 1
+
+
+class TestRequiredEvidence:
+    """Regression coverage for a self-review finding: `TradingAssignment.required_evidence_fields`
+
+    was defined but never checked -- a proposal with no evidence at all was
+    accepted even against an assignment that demands some."""
+
+    def test_no_evidence_when_the_assignment_requires_it_is_rejected(
+        self, gateway: AgentGateway
+    ) -> None:
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment(required_evidence_fields=("regime",)))
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash, evidence_refs=()),
+            now=FIXED_NOW,
+        )
+        assert result.reason is AgentRejectionReason.MISSING_REQUIRED_EVIDENCE
+
+    def test_some_evidence_when_the_assignment_requires_it_is_not_rejected_on_that_ground(
+        self, gateway: AgentGateway
+    ) -> None:
+        """Conservative check, documented as such in gateway.py: proves
+
+        *some* evidence was cited, does not verify it covers each named
+        field (that needs evidence-content inspection, out of scope until
+        AG-005's ingestion path exists)."""
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment(required_evidence_fields=("regime",)))
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash, evidence_refs=(uuid4(),)),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+
+    def test_no_evidence_is_fine_when_the_assignment_does_not_require_any(
+        self, gateway: AgentGateway
+    ) -> None:
+        """`assignment()`'s default `required_evidence_fields=()` -- proves
+
+        the check is opt-in per assignment, not a blanket requirement."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash, evidence_refs=()),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
