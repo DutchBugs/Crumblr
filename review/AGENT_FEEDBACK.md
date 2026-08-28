@@ -1,7 +1,7 @@
 # Agent Integration track — local finding register
 
 **This document is Dev-2-owned**, per
-`review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §15. It uses
+`review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V3.md` §17. It uses
 local workstream IDs (`AG-###`), never the project-wide reviewer `F-###`
 series that lives in `review/FEEDBACK.md`. Do not create `feedback-dev2.*`
 files — the one project-wide reviewer line stays `feedback.1.25.md` →
@@ -10,7 +10,7 @@ files — the one project-wide reviewer line stays `feedback.1.25.md` →
 These are self-identified gaps (found while building/reviewing this
 track's own work against `review/THREAT_MODEL_AGENT_GATEWAY.md`), not
 findings from an external reviewing agent. Escalate to the project-wide
-reviewer only per instructions §18 (material safety ambiguity, a Phase-4
+reviewer only per instructions §19 (material safety ambiguity, a Phase-4
 invariant needing to change, an authority-boundary dispute, an agent path
 unexpectedly reaching execution, or a complete MVP readiness bundle).
 
@@ -22,7 +22,7 @@ unexpectedly reaching execution, or a complete MVP readiness bundle).
 |---|---|---|---|---|
 | AG-003 | HIGH | No Supervisor response-handling code exists — `UNKNOWN`-on-timeout/error is documented intent in the contract, not yet enforced behavior | OPEN | Step C Supervisor boundary implemented + tested |
 | AG-005 | MEDIUM (no exposure yet; escalates to HIGH if an ingestion path is proposed) | No evidence/news ingestion path exists — the SSRF mitigation in the threat model (§4.7) is a constraint on a not-yet-built system | OPEN — deferred to Step D by design | Step D, when an ingestion path is actually designed |
-| AG-006 | MEDIUM — blocks `TradeProposal → TradeIntent` mapping, not the shadow-ingestion milestone | The internal `TradeIntent` contract requires a non-optional `feature_snapshot_id: UUID`. An externally-originated proposal has no computed feature snapshot — only a `DecisionContextBundle` and `evidence_refs`. Constructing a real `TradeIntent` from an accepted `TradeProposal` therefore requires deciding what `feature_snapshot_id` means for an agent-originated decision, which is a semantic question about a **shared contract** (`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §5 lists `TradeIntent` public shape as shared; §4 says stop and raise rather than force a change to protected/shared territory alone) | A Dev-1 handshake settles the semantics (e.g. a dedicated feature-snapshot record for agent-issued context, or a documented, agreed reinterpretation), then the mapping is implemented and tested |
+| AG-006 | MEDIUM — blocks `TradeProposal → TradeIntent` mapping, not the shadow-ingestion milestone | The internal `TradeIntent` contract requires a non-optional `feature_snapshot_id: UUID`. An externally-originated proposal has no computed feature snapshot — only a `DecisionContextBundle` and `evidence_refs`. Constructing a real `TradeIntent` from an accepted `TradeProposal` therefore requires deciding what `feature_snapshot_id` means for an agent-originated decision, which is a semantic question about a **shared contract** (instructions §4 lists `TradeIntent` as shared territory; stop and raise rather than force a change alone — done correctly per instructions §4's own note: "AG-006 was handled correctly by stopping instead of forcing a shared-contract interpretation"). **V3 §5 gives explicit direction on the shape of the fix**: do NOT make `feature_snapshot_id` optional. Instead, `DecisionContextBundle` gains a trusted, platform-issued `feature_snapshot_id`; the Gateway validates the proposal against that bundle and, when it constructs the `TradeIntent`, sets `TradeIntent.feature_snapshot_id = bundle.feature_snapshot_id` directly — never fabricates one after the fact. Additional agent-supplied inputs/evidence stay separate immutable refs, not folded into this field | The exact `DecisionContextBundle` field addition and its mapping tests are proposed to Dev 1 and acknowledged (instructions §4's handshake flow), then `TradeProposal → TradeIntent` mapping is implemented and tested on a new `agent/tradeintent-mapping` branch |
 
 ## Closed
 

@@ -1,11 +1,47 @@
 # Agent Integration track — status
 
 **Workstream:** Dev 2 — External Agent Integration
-**Owning instructions:** `review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md`
+**Owning instructions:** `review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V3.md`
+(supersedes V2 — mandatory workspace/DB isolation, explicit AG-006
+direction; see §0 below)
 **Formal direction:** `feedback.1.25.md` (project-wide `review/FEEDBACK.md`)
 **This document is Dev-2-owned.** Canonical `status.md` and
 `review/FEEDBACK.md` remain Dev-1-owned; only a short consolidated summary
-gets handed to Dev 1 at a meaningful merged milestone (instructions §15).
+gets handed to Dev 1 at a meaningful merged milestone (instructions §17).
+
+---
+
+## 0. Workspace isolation (V3 §1/§2) — done 2026-08-28
+
+Working directory: dedicated worktree at `.claude/worktrees/agent-dev2`,
+branch `agent/contracts`, own `.venv` (created automatically on first
+`uv run`). Test database: dedicated `crumblr_test_dev2` (same Postgres
+instance, port 55432, isolated by name) — selected via the existing
+`CRUMBLR_DATABASE_URL` env var, e.g.:
+
+```text
+CRUMBLR_DATABASE_URL=postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_test_dev2 uv run pytest ...
+```
+
+**Integration notice for Dev 1 — partial harness isolation gap found:**
+`tests/integration/conftest.py::engine` (and anything using it) respects
+`CRUMBLR_DATABASE_URL` correctly via `persistence.engine.database_url()`.
+But five integration test files construct their own runtime with the raw
+`DEFAULT_TEST_URL` constant instead of going through `database_url()`,
+so they silently ignore the env var and always hit the literal default
+database regardless of isolation intent:
+`tests/integration/test_live_decision.py`,
+`tests/integration/test_market_data_store.py`,
+`tests/integration/test_migrations.py`,
+`tests/integration/test_orchestrator_persistence.py`,
+`tests/integration/test_run_survives_restart.py`. Not fixed here — these
+are Dev-1-owned test files and this is exactly the "coordinate the
+parameterization with Dev 1" case V3 §2 anticipates, not something to
+patch unilaterally. This track's own integration suite
+(`tests/integration/test_agent_gateway_store.py`) and
+`tests/integration/test_migrations.py` (which happened to still pass
+cleanly run alone) were both re-verified against the isolated DB and are
+unaffected either way.
 
 ---
 
@@ -13,11 +49,20 @@ gets handed to Dev 1 at a meaningful merged milestone (instructions §15).
 
 | Step | Scope | State |
 |---|---|---|
-| A — design/contracts | ADR-005, threat model, eight contracts, structural tests | **Complete, committed** (`agent/contracts`, commit `cc16e4f`, 2026-08-27). |
-| B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling | **Ingestion + audit layer complete and tested, 2026-08-28. `TradeProposal → TradeIntent` mapping deliberately NOT built this pass — see AG-006 below.** Not yet committed (see §4). |
+| A — design/contracts | ADR-005, threat model, eight contracts, structural tests | **Complete, merged to `main`/pushed to `origin/main`** (rebased+re-hashed as `ba658c5`, 2026-08-28 — original commit was `cc16e4f`, 2026-08-27, before rebasing onto Dev 1's F-049 work). |
+| B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling | **Ingestion + audit layer complete, tested, merged to `main`/pushed to `origin/main`** (rebased+re-hashed as `bf18ec5`, 2026-08-28 — original commit was `2f7c921`). `TradeProposal → TradeIntent` mapping deliberately NOT built this pass — see AG-006 below. |
 | C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003). |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP per instructions §10. |
 | E — first agent-driven canary | full Step B/C bundle + everything Milestone A (Crumblr Execution Proof) already requires | **Not started**, blocked on B/C. |
+
+**Why the commit hashes changed:** `agent/contracts` was created off `main`
+at `86873a6`, before Dev 1's F-049 `SubmissionGate` (`a1a2770`, `f0fd167`)
+landed. Per V3 §6's merge policy, this branch was rebased onto current
+`main` (clean, no conflicts — the two tracks' files are fully disjoint,
+confirmed by Dev 1 independently too), re-verified fully green in
+isolation (§2 below), then fast-forward-pushed straight to `origin/main`
+(`f0fd167..bf18ec5`) — nothing force-pushed, nothing rewritten on `main`
+itself, `main` only ever moved forward.
 
 **Nothing in `src/crumblr/agent_gateway/` or `src/crumblr/persistence/agent_gateway.py`
 is imported by anything outside itself and its own tests.** Verified by
@@ -79,11 +124,13 @@ head `c9e1d5a3f286`):
 - **No `TradeProposal → TradeIntent` mapping.** `TradeIntent` requires a
   non-optional `feature_snapshot_id: UUID`; an externally-originated
   proposal has no computed feature snapshot. This is a shared-contract
-  semantic question (`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md`
-  §4/§5: stop and raise rather than force it alone) — tracked as **AG-006**
-  in `review/AGENT_FEEDBACK.md`, not silently worked around. ADR-005's own
-  Step B description doesn't actually require this mapping either — Risk/
-  Policy Gate/`DecisionCapsule` sealing is Step C territory (§9).
+  semantic question (instructions §4: stop and raise rather than force it
+  alone) — tracked as **AG-006** in `review/AGENT_FEEDBACK.md`, not
+  silently worked around. V3 §5 has since given explicit direction on the
+  shape of the fix (see §5 below) — still pending a Dev-1 handshake on the
+  exact field. ADR-005's own Step B description doesn't actually require
+  this mapping either — Risk/Policy Gate/`DecisionCapsule` sealing is Step
+  C territory (§9).
 - **No `ProposalWithdrawal` enforcement.** The contract exists (Step A);
   wiring its `SUBMISSION_STARTED`-cutoff rule needs the intent-mapping
   above to exist first, since there is no execution timeline to check
@@ -153,49 +200,65 @@ See `review/AGENT_FEEDBACK.md` for the full register with evidence. Summary:
 
 ---
 
-## 4. Outstanding process item — not yet committed
+## 4. Merge status — done 2026-08-28
 
-Step B's entire diff (contracts addition, gateway/stores/auth/errors/events
-modules, schema additions, migration, Postgres store implementations, unit
-+ integration tests, this document and `AGENT_FEEDBACK.md`) is currently
-uncommitted on branch `agent/contracts`, on top of the already-committed
-Step A (`cc16e4f`). Per `CLAUDE.md` §4, commits happen only when the user
-asks — Step A was committed this way earlier in the session; Step B is
-held pending the same confirmation.
+Step A + Step B are merged and pushed. `agent/contracts` is now identical
+to `origin/main` at its tip (`bf18ec5`) — not a long-lived divergent
+branch, per V3 §6's explicit instruction. The next slice of work opens a
+fresh short-lived branch off this point: `agent/tradeintent-mapping`
+(V3 §6/§7), for AG-006 resolution + the `TradeProposal → TradeIntent`
+mapping. Not yet created — see §5.
 
 ---
 
-## 5. Next actions
+## 5. Next actions (V3 §18 sequence, steps D onward — A/B/C already done)
 
-1. Ask the user/owner whether to commit Step B.
-2. Raise AG-006 (the `feature_snapshot_id` question) with Dev 1 — this is
-   the one place Step B's own scope genuinely touches shared-contract
-   territory and instructions say to stop and raise rather than resolve it
-   alone.
-3. Once AG-006 is resolved: implement `TradeProposal → TradeIntent`
-   mapping, then Step C (external Supervisor boundary, AG-003).
-4. Do not request formal reviewer input for routine continuation — only
-   if AG-006's resolution turns out to require a Phase-4-invariant change
-   (instructions §18).
+1. **D — raise AG-006 with Dev 1.** V3 §5 already gives explicit
+   direction (do not make `feature_snapshot_id` optional; `DecisionContextBundle`
+   should carry a trusted platform-issued `feature_snapshot_id` that the
+   Gateway copies into the `TradeIntent` it constructs) — but the exact
+   field addition to `DecisionContextBundle` and its mapping tests still
+   need Dev-1 acknowledgment per the shared-contract handshake (instructions
+   §4): identify exact need (done, this section) → propose the exact
+   schema/field change → Dev 1 acknowledges → both suites updated → merge.
+2. **E — implement `TradeProposal → TradeIntent` mapping** on a new
+   `agent/tradeintent-mapping` branch, once D is acknowledged.
+3. **F — run the shared integration path** (V3 §15) once the mapping
+   exists — not available yet, correctly not attempted this pass.
+4. **G/H/I** (external Trader against genuine shadow context, Supervisor
+   boundary, agent-driven shadow proof) — blocked on E/F, in that order,
+   per V3 §18.
+5. Do not request formal reviewer input for routine continuation — only
+   per V3 §19's five triggers (material safety/security ambiguity,
+   required Phase-4 invariant change, unresolved authority dispute,
+   unexpected agent→execution path, complete agent-driven canary
+   readiness).
 
 ---
 
 ## 6. Summary for Dev 1 (canonical `status.md`, when next handed over)
 
-> Agent Integration track, Step B (Agent Gateway ingestion + audit layer,
-> ADR-005 §8's "first proof target"): identity/credential authentication,
-> assignment authorization, context-hash binding + expiry, idempotent
-> proposal/NO_TRADE claiming with conflict detection, fail-closed audit
-> trail. Six new PostgreSQL tables via migration `d4b6e2f81a37` (off your
-> confirmed head `c9e1d5a3f286`) — `agent_identities`, `agent_credentials`,
+> Agent Integration track, Step A + Step B (Agent Gateway ingestion+audit
+> layer, ADR-005 §8's "first proof target") are merged to `main` and
+> pushed to `origin/main` (`ba658c5`, `bf18ec5` — rebased from the
+> original `cc16e4f`/`2f7c921` onto your F-049 work first, clean, no
+> conflicts). Identity/credential authentication, assignment authorization,
+> context-hash binding + expiry, idempotent proposal/NO_TRADE claiming
+> with conflict detection, fail-closed audit trail. Six new PostgreSQL
+> tables via migration `d4b6e2f81a37` (off your confirmed head
+> `c9e1d5a3f286`) — `agent_identities`, `agent_credentials`,
 > `agent_trading_assignments`, `agent_decision_context_bundles`,
 > `agent_decision_outcomes`, `agent_decision_events`, all in
 > `APPEND_ONLY_TABLES`. 30 new/changed tests (24 unit + 6 integration),
-> plus 29 Step-A contract tests (2 new, for a `NoTradeDecision.decision_fingerprint`
-> field this pass needed). Full non-integration suite (834 tests) and the
-> migration-equivalence suite both green; nothing outside this track's own
+> plus 29 Step-A contract tests. Full non-integration suite (834 tests)
+> and the migration-equivalence suite both green, re-verified again
+> post-rebase in an isolated worktree/DB; nothing outside this track's own
 > files imports any of it. **One open item needs your input: AG-006** —
-> `TradeIntent.feature_snapshot_id` is non-optional and I don't think it's
-> my call alone what it should mean for an agent-originated decision;
-> see `review/AGENT_FEEDBACK.md` for the exact question. Not committed yet,
-> pending the same go-ahead Step A got.
+> see §5 above; V3 already gave me direction on the shape of the fix
+> (`DecisionContextBundle` carries the trusted `feature_snapshot_id`), I
+> just need your acknowledgment on the exact field/schema before touching
+> `TradeIntent`'s construction path. **Also flagged (§0 above):** five of
+> your integration test files bypass `CRUMBLR_DATABASE_URL` via a
+> hardcoded `DEFAULT_TEST_URL`, which will keep causing cross-session
+> database collisions until parameterized — not fixed here since those
+> are your files.
