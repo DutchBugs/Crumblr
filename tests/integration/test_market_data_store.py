@@ -36,7 +36,7 @@ from crumblr.market_data.synthetic import (
     generate_ticks,
 )
 from crumblr.mt5_gateway.simulated import SimulatedBroker
-from crumblr.persistence.engine import DEFAULT_TEST_URL
+from crumblr.persistence.engine import DEFAULT_TEST_URL, database_url
 from crumblr.persistence.journal import JournalIntegrityError
 from crumblr.persistence.market_data import (
     _TICK_INSERT_CHUNK_SIZE,
@@ -46,6 +46,11 @@ from crumblr.persistence.market_data import (
 )
 
 pytestmark = pytest.mark.integration
+
+TEST_URL = database_url(DEFAULT_TEST_URL)
+"""Resolved once, honouring `CRUMBLR_DATABASE_URL` — see `test_live_decision.py`'s
+
+`TEST_URL` for the full reasoning (workspace database isolation)."""
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BALANCE = Decimal("10000")
@@ -300,7 +305,7 @@ class TestTheReplayRecordsWhatItSaw:
 
     def persisted_replay(self, config: PlatformConfig, state_file: Path) -> int:
         runtime = build_durable_runtime(
-            environment=config.environment, state_file=state_file, url=DEFAULT_TEST_URL
+            environment=config.environment, state_file=state_file, url=TEST_URL
         )
         runtime.kill_switch.reset(operator="test", incident_note="arming a fresh test database")
         spec = build_instrument_spec()
@@ -386,7 +391,7 @@ class TestTheReplayRecordsWhatItSaw:
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         runtime.kill_switch.reset(operator="test", incident_note="arming a fresh test database")
         spec = build_instrument_spec()

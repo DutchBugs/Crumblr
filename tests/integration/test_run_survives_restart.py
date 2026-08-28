@@ -26,11 +26,21 @@ from sqlalchemy import Engine
 from crumblr.application.bootstrap import build_durable_runtime
 from crumblr.application.reconstruction import reconstruct_from_journal
 from crumblr.domain.enums import Environment
-from crumblr.persistence.engine import DEFAULT_TEST_URL
+from crumblr.persistence.engine import DEFAULT_TEST_URL, database_url
 from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.risk_session import PostgresRiskSessionStore
 
 pytestmark = pytest.mark.integration
+
+TEST_URL = database_url(DEFAULT_TEST_URL)
+"""Resolved once, honouring `CRUMBLR_DATABASE_URL` — passed as a plain
+
+string to the child process below, which never resolves the env var
+itself. Before this, the child always wrote to `DEFAULT_TEST_URL`'s
+literal database regardless of what the parent process's `engine`
+fixture pointed at — a real bug, not just a naming choice: it silently
+defeated per-workspace database isolation for every test in this file
+(review CRUMBLR_DEV1 V2 §2)."""
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -114,7 +124,7 @@ def run_in_a_separate_process(
             "-c",
             RUN_IN_A_SEPARATE_PROCESS,
             str(state_file),
-            DEFAULT_TEST_URL,
+            TEST_URL,
             str(REPO_ROOT),
             str(start),
             str(end),
@@ -154,7 +164,7 @@ class TestARunSurvivesTheProcessThatMadeIt:
             pytest.skip("this replay did not halt; nothing to carry across the restart")
 
         runtime = build_durable_runtime(
-            environment=Environment.PAPER, state_file=state_file, url=DEFAULT_TEST_URL
+            environment=Environment.PAPER, state_file=state_file, url=TEST_URL
         )
         try:
             assert runtime.kill_switch.is_halted

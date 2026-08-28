@@ -35,11 +35,16 @@ from crumblr.application.reconstruction import (
 from crumblr.config import PlatformConfig, load_config
 from crumblr.domain.enums import Environment, KillSwitchState
 from crumblr.domain.events import EventType
-from crumblr.persistence.engine import DEFAULT_TEST_URL
+from crumblr.persistence.engine import DEFAULT_TEST_URL, database_url
 from crumblr.persistence.journal import CapsuleStore, EventJournal
 from crumblr.risk.kill_switch import KillSwitch
 
 pytestmark = pytest.mark.integration
+
+TEST_URL = database_url(DEFAULT_TEST_URL)
+"""Resolved once, honouring `CRUMBLR_DATABASE_URL` — see `test_live_decision.py`'s
+
+`TEST_URL` for the full reasoning (workspace database isolation)."""
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BALANCE = Decimal("10000")
@@ -78,7 +83,7 @@ def persisted_replay(
     runtime = build_durable_runtime(
         environment=config.environment,
         state_file=state_file,
-        url=DEFAULT_TEST_URL,
+        url=TEST_URL,
     )
     arm(runtime.kill_switch)
 
@@ -263,7 +268,7 @@ class TestSafetyStateOnTheNormalPath:
         runtime = build_durable_runtime(
             environment=Environment.PAPER,
             state_file=tmp_path / "safety.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         try:
             assert runtime.kill_switch.is_halted
@@ -287,7 +292,7 @@ class TestSafetyStateOnTheNormalPath:
         restarted = build_durable_runtime(
             environment=config.environment,
             state_file=state_file,
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         try:
             assert restarted.kill_switch.is_halted

@@ -96,3 +96,71 @@ next migration (if any) must chain from there, per instructions section
 8.
 Relevant commit: cc16e4f, 2f7c921
 ```
+
+---
+
+```text
+2026-08-28 — DEV1
+Changed: CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS_V2.md /
+CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V3.md arrived, mandating
+workspace isolation (separate worktree/branch/Python env/test DB per
+track) — a direct response to the branch-mixup incident logged above.
+Set up per V2 section 1: entered a dedicated git worktree
+(.claude/worktrees/core, its own venv, branch prefix core/*). Per V2
+section 2, created a dedicated crumblr_test_dev1 PostgreSQL database
+(same server, separate database from the shared crumblr one) and
+pointed CRUMBLR_DATABASE_URL at it for this workspace.
+While verifying integration tests actually respect that isolation,
+found and fixed a real, pre-existing bug (not just a naming gap):
+tests/integration/test_run_survives_restart.py's child-process helper
+and four other integration test files
+(test_orchestrator_persistence.py, test_market_data_store.py,
+test_live_decision.py, test_migrations.py) all imported
+crumblr.persistence.engine.DEFAULT_TEST_URL and used the literal
+constant directly, bypassing the CRUMBLR_DATABASE_URL environment
+override the shared engine fixture (conftest.py) already respects via
+database_url(DEFAULT_TEST_URL). Every affected call site now resolves
+a module-level TEST_URL = database_url(DEFAULT_TEST_URL) once, honouring
+the override like the fixture does. test_migrations.py's pg_dump/psql
+subprocess calls also hardcoded the literal database name "crumblr" —
+fixed to use TEST_DB_NAME (parsed from TEST_URL via
+sqlalchemy.engine.make_url) instead.
+Impact: test-infrastructure only, no production code touched. Without
+this fix, setting CRUMBLR_DATABASE_URL per workspace (exactly what V2/V3
+section 2 mandates) would have silently not isolated roughly half of
+this project's integration tests — they would have kept writing to
+whatever DEFAULT_TEST_URL resolves to (the shared crumblr database)
+regardless of the env var, defeating the isolation both tracks were
+just told to set up.
+Action required: Dev 2 should apply the same fix if
+tests/**/agent_gateway/** integration tests import DEFAULT_TEST_URL
+directly rather than going through database_url(DEFAULT_TEST_URL) —
+worth a quick grep before assuming crumblr_test_dev2 isolation actually
+holds.
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-08-28 — DEV1
+Changed: Acknowledging AG-006 (TradeIntent.feature_snapshot_id must stay
+required, not optional) as recorded identically in both
+CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS_V2.md section 5 and
+CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V3.md sections 4/5 — both
+instruction documents already state the same resolution, so there is
+no outstanding disagreement to settle. Confirmed no code change is
+needed on the Dev-1 side: domain/models.py::TradeIntent
+.feature_snapshot_id is already a required field (UUID, no default) —
+it always has been, since before this session's Phase-4 work. Dev 2's
+own next step (V3 section 4/section 18.D) is to add the trusted,
+platform-issued feature_snapshot_id to their own
+DecisionContextBundle contract (src/crumblr/agent_gateway/contracts.py,
+Dev-2-owned) and coordinate the Gateway's TradeIntent-construction
+mapping — nothing for Dev 1 to build for that.
+Impact: none — no shared-contract file changed by this entry.
+Action required: none from Dev 1 right now. Dev 1 should review Dev 2's
+DecisionContextBundle field-addition proposal when it arrives, per the
+section 4 handshake, before Dev 2 merges it.
+Relevant commit: (this commit)
+```

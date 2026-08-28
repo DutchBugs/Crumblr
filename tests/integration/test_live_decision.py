@@ -35,13 +35,21 @@ from crumblr.market_data.synthetic import (
 )
 from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.decision_window import PostgresDecisionWindowStore
-from crumblr.persistence.engine import DEFAULT_TEST_URL
+from crumblr.persistence.engine import DEFAULT_TEST_URL, database_url
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.market_data import MarketDataStore
 from crumblr.risk.kill_switch import KillSwitch
 
 pytestmark = pytest.mark.integration
+
+TEST_URL = database_url(DEFAULT_TEST_URL)
+"""Resolved once, at collection time, so every `build_durable_runtime`
+
+call in this file honours `CRUMBLR_DATABASE_URL` the same way the
+`engine` fixture in `conftest.py` already does — review CRUMBLR_DEV1
+V2 §2's workspace-database-isolation requirement depends on every
+integration test doing this, not only the fixture."""
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BALANCE = Decimal("10000")
@@ -142,13 +150,13 @@ class TestLiveDecisionEndToEnd:
     ) -> None:
         # `engine` is not used directly — depending on it (the same fixture
         # `test_orchestrator_persistence.py` depends on) is what makes the
-        # schema exist on `DEFAULT_TEST_URL` before `build_durable_runtime`
+        # schema exist on `TEST_URL` before `build_durable_runtime`
         # opens its own separate connection to the same database.
         del engine
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety_state.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         arm(runtime.kill_switch)
 
@@ -178,7 +186,7 @@ class TestLiveDecisionEndToEnd:
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety_state.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         arm(runtime.kill_switch)
 
@@ -209,7 +217,7 @@ class TestLiveDecisionEndToEnd:
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety_state.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         arm(runtime.kill_switch)
 
@@ -244,7 +252,7 @@ class TestF055PinnedInstrumentSpecBaseline:
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety_state.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         arm(runtime.kill_switch)
 
@@ -273,7 +281,7 @@ class TestF055PinnedInstrumentSpecBaseline:
         runtime = build_durable_runtime(
             environment=config.environment,
             state_file=tmp_path / "safety_state.json",
-            url=DEFAULT_TEST_URL,
+            url=TEST_URL,
         )
         arm(runtime.kill_switch)
 

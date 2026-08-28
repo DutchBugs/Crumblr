@@ -7120,6 +7120,104 @@ Next:
 
 ---
 
+## Update 2026-08-28 (fiftieth entry) — mandatory workspace isolation set up; a real cross-track test-database bug found and fixed
+
+Component: Process (workspace isolation), `tests/integration/test_run_survives_restart.py`, `test_orchestrator_persistence.py`, `test_market_data_store.py`, `test_live_decision.py`, `test_migrations.py`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1/Dev-2 track hygiene, direct follow-up to the forty-ninth entry's branch-mixup incident
+Status before: F-049 landed on `main`; branch mixup found and fixed, but both sessions still shared one physical checkout and one test database
+Status after: `CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS_V2.md`/`_V3.md` arrived, mandating exactly the isolation the forty-ninth entry's incident called for. Set up: dedicated git worktree, dedicated `crumblr_test_dev1` database, and — while verifying the database isolation actually works — found and fixed a real bug that would have silently defeated it
+
+Completed:
+- Read the new `CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS_V2.md` in full
+  (and Dev 2's `_V3.md`, for the AG-006 cross-reference). Both mandate:
+  separate git worktrees/clones per track, separate branch prefixes
+  (`core/*`/`agent/*`), separate Python environments, separate
+  integration-test databases (`crumblr_test_dev1`/`crumblr_test_dev2`),
+  a session-start branch/status check, and an explicit "stop before
+  editing if on the other track's branch prefix" rule.
+- Entered a dedicated git worktree (`EnterWorktree` — creates an isolated
+  checkout under `.claude/worktrees/core`, its own `.venv`, confirmed via
+  `uv run` auto-provisioning one on first use). Renamed the worktree's
+  auto-generated branch to `core/test-db-isolation` to match the required
+  `core/*` prefix.
+- Created a dedicated `crumblr_test_dev1` PostgreSQL database (same
+  server, `CREATE DATABASE`, additive/non-destructive) and set
+  `CRUMBLR_DATABASE_URL` to point at it for this workspace's test runs.
+- **While verifying this actually isolates the two tracks, found a real,
+  pre-existing bug**, not just a naming gap: five integration test files
+  imported `crumblr.persistence.engine.DEFAULT_TEST_URL` and used the
+  literal constant directly in `build_durable_runtime(url=...)`/
+  `create_db_engine(...)`/`upgrade_to_head(...)` calls, completely
+  bypassing the `CRUMBLR_DATABASE_URL` environment override that
+  `tests/integration/conftest.py`'s shared `engine` fixture already
+  respects via `database_url(DEFAULT_TEST_URL)`. Worst instance:
+  `test_run_survives_restart.py` passes the URL as a literal string
+  argument to a genuinely separate child process — that child always
+  wrote to the shared `crumblr` database regardless of what the parent
+  process's fixture pointed at, which is exactly why several of its
+  tests (`test_the_journal_holds_the_run_after_the_process_is_gone`,
+  cross-process halt/session-recovery checks) failed even when run
+  completely alone against the new isolated database — parent and child
+  were silently writing to two different databases. Fixed all five files
+  the same way: a module-level `TEST_URL = database_url(DEFAULT_TEST_URL)`
+  resolved once, used everywhere the file previously used the raw
+  constant. `test_migrations.py`'s `pg_dump`/`psql` subprocess calls also
+  hardcoded the literal database name `"crumblr"` — fixed via a
+  `TEST_DB_NAME` parsed from `TEST_URL` with `sqlalchemy.engine.make_url`.
+- Logged both the database-isolation setup and the bug fix in
+  `review/INTEGRATION_NOTICES.md`, including a note for Dev 2 to check
+  whether their own `agent_gateway` integration tests have the same
+  `DEFAULT_TEST_URL`-bypass pattern before assuming `crumblr_test_dev2`
+  isolation actually holds.
+- Acknowledged AG-006 (`TradeIntent.feature_snapshot_id` must stay
+  required, not optional) — both V2 and V3 already record the identical
+  resolution, so there was nothing to negotiate; confirmed no Dev-1 code
+  change is needed since the field has been required since before this
+  session's Phase-4 work. Logged the acknowledgment in
+  `review/INTEGRATION_NOTICES.md` too, since it is exactly the kind of
+  shared-contract item the log exists to make visible.
+
+Evidence:
+- `uv run pytest tests/integration/test_run_survives_restart.py
+  tests/integration/test_orchestrator_persistence.py
+  tests/integration/test_market_data_store.py
+  tests/integration/test_live_decision.py tests/integration/test_migrations.py -q`
+  against `crumblr_test_dev1` — **53 passed**, confirming the fix (these
+  were exactly the files failing before it, even in isolation).
+- Full suite re-run against `crumblr_test_dev1` in the new worktree —
+  **955 passed, 3 skipped**, zero failures (this worktree is based on
+  `main` before Dev 2's `agent/contracts` merge, so the count is lower
+  than the shared checkout's 1014 — expected, not a discrepancy).
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run mypy`
+  — all clean, 136 source files (one `mypy` finding caught and fixed
+  along the way: `sqlalchemy.engine.URL.database` is typed `str | None`;
+  `TEST_DB_NAME` needed an explicit `assert ... is not None` to narrow it
+  before use as a subprocess argument).
+
+Problems found:
+- The `DEFAULT_TEST_URL`-bypass bug above. Real, pre-existing (predates
+  this session's work on any of these files), silently harmless as long
+  as only one workspace ever ran integration tests against one database
+  — which was true until today's isolation mandate made it a genuine
+  correctness bug, not just a latent one.
+
+Risk impact:
+- None. Test-infrastructure only; no production code path changed.
+
+Decision:
+- Workspace isolation is set up and verified working. Not yet committed
+  — pending the usual per-turn approval, on the new `core/test-db-isolation`
+  branch per the mandated branch-prefix convention.
+
+Next:
+- Confirm the full suite is clean in the new worktree, then commit
+  (`[core]` prefix, `IMPACT: NONE` — test infrastructure only) and merge
+  to `main` following V2 section 9's short-lived-branch flow.
+- Resume the core submission-safety phase's remaining items from the
+  new, properly-isolated worktree.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
