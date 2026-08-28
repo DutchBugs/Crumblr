@@ -301,6 +301,26 @@ class TestNoTradeDecisionIsIndependentOfProposal:
         assert not isinstance(decision, TradeProposal)
         assert not isinstance(proposal, NoTradeDecision)
 
+    def test_decision_fingerprint_changes_when_content_changes(self) -> None:
+        first = no_trade_decision(reason_codes=("no_setup",))
+        second = no_trade_decision(reason_codes=("regime_unclear",))
+        assert first.decision_fingerprint != second.decision_fingerprint
+
+    def test_decision_fingerprint_excludes_decision_id(self) -> None:
+        """Same idempotent-claim property as `TradeProposal.proposal_fingerprint`
+
+        (Step B needs this for NO_TRADE too): two decisions differing only
+        in `decision_id` fingerprint identically."""
+        shared: dict[str, Any] = {
+            "agent_id": uuid4(),
+            "assignment_id": uuid4(),
+            "context_hash": "same-context",
+        }
+        first = no_trade_decision(**shared)
+        second = no_trade_decision(**shared)
+        assert first.decision_id != second.decision_id
+        assert first.decision_fingerprint == second.decision_fingerprint
+
 
 class TestProposalWithdrawal:
     def test_an_honoured_withdrawal_is_valid(self) -> None:

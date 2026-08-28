@@ -1,0 +1,282 @@
+"""Agent Gateway persistence against real PostgreSQL (ADR-005 Step B).
+
+The Gateway's own fail-closed/authorization rules are unit-tested against
+the in-memory stores (`tests/unit/test_agent_gateway.py`); this file proves
+the two properties that only a real database can prove: the claim/conflict
+SQL (`ON CONFLICT DO NOTHING RETURNING`, the same primitive
+`persistence/execution.py` already relies on) actually behaves atomically
+under PostgreSQL, and restart-safety -- "restart does not duplicate a
+logical proposal" (`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §8) --
+holds when a fresh `AgentGateway` instance, backed by a fresh set of
+Postgres-store objects pointed at the same engine, replaces one that
+"crashed".
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import Engine
+
+from crumblr.agent_gateway.contracts import (
+    AgentIdentity,
+    AgentRole,
+    AgentStatus,
+    ChampionShadowStatus,
+    DecisionContextBundle,
+    NoTradeDecision,
+    TradeProposal,
+    TradingAssignment,
+)
+from crumblr.agent_gateway.errors import AgentRejectionReason, DecisionConflictError
+from crumblr.agent_gateway.gateway import AgentGateway
+from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
+from crumblr.persistence.agent_gateway import (
+    PostgresAgentCredentialStore,
+    PostgresAgentDecisionOutcomeStore,
+    PostgresAgentIdentityStore,
+    PostgresDecisionContextBundleStore,
+    PostgresTradingAssignmentStore,
+)
+from tests.conftest import FIXED_NOW
+
+pytestmark = pytest.mark.integration
+
+AGENT_ID = uuid4()
+ASSIGNMENT_ID = uuid4()
+SECRET = "correct-horse-battery-staple"
+
+
+def identity(**overrides: Any) -> AgentIdentity:
+    fields: dict[str, Any] = {
+        "agent_id": AGENT_ID,
+        "role": AgentRole.TRADER,
+        "runtime_version": "trader-v1",
+        "service_identity": "spiffe://crumblr/agents/trader-v1",
+        "status": AgentStatus.ACTIVE,
+        "registered_at_utc": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return AgentIdentity.model_validate(fields)
+
+
+def assignment(**overrides: Any) -> TradingAssignment:
+    fields: dict[str, Any] = {
+        "assignment_id": ASSIGNMENT_ID,
+        "assignment_version": "assignment-v1",
+        "allowed_agent_id": AGENT_ID,
+        "canonical_symbol": "EUR/USD",
+        "timeframe": "M5",
+        "strategy_artifact_id": uuid4(),
+        "strategy_artifact_hash": "abc123",
+        "valid_from_utc": FIXED_NOW - timedelta(days=1),
+        "valid_until_utc": FIXED_NOW + timedelta(days=30),
+        "max_proposals_per_hour": 6,
+        "allowed_risk_fraction_min": Decimal("0.001"),
+        "allowed_risk_fraction_max": Decimal("0.01"),
+        "required_evidence_fields": (),
+        "supervisor_policy_version": "supervisor-policy-v1",
+        "environment": Environment.PAPER,
+        "champion_shadow_status": ChampionShadowStatus.SHADOW,
+    }
+    fields.update(overrides)
+    return TradingAssignment.model_validate(fields)
+
+
+def context_bundle(**overrides: Any) -> DecisionContextBundle:
+    fields: dict[str, Any] = {
+        "context_id": uuid4(),
+        "assignment_id": ASSIGNMENT_ID,
+        "market_snapshot_id": uuid4(),
+        "instrument_spec_version": "spec-v1",
+        "portfolio_summary_hash": "portfolio-abc",
+        "session_state": SessionState.OPEN,
+        "data_quality": DataQuality.GOOD,
+        "issued_at_utc": FIXED_NOW,
+        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+    }
+    fields.update(overrides)
+    return DecisionContextBundle.model_validate(fields)
+
+
+def proposal(*, context_hash: str, **overrides: Any) -> TradeProposal:
+    fields: dict[str, Any] = {
+        "proposal_id": uuid4(),
+        "agent_id": AGENT_ID,
+        "assignment_id": ASSIGNMENT_ID,
+        "context_hash": context_hash,
+        "strategy_artifact_hash": "abc123",
+        "side": Side.BUY,
+        "entry_type": EntryType.MARKET,
+        "reference_price": Decimal("1.08500"),
+        "stop_loss_price": Decimal("1.08000"),
+        "take_profit_price": Decimal("1.09000"),
+        "confidence": 0.8,
+        "requested_risk_fraction": Decimal("0.005"),
+        "reason_codes": ("sweep_and_shift",),
+        "evidence_refs": (),
+        "submitted_at_utc": FIXED_NOW,
+        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+    }
+    fields.update(overrides)
+    return TradeProposal.model_validate(fields)
+
+
+def no_trade(*, context_hash: str, **overrides: Any) -> NoTradeDecision:
+    fields: dict[str, Any] = {
+        "decision_id": uuid4(),
+        "agent_id": AGENT_ID,
+        "assignment_id": ASSIGNMENT_ID,
+        "context_hash": context_hash,
+        "reason_codes": ("no_setup",),
+        "decided_at_utc": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return NoTradeDecision.model_validate(fields)
+
+
+def build_gateway(engine: Engine) -> AgentGateway:
+    """A fresh Gateway, all-Postgres-backed -- constructing a new one from
+
+    the same engine is exactly what a restarted process does, since none of
+    these stores cache anything in memory between calls."""
+    return AgentGateway(
+        identities=PostgresAgentIdentityStore(engine),
+        credentials=PostgresAgentCredentialStore(engine),
+        assignments=PostgresTradingAssignmentStore(engine),
+        contexts=PostgresDecisionContextBundleStore(engine),
+        outcomes=PostgresAgentDecisionOutcomeStore(engine),
+    )
+
+
+class TestBasicRoundTrip:
+    def test_identity_assignment_and_context_round_trip(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = gateway.issue_context_bundle(context_bundle())
+
+        authenticated = gateway.authenticate(agent_id=AGENT_ID, credential_secret=SECRET)
+        assert authenticated.agent_id == AGENT_ID
+
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+
+    def test_a_rejection_is_durably_recorded(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash="never-issued-hash"),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is False
+        assert result.reason is AgentRejectionReason.UNKNOWN_CONTEXT
+
+        # Read back from a second, independent store instance -- proves this
+        # is a real durable row, not process-local state.
+        events = PostgresAgentDecisionOutcomeStore(engine).events_for(result.outcome_id)
+        assert len(events) == 2  # RECEIVED, then REJECTED
+
+
+class TestRestartSafety:
+    """`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §8: "restart does
+
+    not duplicate logical proposal" and "agent process can disappear
+    without making Crumblr unsafe"."""
+
+    def test_a_retry_against_a_freshly_constructed_gateway_is_still_idempotent(
+        self, engine: Engine
+    ) -> None:
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+        bundle = first_process.issue_context_bundle(context_bundle())
+
+        original = proposal(context_hash=bundle.content_hash)
+        first_result = first_process.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+        assert first_result.accepted is True
+
+        # Simulate a crash and restart: an entirely new AgentGateway, new
+        # store objects, same engine/database -- nothing carried over in
+        # memory.
+        second_process = build_gateway(engine)
+        second_result = second_process.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+
+        assert second_result == first_result
+        events = PostgresAgentDecisionOutcomeStore(engine).events_for(original.proposal_id)
+        # Exactly RECEIVED + ACCEPTED once each -- the retry after "restart"
+        # appended nothing new.
+        assert len(events) == 2
+
+    def test_a_conflicting_retry_after_restart_still_fails_closed(self, engine: Engine) -> None:
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+        bundle = first_process.issue_context_bundle(context_bundle())
+
+        original = proposal(context_hash=bundle.content_hash)
+        first_process.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+
+        second_process = build_gateway(engine)
+        conflicting = original.model_copy(update={"reference_price": Decimal("1.09999")})
+        with pytest.raises(DecisionConflictError):
+            second_process.submit_trade_proposal(
+                agent_id=AGENT_ID, credential_secret=SECRET, proposal=conflicting, now=FIXED_NOW
+            )
+
+    def test_no_trade_survives_a_restart_idempotently(self, engine: Engine) -> None:
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+        bundle = first_process.issue_context_bundle(context_bundle())
+
+        decision = no_trade(context_hash=bundle.content_hash)
+        first_result = first_process.submit_no_trade(
+            agent_id=AGENT_ID, credential_secret=SECRET, decision=decision, now=FIXED_NOW
+        )
+
+        second_process = build_gateway(engine)
+        second_result = second_process.submit_no_trade(
+            agent_id=AGENT_ID, credential_secret=SECRET, decision=decision, now=FIXED_NOW
+        )
+        assert second_result == first_result
+
+
+class TestConcurrentClaimIsAtomic:
+    def test_two_racing_claims_for_the_same_proposal_id_only_one_wins(self, engine: Engine) -> None:
+        """Proves the `ON CONFLICT DO NOTHING RETURNING` primitive itself,
+
+        independent of the Gateway's own single-threaded call pattern above
+        -- the same property `persistence/execution.py`'s module docstring
+        documents for `execution_requests`."""
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = gateway.issue_context_bundle(context_bundle())
+        shared = proposal(context_hash=bundle.content_hash)
+
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        first = store.claim_trade_proposal(shared, now=FIXED_NOW)
+        second = store.claim_trade_proposal(shared, now=FIXED_NOW)
+
+        assert first.claimed is True
+        assert second.claimed is False

@@ -308,6 +308,27 @@ class NoTradeDecision(Contract):
     reason_codes: tuple[str, ...]
     decided_at_utc: UtcDatetime
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def decision_fingerprint(self) -> str:
+        """Complete-content fingerprint, excluding `decision_id` — the same
+
+        idempotent-claim pattern `TradeProposal.proposal_fingerprint` gives
+        the Gateway for BUY/SELL proposals (Step B), applied to NO_TRADE so
+        a retried identical decision claims safely and a retried decision
+        with different content fails closed, rather than NO_TRADE getting a
+        weaker idempotency guarantee than a directional proposal.
+        """
+        return fingerprint(
+            {
+                "agent_id": self.agent_id,
+                "assignment_id": self.assignment_id,
+                "context_hash": self.context_hash,
+                "reason_codes": list(self.reason_codes),
+                "decided_at_utc": self.decided_at_utc,
+            }
+        )
+
 
 class ProposalWithdrawal(Contract):
     """A request to withdraw an earlier `TradeProposal` (owner tweak 6).

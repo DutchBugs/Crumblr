@@ -485,6 +485,164 @@ same logical event rather than duplicating it — the same idempotence
 discipline `domain/events.py::build_event` documents for the main journal."""
 
 
+agent_identities = Table(
+    "agent_identities",
+    metadata,
+    # Same append-only "latest snapshot per key wins" shape as
+    # risk_session_states/decision_window_states: a status change
+    # (suspend/retire/reactivate) is a fresh row, never an UPDATE of the
+    # original registration.
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("agent_id", UUID(as_uuid=True), nullable=False),
+    Column("role", String(16), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("service_identity", String(256), nullable=False),
+    _utc_column("registered_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_agent_identities_agent", "agent_id", "sequence"),
+)
+"""External-agent identities (ADR-005 Step B). `agent_gateway/stores.py`'s
+
+`current()` reads the latest row per `agent_id` -- the same "append a new
+snapshot rather than mutate" discipline the rest of this schema uses for
+state that must never look edited after the fact."""
+
+
+agent_credentials = Table(
+    "agent_credentials",
+    metadata,
+    # Append-only for the same reason as agent_identities -- a credential
+    # rotation is a new row, never an overwrite of the old one.
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("agent_id", UUID(as_uuid=True), nullable=False),
+    # Never the raw secret -- `agent_gateway/auth.py::hash_credential`'s
+    # salted digest, the same never-store-the-secret discipline
+    # broker_account_snapshots.account_ref already holds for the MT5 login.
+    Column("credential_hash", String(128), nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Index("ix_agent_credentials_agent", "agent_id", "sequence"),
+)
+"""Interim shared-secret credentials for the Agent Gateway's authentication
+
+boundary (`review/THREAT_MODEL_AGENT_GATEWAY.md` AG-001) -- not the final
+mTLS/SPIFFE-shaped mechanism `AgentIdentity.service_identity` is named for,
+but a real, hashed, fail-closed check rather than none."""
+
+
+agent_trading_assignments = Table(
+    "agent_trading_assignments",
+    metadata,
+    # Content-addressed and immutable once registered, like
+    # execution_requests/instrument_specs -- re-registering the same
+    # assignment_id with different content is a conflict the store layer
+    # raises on (agent_gateway/errors.py::AssignmentConflictError), never a
+    # silent overwrite.
+    Column("assignment_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("allowed_agent_id", UUID(as_uuid=True), nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    _utc_column("valid_from_utc", nullable=False),
+    _utc_column("valid_until_utc", nullable=False),
+    Column("fingerprint", Text, nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_agent_assignments_agent", "allowed_agent_id"),
+)
+"""External-agent trading assignments (ADR-005 Step B) -- the scope
+
+(`agent_gateway/contracts.py::TradingAssignment`) an agent's proposals are
+checked against. Never trusted from a proposal's own description of its
+assignment (`review/THREAT_MODEL_AGENT_GATEWAY.md` §4.2); the Gateway
+always looks this up by `assignment_id` server-side."""
+
+
+agent_decision_context_bundles = Table(
+    "agent_decision_context_bundles",
+    metadata,
+    # Content-addressed and immutable once issued, keyed by context_id.
+    Column("context_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("assignment_id", UUID(as_uuid=True), nullable=False),
+    # The bundle's own computed_field (DecisionContextBundle.content_hash)
+    # -- stored so a proposal's context_hash can be looked up directly,
+    # rather than recomputing every issued bundle's hash on every proposal.
+    Column("content_hash", Text, nullable=False),
+    _utc_column("issued_at_utc", nullable=False),
+    _utc_column("expires_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_agent_context_bundles_hash", "content_hash"),
+    Index("ix_agent_context_bundles_assignment", "assignment_id"),
+)
+"""Decision context Crumblr issued to an external agent (ADR-005 Step B) --
+
+what threat_model §4.3 calls the deliberate, minimal disclosure surface.
+Immutable once issued; a proposal's `context_hash` is only ever accepted if
+it matches a `content_hash` recorded here and not yet expired."""
+
+
+agent_decision_outcomes = Table(
+    "agent_decision_outcomes",
+    metadata,
+    # The idempotency key is the primary key -- claiming an outcome *is*
+    # the successful `INSERT ... ON CONFLICT DO NOTHING RETURNING`, the same
+    # discipline execution_requests uses (see persistence/execution.py's
+    # module docstring). outcome_id is proposal_id for a TRADE_PROPOSAL or
+    # decision_id for a NO_TRADE -- both UUID spaces an agent controls, so
+    # this table is append-only-granted like every other table here.
+    Column("outcome_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("outcome_type", String(16), nullable=False),
+    Column("agent_id", UUID(as_uuid=True), nullable=False),
+    Column("assignment_id", UUID(as_uuid=True), nullable=False),
+    # Content fingerprint (TradeProposal.proposal_fingerprint /
+    # NoTradeDecision.decision_fingerprint). A second claim for the same
+    # outcome_id with a different fingerprint is a conflict the store must
+    # raise on, never silently drop.
+    Column("fingerprint", Text, nullable=False),
+    _utc_column("claimed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("payload", JSONB, nullable=False),
+    Index("ix_agent_decision_outcomes_assignment", "assignment_id", "claimed_at_utc"),
+    Index("ix_agent_decision_outcomes_agent", "agent_id", "claimed_at_utc"),
+)
+"""One immutable row per agent decision outcome, ever (ADR-005 Step B) -- a
+
+TradeProposal or a NoTradeDecision, both claimed through the same table so
+"how many decisions has this assignment made in the last hour" (the
+proposal-rate-limit check) counts both kinds honestly. The row's existence
+*is* the claim, exactly the way execution_requests already works."""
+
+
+agent_decision_events = Table(
+    "agent_decision_events",
+    metadata,
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column(
+        "outcome_id",
+        UUID(as_uuid=True),
+        ForeignKey("agent_decision_outcomes.outcome_id"),
+        nullable=False,
+    ),
+    Column("event_type", String(32), nullable=False),
+    _utc_column("occurred_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("reason_codes", JSONB, nullable=False),
+    Column("detail", Text, nullable=True),
+    Index("ix_agent_decision_events_outcome", "outcome_id", "sequence"),
+)
+"""Append-only lifecycle log for one agent decision outcome (ADR-005 Step
+
+B): RECEIVED (the claim), then exactly one of ACCEPTED/REJECTED. A
+rejection is recorded here just as durably as an acceptance -- guide §9's
+"every proposal, NO_TRADE, rejection and timeout is auditable" -- because
+RECEIVED is always appended before any authorization check runs."""
+
+
 APPEND_ONLY_TABLES: tuple[str, ...] = (
     "events",
     "decision_capsules",
@@ -501,6 +659,12 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "feature_snapshots",
     "execution_requests",
     "execution_events",
+    "agent_identities",
+    "agent_credentials",
+    "agent_trading_assignments",
+    "agent_decision_context_bundles",
+    "agent_decision_outcomes",
+    "agent_decision_events",
 )
 """Tables the application role may only insert into and read from."""
 
@@ -530,6 +694,12 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "feature_snapshots",
             "execution_requests",
             "execution_events",
+            "agent_identities",
+            "agent_credentials",
+            "agent_trading_assignments",
+            "agent_decision_context_bundles",
+            "agent_decision_outcomes",
+            "agent_decision_events",
         )
     ]
     return tuple(statements)
