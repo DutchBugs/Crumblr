@@ -2,7 +2,7 @@
 
 **Project:** Autonomous EUR/USD Trading Platform  
 **Status document version:** 1.8  
-**Last updated:** 2026-08-27  
+**Last updated:** 2026-08-28  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -24,7 +24,7 @@ document you have that this repository doesn't yet.
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
-| 6 | Green light to start the §11 design package `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` asks for next | The guide (supplied 2026-08-27, now in the repository) asks specifically for a small, reviewable package before any Agent Gateway code: an ADR for external agents/trust boundaries, a threat model for the gateway, first-draft versions of the five new contracts (`AgentIdentity`, `TradingAssignment`, `DecisionContextBundle`, `TradeProposal`, `SupervisorReview`), a migration plan preserving the existing `DecisionCapsule`→execution chain, a test matrix, and an explicit before/after-canary scope split. Not started — awaiting the go-ahead, per review 1.24/1.25's "don't jump ahead" instruction | `review/EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` §5/§8/§11 |
+| 6 | Agent Integration track (Dev 2) — Step A design package **done 2026-08-27**, Step B Gateway ingestion+audit layer **done 2026-08-28**; on branch `agent/contracts`, not yet merged into `main` | The §11 design package (ADR-005, threat model, eight contracts) and Step B (`AgentGateway`: identity/credential auth, assignment authorization, context binding, idempotent `TradeProposal`/`NoTradeDecision` claiming, six new tables) are both built and tested — see §13 fiftieth entry for the full first-hand account. One open item needs a Dev-1 handshake before Step B can map an accepted proposal into a platform `TradeIntent`: `review/AGENT_FEEDBACK.md` AG-006 (`TradeIntent.feature_snapshot_id` is non-optional; an externally-originated proposal has none). Merging `agent/contracts` into `main` is an owner/Dev-2 decision, not yet made | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; §13 fiftieth entry; commits `cc16e4f`, `2f7c921` on `agent/contracts` |
 | 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; seven items remain | `SubmissionGate` is real and tested (`review/adr/ADR-006-submission-gate.md`), called by nobody yet. Still open: durable execution-activation authority *wiring* (the config fields exist; nothing sets/reads them from a real orchestrator), `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
@@ -6958,6 +6958,165 @@ Next:
   the optional domain-contract countersign.
 - Before starting the next slice, explicitly confirm/switch branch first
   given the shared-working-tree lesson just learned.
+
+## Update 2026-08-28 (fiftieth entry) — Dev 2 / Agent Integration track: Step A + Step B, first-hand account
+
+**Written by the Dev-2 session** (`review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md`),
+at the owner's explicit request, so this canonical document carries a
+first-hand record of this track's work alongside Dev 1's own entries
+(forty-eighth/forty-ninth) rather than only Dev 1's reconstruction of it
+from the outside. Everything below lives on branch `agent/contracts`
+(commits `cc16e4f`, `2f7c921`), **not yet merged into `main`** — this
+entry is documentation only; no code from this track is present in this
+working tree's current `main` checkout.
+
+Component: `src/crumblr/agent_gateway/**` (new package), `src/crumblr/persistence/agent_gateway.py`
+(new), `src/crumblr/persistence/schema.py` (six new tables, additive),
+`migrations/versions/20260828_d4b6e2f81a37_agent_gateway_step_b.py`,
+`review/adr/ADR-005-external-agent-trust-boundary.md`,
+`review/THREAT_MODEL_AGENT_GATEWAY.md`, `review/AGENT_STATUS.md`,
+`review/AGENT_FEEDBACK.md`
+Milestone: Agent Integration track (Dev 2), ADR-005 Step A (design/
+contracts) and Step B (Agent Gateway in shadow, ingestion + audit half only)
+Status before: `review/EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md` supplied by
+the owner 2026-08-27; §11's design package not started
+Status after: Step A complete, committed. Step B's ingestion+audit layer
+(everything ADR-005 §8's "first proof target" requires) complete,
+committed. `TradeProposal → TradeIntent` mapping deliberately not built —
+blocked on a shared-contract question (AG-006), not forced through alone
+
+Completed:
+- **Step A** (`cc16e4f`): found the eight contracts
+  (`AgentIdentity`, `TradingAssignment`, `PolicyHints`,
+  `DecisionContextBundle`, `TradeProposal`, `NoTradeDecision`,
+  `ProposalWithdrawal`, `SupervisorReview`) and ADR-005 already existed,
+  uncommitted, from an earlier pass. Verified all 27 structural tests
+  passed, ruff/mypy clean, full suite untouched. Found one real gap:
+  ADR-005 names `review/THREAT_MODEL_AGENT_GATEWAY.md` as a Step-A
+  deliverable but the file didn't exist — wrote it (STRIDE-style analysis
+  per contract, mapped to concrete gaps AG-001..AG-005). Created this
+  track's own `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` trackers
+  (neither existed yet). Committed on branch `agent/contracts`, created
+  fresh off `main` at the time (`86873a6`).
+- **Step B** (`2f7c921`): built the Agent Gateway's ingestion+audit half —
+  `agent_gateway/gateway.py::AgentGateway`, `auth.py` (interim salted-hash
+  shared-secret credential — not the final mTLS/SPIFFE mechanism
+  `service_identity` is named for), `errors.py` (a typed split between
+  raised exceptions for a fundamentally invalid caller and
+  `AgentRejectionReason` for an ordinary, fully-audited refusal),
+  `events.py`, `stores.py` (`Protocol`s + in-memory implementations,
+  mirroring `application/decision_window.py`'s shape). Added
+  `NoTradeDecision.decision_fingerprint` (a small Step-A contract
+  addition this pass needed, mirroring `TradeProposal.proposal_fingerprint`)
+  so NO_TRADE gets the same idempotent-claim guarantee as a directional
+  proposal.
+- Confirmed the current Dev-1 Alembic head (`c9e1d5a3f286`) before
+  creating a revision, per instructions §13. Added six tables to
+  `persistence/schema.py` (additive only — same pattern Dev 1 used for
+  F-047's broker-state tables): `agent_identities`, `agent_credentials`
+  (both append-only "latest snapshot wins", mirroring
+  `decision_window_states`), `agent_trading_assignments`,
+  `agent_decision_context_bundles` (both content-addressed/immutable,
+  mirroring `instrument_specs`/`execution_requests`), `agent_decision_outcomes`
+  (the idempotent claim table — `INSERT ... ON CONFLICT DO NOTHING
+  RETURNING`, the exact primitive `persistence/execution.py` already
+  proves), `agent_decision_events` (append-only lifecycle log, mirroring
+  `execution_events`). Wrote migration `d4b6e2f81a37` off that head, plus
+  `persistence/agent_gateway.py` (the Postgres store implementations).
+- Every `submit_trade_proposal`/`submit_no_trade` call durably claims the
+  attempt (`RECEIVED` event) *before* running any authorization check, so
+  a legitimate refusal is a normal, auditable, machine-readable outcome
+  (`AgentRejectionReason` — unknown assignment, not owned, outside
+  validity window, over the rate limit, risk fraction out of band,
+  unknown/mismatched/expired context, expired proposal) rather than a
+  silently dropped attempt — guide §9's "every proposal, NO_TRADE,
+  rejection and timeout is auditable".
+- Found, named, and deliberately did not resolve alone: `TradeIntent.feature_snapshot_id`
+  is non-optional, and an externally-originated `TradeProposal` has no
+  computed feature snapshot — only a `DecisionContextBundle`. Deciding what
+  that field means for an agent-originated decision is a shared-contract
+  question (Dev-2 instructions §4/§5: stop and raise rather than force a
+  change to shared territory alone). Recorded as **AG-006** in
+  `review/AGENT_FEEDBACK.md` rather than inventing an interpretation.
+  `TradeProposal → TradeIntent` mapping, and everything downstream of it
+  (Risk, the deterministic Policy Gate, `DecisionCapsule` sealing), is
+  Step C territory per ADR-005 §9 regardless and was not attempted this
+  pass.
+
+Evidence:
+- tests: `tests/unit/test_agent_gateway_contracts.py` — 29 passed (27 at
+  Step A + 2 new for `decision_fingerprint`). `tests/unit/test_agent_gateway.py`
+  (new) — 24 passed, covering ADR-005 §7's full planning-level test matrix
+  (identity refusal on unknown/wrong-credential/suspended/retired,
+  impersonation, assignment scope, context binding/expiry, idempotent
+  retry, conflicting-retry fail-closed, NO_TRADE distinct from no
+  response) against in-memory stores. `tests/integration/test_agent_gateway_store.py`
+  (new) — 6 passed against real PostgreSQL: basic round-trip, a rejection
+  read back from an independent store instance, and — the one proof only
+  a real database can give — restart-safety (a second, independently-
+  constructed `AgentGateway` pointed at the same engine, simulating a
+  crashed-and-restarted process, still replays retries idempotently and
+  still fails closed on conflicts) and concurrent-claim atomicity.
+- tests: `tests/integration/test_migrations.py` — 8 passed in isolation,
+  confirming the new migration and `persistence/schema.py` agree exactly
+  (`compare_metadata`, upgrade/downgrade round trip, `create_all` vs
+  migration schema equivalence).
+- tests: `uv run pytest -m "not integration" -q` — 834 passed, 1 skipped
+  (pre-existing, unrelated Windows/MT5-importability skip) — proves Step B
+  did not disturb Phase 4 or Step A.
+- logs: `uv run ruff check .` / `ruff format --check .` and `uv run mypy`
+  (project-wide, via the configured invocation) — clean on every new/
+  changed file in this track, both passes.
+- Observed, not a defect in this work: an early full-suite run including
+  integration tests hit intermittent `relation "..." already exists` /
+  `does not exist` errors against the shared local test database — the
+  same concurrent-session race D-042/the forty-eighth entry independently
+  names, caused by Dev 1's session running its own integration suite
+  against the same fixed database URL at the same time. This track's own
+  integration suite passes cleanly and repeatably (`test_agent_gateway_store.py`
+  run alone: 6/6, twice) once isolated from that collision.
+- artifact/commit: `cc16e4f` (Step A), `2f7c921` (Step B), both on
+  `agent/contracts`, both local/unpushed as of this entry.
+
+Problems found:
+- None in the shipped code. AG-006 (above) is a scope boundary correctly
+  identified and deferred, not a defect. The shared-test-database
+  contention above is an environment property of two concurrent sessions,
+  not a defect in either track's code.
+- A genuine process incident, already fully resolved by Dev 1 and logged
+  in the forty-ninth entry and `review/INTEGRATION_NOTICES.md`: both
+  sessions share one physical working directory/`.git`, and a Dev-1 commit
+  briefly landed on this track's `agent/contracts` branch by accident
+  before being moved to `main`. Confirmed from this side too: `git log
+  --oneline agent/contracts` shows exactly this track's two commits
+  (`cc16e4f`, `2f7c921`), nothing of Dev 1's mixed in — the fix held.
+
+Risk impact:
+- None. Nothing outside `src/crumblr/agent_gateway/` and
+  `src/crumblr/persistence/agent_gateway.py` imports either — verified by
+  grep, both at Step A and again at Step B. No transport (HTTP/gRPC/queue)
+  exists yet for an external process to reach `AgentGateway` at all; every
+  proof in this entry is a direct in-process call from a test. No agent
+  path can reach MT5, broker credentials, direct DB writes outside this
+  track's own six tables, final lot sizing, or Risk-policy mutation.
+  `order_send` remains structurally unreachable regardless, unaffected by
+  any of this.
+
+Decision:
+- Step A and Step B (ingestion+audit half) are both CLOSED/SHIPPED on
+  `agent/contracts`. `TradeProposal → TradeIntent` mapping and Step C
+  (external Supervisor boundary) remain OPEN, the second explicitly
+  blocked on the first per ADR-005's own step ordering.
+- Merging `agent/contracts` into `main` is an owner/Dev-2 decision, not
+  made in this entry.
+
+Next:
+- Raise AG-006 with Dev 1 — the one place this track's own scope
+  genuinely touches shared-contract territory.
+- Once resolved: implement `TradeProposal → TradeIntent` mapping, then
+  Step C (external Supervisor boundary, AG-003).
+- Confirm/switch to `agent/contracts` explicitly before resuming, per the
+  shared-working-tree lesson both tracks have now independently logged.
 
 ---
 
