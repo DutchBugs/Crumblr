@@ -7120,7 +7120,7 @@ Next:
 
 ---
 
-## Update 2026-08-28 (fiftieth entry) — mandatory workspace isolation set up; a real cross-track test-database bug found and fixed
+## Update 2026-08-28 (fifty-first entry) — mandatory workspace isolation set up; a real cross-track test-database bug found and fixed
 
 Component: Process (workspace isolation), `tests/integration/test_run_survives_restart.py`, `test_orchestrator_persistence.py`, `test_market_data_store.py`, `test_live_decision.py`, `test_migrations.py`, `review/INTEGRATION_NOTICES.md`
 Milestone: Dev-1/Dev-2 track hygiene, direct follow-up to the forty-ninth entry's branch-mixup incident
