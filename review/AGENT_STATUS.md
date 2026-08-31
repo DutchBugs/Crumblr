@@ -97,12 +97,78 @@ refactor), 6→7 integration tests pass, full non-integration suite
 
 ---
 
+## 0b. HTTP transport — done 2026-08-31
+
+Checked in with Dev 1 first (2026-08-31, three days after the last
+exchange): no new commits on `main`, `compute_features()` extraction not
+started yet (Dev 1 confirmed: `trading_agent/features.py::compute_features()`
+is real but `baseline_v1`-specific; `ict_v1` has its own structurally
+different `IctFeatureSnapshot`; no cross-strategy entry point exists yet;
+no ETA). AG-006/Step E genuinely still blocked — not a shortcut available,
+confirmed by reading the code myself before asking, same as before.
+
+Dev 1 explicitly said no need to wait idle if there's other Gateway work
+available. Asked the owner before building anything, since a wire
+transport is a new externally-reachable surface, not an internal fix —
+approved to proceed.
+
+Built `agent_gateway/http.py`: a FastAPI app (`create_app(*, gateway,
+clock)`) exposing exactly two routes, `POST /agent/proposals` and
+`POST /agent/no-trade` — the only two operations `gateway.py`'s own
+module docstring calls agent-facing. Administrative operations
+(`register_identity`/`issue_assignment`/`issue_context_bundle`) get no
+route at all, checked structurally
+(`tests/unit/test_agent_gateway_http.py::TestNoAdministrativeRouteExists`,
+mirrors `test_dashboard.py`'s own "no mutation route" pattern) — a
+docstring promise is not a guarantee. Kept under `agent_gateway/`, not
+`src/crumblr/api/` — `build.md`'s architecture diagram already earmarks
+`api/` for Core's own Control API (HALT reset, operator controls), a
+different authority boundary than this shadow-mode ingestion surface.
+
+Authentication: the same interim shared-secret mechanism (AG-001), carried
+as two headers (`X-Agent-Id`, `X-Agent-Credential`) rather than folded
+into one `Authorization` value. Error mapping is deliberately coarse:
+unknown agent / wrong credential / suspended agent all collapse to one
+`401`, matching `AuthenticationError`'s own "never help enumerate agent
+ids" discipline; impersonation is `403`; a structural content conflict
+(idempotent-claim fingerprint mismatch) is `409`; malformed JSON or a
+contract validation failure is `400`. A **rejected** proposal is still
+`200 OK` with `"accepted": false` in the body — the same "a refusal is a
+normal, fully-audited outcome, not a transport error" principle
+`gateway.py` already establishes internally.
+
+Found and fixed one real bug via the test suite itself, not by
+inspection: `pydantic.ValidationError.errors()` can carry the raw
+exception object in a validator's `ctx` (e.g. `TradeProposal`'s own
+`_check_stop_and_target_direction`), which plain `json.dumps`
+(`JSONResponse`'s encoder) cannot serialize — a domain-validator
+rejection was coming back as an unhandled `500` instead of the intended
+`400`. Fixed with `error.errors(include_url=False, include_context=False)`.
+Regression test: `TestSubmitProposal::test_a_domain_validator_rejection_returns_400_not_500`.
+
+Evidence: `tests/unit/test_agent_gateway_http.py` (new, 16 tests — accept/
+reject, all four auth-failure/conflict status codes, malformed JSON,
+malformed contract, idempotent replay, conflicting retry, both routes,
+structural route/docs checks). Full non-integration suite 839→**855
+passed**, 1 skipped, ruff/mypy clean. No dependency added — FastAPI/
+`TestClient` were already in use by `dashboard/app.py`.
+
+Not done: no docs page, no OpenAPI schema exposed (`docs_url`/`redoc_url`/
+`openapi_url=None`, matching `dashboard/app.py`'s own convention), no
+actual deployment/process wiring (`uvicorn` invocation, port, TLS
+termination) — this proves the boundary exists and is safe, not that
+anything is listening anywhere yet. No admin-facing transport either;
+`register_identity`/`issue_assignment`/`issue_context_bundle` stay
+Python-only, deliberately.
+
+---
+
 ## 1. Where this track actually stands
 
 | Step | Scope | State |
 |---|---|---|
 | A — design/contracts | ADR-005, threat model, eight contracts, structural tests | **Complete, merged to `main`/pushed to `origin/main`** (rebased+re-hashed as `ba658c5`, 2026-08-28 — original commit was `cc16e4f`, 2026-08-27, before rebasing onto Dev 1's F-049 work). |
-| B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling | **Ingestion + audit layer complete, tested, merged to `main`/pushed to `origin/main`** (rebased+re-hashed as `bf18ec5`, 2026-08-28 — original commit was `2f7c921`). `TradeProposal → TradeIntent` mapping deliberately NOT built this pass — see AG-006 below. |
+| B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling, HTTP transport | **Ingestion + audit layer complete, tested, merged/pushed** (`bf18ec5`), self-review hardening merged/pushed (`d6a5361`), HTTP transport built 2026-08-31 (§0b, not yet committed — see §4). `TradeProposal → TradeIntent` mapping deliberately NOT built — see AG-006 below, still blocked as of 2026-08-31. |
 | C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003). |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP per instructions §10. |
 | E — first agent-driven canary | full Step B/C bundle + everything Milestone A (Crumblr Execution Proof) already requires | **Not started**, blocked on B/C. |
@@ -259,41 +325,39 @@ See `review/AGENT_FEEDBACK.md` for the full register with evidence. Summary:
 
 ---
 
-## 4. Merge status — done 2026-08-28
+## 4. Merge status — updated 2026-08-31
 
-Step A + Step B are merged and pushed. `agent/contracts` is now identical
-to `origin/main` at its tip (`bf18ec5`) — not a long-lived divergent
-branch, per V3 §6's explicit instruction. The next slice of work opens a
-fresh short-lived branch off this point: `agent/tradeintent-mapping`
-(V3 §6/§7), for AG-006 resolution + the `TradeProposal → TradeIntent`
-mapping. Not yet created — see §5.
+Step A, Step B, and the self-review hardening pass are merged and pushed
+(`d6a5361`). The HTTP transport (§0b) is built, tested, quality-gate clean,
+**not yet committed** — pending the same per-turn commit confirmation
+every other slice this session has gotten. `agent/contracts` will again be
+identical to `origin/main` once it lands, per V3 §6's "not a long-lived
+divergent branch" instruction. `agent/tradeintent-mapping` (V3 §6/§7) is
+still not created — still correctly waiting on D below, not started early.
 
 ---
 
 ## 5. Next actions (V3 §18 sequence, steps D onward — A/B/C already done)
 
-1. **D — raise AG-006 with Dev 1. In progress, live handshake underway
-   2026-08-28** (cross-session messages, not just this document). Dev 1
-   agreed with the proposed shape (reuse `feature_snapshots`, never a
-   distinct "kind" for agent-originated decisions, never fabricate an id)
-   but found a real structural gap I didn't know about: there is no
-   standalone `compute_features(snapshot, history, spec) -> FeatureEvidence`
-   entry point today — feature computation is fused into each strategy's
-   own `StrategyCallable.evaluate()` (`trading_agent/base.py`). Dev 1 is
-   extracting a standalone `compute_features()` (their territory:
-   `trading_agent/`, `application/live_decision.py`) that both
-   `decide_once()` and this Gateway can call; my Gateway will call it
-   directly to populate `DecisionContextBundle.feature_snapshot_id` before
-   ever asking an agent anything. Not urgent enough to block Dev 1's
-   current execution-activation work — told them to finish that first and
-   ping me when `compute_features()` lands.
+1. **D — raise AG-006 with Dev 1. Still in progress, checked in again
+   2026-08-31** (three days after the first exchange, my own initiative —
+   no new commits/status entries appeared, so I verified nothing had
+   changed before assuming it had). Dev 1 confirmed the gap is real and
+   specifically ruled out the shortcut I'd found on my own
+   (`trading_agent/features.py::compute_features()` — real, but
+   `baseline_v1`-specific; `ict_v1` has its own structurally different
+   `IctFeatureSnapshot`; no cross-strategy entry point exists for either).
+   Extraction not started, no ETA. Explicitly told me not to wait idle —
+   see §0b, which is what I built instead while this stays blocked.
 2. **E — implement `TradeProposal → TradeIntent` mapping** on a new
    `agent/tradeintent-mapping` branch, once D lands.
 3. **F — run the shared integration path** (V3 §15) once the mapping
    exists — not available yet, correctly not attempted this pass.
 4. **G/H/I** (external Trader against genuine shadow context, Supervisor
    boundary, agent-driven shadow proof) — blocked on E/F, in that order,
-   per V3 §18.
+   per V3 §18. The HTTP transport (§0b) is the piece G will actually need
+   once E/F land — built ahead of time since it did not itself depend on
+   AG-006.
 5. Do not request formal reviewer input for routine continuation — only
    per V3 §19's five triggers (material safety/security ambiguity,
    required Phase-4 invariant change, unresolved authority dispute,
@@ -325,6 +389,19 @@ mapping. Not yet created — see §5.
 > (`compute_features()` doesn't exist standalone yet, only fused into
 > each strategy's `evaluate()`) and is extracting it; not blocking their
 > current execution-activation work, they'll ping me when it's ready.
+> Checked in again 2026-08-31 (three days, no new activity visible) — still
+> genuinely blocked, no ETA, explicitly told not to wait idle.
+>
+> **New since then (2026-08-31): HTTP transport.** `agent_gateway/http.py`
+> — a FastAPI app exposing only `POST /agent/proposals`/`POST /agent/no-trade`,
+> nothing administrative reachable, kept out of `api/` deliberately (your
+> Control API's territory, different authority boundary). 16 new tests,
+> full suite now 855 passed/1 skipped. One real bug found by the tests
+> themselves and fixed: a domain-validator rejection's `ValidationError.errors()`
+> carried a raw exception object `json.dumps` couldn't serialize, turning
+> an intended `400` into an unhandled `500` — fixed with
+> `include_context=False`. Not yet committed, same as everything else —
+> pending the usual per-turn confirmation.
 >
 > **Already resolved, no action needed:** the `DEFAULT_TEST_URL`-bypasses-
 > `CRUMBLR_DATABASE_URL` gap I flagged — you found and fixed it
