@@ -305,3 +305,27 @@ class TestConfigVersioning:
         config = PlatformConfig.model_validate(paper_config_payload())
         with pytest.raises(ValidationError):
             config.risk.max_open_positions = 99
+
+    def test_approving_this_exact_version_does_not_change_it(self) -> None:
+        """F-062: `RiskConfig.approved_config_version` is compared against
+
+        `config_version` (`risk/submission_gate.py` condition 6). Before this
+        was fixed, writing the approved hash into the config changed the
+        config, which changed the hash the write was supposed to match — an
+        approval could never actually be recorded. `config_version` now
+        excludes the three governance fields so an approval of this exact
+        content is stable once written."""
+        baseline = PlatformConfig.model_validate(paper_config_payload())
+        version = baseline.config_version
+
+        approved = baseline.model_copy(
+            update={
+                "risk": baseline.risk.model_copy(update={"approved_config_version": version}),
+                "execution": baseline.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+
+        assert approved.config_version == version
+        assert approved.risk.approved_config_version == approved.config_version

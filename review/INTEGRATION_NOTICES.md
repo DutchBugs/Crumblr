@@ -164,3 +164,39 @@ DecisionContextBundle field-addition proposal when it arrives, per the
 section 4 handshake, before Dev 2 merges it.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-08-28 — DEV1
+Changed: Two additions, both from "durable execution-activation wiring"
+(core critical path item 2 — the first real caller of
+evaluate_submission_gate()). (1) domain/enums.py: two new
+ExecutionEventType members, SUBMISSION_GATE_PASSED /
+SUBMISSION_GATE_BLOCKED. (2) config.py: PlatformConfig.config_version
+now excludes three governance/approval fields
+(risk.approved_config_version, execution.submission_enabled,
+execution.feedback_2_0_approved) from what it hashes — fixing F-062, a
+self-referential bug found while building this: those fields compared
+themselves against a hash that included themselves, so the comparison
+could never be made to match by construction (full reproduction in
+review/adr/ADR-006-submission-gate.md §5, review/FEEDBACK.md F-062).
+Impact: both files are shared-contract territory per DEV1/DEV2
+instructions section 4. (1) is additive-only — confirmed via grep,
+nothing in src/crumblr/agent_gateway/ references either new name. (2)
+changes what bytes config_version hashes, but not its type (still
+str) or its meaning for any existing caller — no shipped config file
+sets any of the three excluded fields, so every config_version any
+existing code has ever actually seen is numerically unchanged by this
+fix; only a config that also set one of those three fields (none did,
+anywhere) would see a different value than before. Confirmed via grep:
+agent_gateway/ does not reference config_version anywhere.
+Action required: none expected. If Agent Gateway work ever needs to
+reference PlatformConfig.config_version directly (e.g. binding a
+DecisionContextBundle to a specific config), be aware it now
+deliberately excludes those three fields — ask Dev 1 if a Gateway-side
+need for the pre-fix (whole-config) hash ever comes up, since excluding
+fields from an identity hash is exactly the kind of design decision
+this log exists to surface before it causes cross-track confusion.
+Relevant commit: (this commit)
+```

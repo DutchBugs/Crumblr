@@ -7218,6 +7218,131 @@ Next:
 
 ---
 
+## Update 2026-08-28 (fifty-second entry) — durable execution-activation wiring shipped; a real, self-referential bug in F-049 found and fixed same day (F-062)
+
+Component: `application/execution.py`, `domain/enums.py`, `config.py`, `review/adr/ADR-006-submission-gate.md`, `review/FEEDBACK.md`, `review/DEVIATIONS.md`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1 core critical path item 2 (`CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS_V2.md` §13): SubmissionGate (item 1, done) → **durable execution-activation wiring (this entry)** → `SUBMISSION_STARTED` timing, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event conflict hardening (items 3-8, not started)
+Status before: F-049's `evaluate_submission_gate()` was real and tested but called by nobody — no orchestrator evaluated it against a real, in-flight order
+Status after: `ExecutionOrchestrator._process()` evaluates the gate for real, immediately after a broker-accepted `order_check`, and durably records the result. While proving the gate can genuinely open, found and fixed a real defect in F-049 as shipped: one of its nine conditions could never be satisfied by construction
+
+Completed:
+- `application/execution.py`: new `_evaluate_submission_readiness()`,
+  called from `_process()` only when `check.accepted` (an
+  `ORDER_CHECK_REJECTED` order never reaches it — that path is unchanged
+  and still ends there). Builds `SubmissionGateContext` entirely from
+  signals already in scope from `_process()`'s own preceding reads —
+  zero new MT5 calls, including terminal AlgoTrading state
+  (`observation.account.terminal_trade_allowed`, already captured by
+  `capture_broker_state()`). Appends `SUBMISSION_GATE_PASSED`/
+  `SUBMISSION_GATE_BLOCKED` with the decision's reason codes and a
+  complete-context payload, and that event type becomes the run's
+  reported outcome — the durable event log still gets both rows
+  (`ORDER_CHECKED` first), but the *outcome* reflects the true final
+  state, the same principle F-057 already established for
+  `FINAL_RISK_PASSED`.
+- `domain/enums.py`: two new `ExecutionEventType` members,
+  `SUBMISSION_GATE_PASSED`/`SUBMISSION_GATE_BLOCKED`, mirroring
+  `FINAL_RISK_PASSED`/`FINAL_RISK_BLOCKED`'s naming. Confirmed via grep:
+  additive-only, nothing in `agent_gateway/` references either name.
+- **F-062, found while writing the test that proves the gate can open**:
+  that test requires `RiskConfig.approved_config_version ==
+  PlatformConfig.config_version` — but `config_version` was a hash of
+  the *entire* config, including that same field. Writing the approved
+  hash into the config changed the config, which changed the hash the
+  write was supposed to match. Empirically confirmed circular before any
+  fix (set `approved_config_version` to the config's own current
+  `config_version`, recomputed, got a *different* value, every time).
+  Unlike the `MarketConfig.expected_spec_version` precedent this was
+  modeled on, that field pins a hash of a genuinely separate artifact
+  (the observed `InstrumentSpec`) — never itself part of the hash it's
+  compared against. Fixed by excluding the three governance/approval
+  fields (`risk.approved_config_version`, `execution.submission_enabled`,
+  `execution.feedback_2_0_approved`) from what `config_version` hashes —
+  it now represents the substantive, risk-bearing content an owner
+  reviews, not whether that review already happened. No shipped config
+  sets any of the three, and every other field still changes the version
+  on any edit exactly as before (`test_any_change_produces_a_new_version`
+  unaffected). Not a live-trading risk either way — `order_send` stayed
+  unreachable throughout, fail-closed the whole time — but a
+  CRITICAL-severity gate whose owner-approval leg could never actually be
+  satisfied is a real defect, filed as its own finding rather than folded
+  into F-049's row: `review/FEEDBACK.md` F-062,
+  `review/adr/ADR-006-submission-gate.md` §5 addendum with the full
+  reproduction.
+- Two new integration tests: `test_a_fully_approved_config_reaches_
+  submission_gate_passed` (a test-only fully-approved config —
+  `SUBMISSION_GATE_PASSED`, the first time this repo has ever reached
+  that state) and `test_a_broker_rejected_order_never_reaches_the_
+  submission_gate` (`ORDER_CHECK_REJECTED` short-circuits, no
+  `SUBMISSION_GATE_*` event appended). Plus one config unit test,
+  `test_approving_this_exact_version_does_not_change_it`, proving F-062's
+  fix directly.
+- Updated `review/DEVIATIONS.md` D-047 (the gate is no longer "called by
+  nobody") and `review/INTEGRATION_NOTICES.md` (both changed files are
+  shared-contract territory per the DEV1/DEV2 split; confirmed no
+  `agent_gateway/` reference to either the two new event types or
+  `config_version` before logging `IMPACT: NONE`).
+- Replied to a cross-session question from Dev 2 (AG-006 follow-up: is
+  `trading_agent/features.py::compute_features()` sufficient for the
+  Gateway's `feature_snapshot_id` need?) after checking the code
+  directly rather than assuming — it is not: that function is
+  `baseline_v1`-specific (`FeatureSnapshot`), `ict_v1` has its own,
+  structurally different `IctFeatureSnapshot` computed inline in its own
+  `evaluate()`, and the only cross-strategy contract
+  (`trading_agent/base.py::FeatureEvidence`) is populated solely as a
+  byproduct of a full strategy evaluation today. The standalone
+  extraction Dev 2 needs is still unbuilt.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run mypy`
+  — all clean, 147 source files.
+- `uv run pytest tests/integration/test_execution_orchestrator.py
+  tests/unit/test_config.py -q` — 59 passed.
+- Full suite, solo, against `crumblr_test_dev1` —
+  **1017 passed, 3 skipped**, zero failures (Dev 2's own last-reported
+  count was 1014 on the shared `main`, at `d6a5361`; +3 for this entry's
+  three new tests, exactly as expected — not yet rebased onto that
+  commit, see Next).
+- Grepped the diff for any new `order_send` call site: none. The only
+  `order_send` call anywhere in `src/` remains
+  `application/orchestration.py`'s pre-existing replay/backtest path
+  against `SimulatedBroker` — unrelated, unchanged.
+
+Problems found:
+- F-062 (above) — the real finding of this slice, not merely a test
+  authoring inconvenience.
+
+Risk impact:
+- None adverse. `order_send` stays structurally impossible regardless of
+  the submission gate's evaluated outcome. F-062's fix makes a
+  CRITICAL-severity gate leg that was silently permanently closed
+  potentially satisfiable in the future, by explicit owner action — the
+  fail-closed direction of the bug means no window of unsafe behavior
+  ever existed.
+
+Decision:
+- Both this slice's wiring and the F-062 fix are self-discovered
+  implementer findings under review 1.25 §9's changed cadence — not a
+  reviewer request. Judged not to independently trigger pulling the
+  reviewer back for `feedback.2.0.md` early (§9 item 1's "material safety
+  defect" bar): fail-closed throughout, found and fixed same day, with
+  evidence. Logged prominently here and in `review/FEEDBACK.md` instead
+  so a human can override that judgment if they read it differently.
+- Not yet committed — pending the usual per-turn approval, on
+  `core/execution-activation`. `origin/main` has moved since this branch
+  was created (Dev 2's `d6a5361`, self-review hardening pass,
+  `agent_gateway/persistence/agent_gateway.py` only, `IMPACT: NONE` per
+  their own notice) — will rebase before merging, same pattern as the
+  forty-ninth/fifty-first entries.
+
+Next:
+- Rebase onto `origin/main`, re-run the full suite once more after the
+  rebase, then commit and merge per V2 §9's short-lived-branch flow.
+- Continue down the core critical path: item 3 (`SUBMISSION_STARTED`
+  timing) is next, no plan drafted yet.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

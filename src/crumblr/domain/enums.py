@@ -345,6 +345,21 @@ class ExecutionEventType(StrEnum):
     FINAL_RISK_BLOCKED = "FINAL_RISK_BLOCKED"
     ORDER_CHECKED = "ORDER_CHECKED"
     ORDER_CHECK_REJECTED = "ORDER_CHECK_REJECTED"
+    SUBMISSION_GATE_PASSED = "SUBMISSION_GATE_PASSED"
+    """F-049 (`risk/submission_gate.py::evaluate_submission_gate`), evaluated
+
+    immediately after a successful `order_check` — whether real submission
+    would currently be authorized. Read-only and durable, same as
+    `FINAL_RISK_PASSED`: recording that the gate opened is not itself an
+    attempt to submit anything, and nothing in this codebase acts on this
+    event to reach `order_send` — that stays a separate, later step
+    (`SUBMISSION_STARTED`, below, reserved for it)."""
+    SUBMISSION_GATE_BLOCKED = "SUBMISSION_GATE_BLOCKED"
+    """Carries the gate's `reason_codes` and the complete serialized
+
+    `SubmissionGateContext` in its payload — every shipped config today
+    closes at least three of the nine legs, so this is the expected,
+    honest outcome until an owner explicitly approves submission."""
 
     # Reserved for M5. Never emitted by anything Phase 4 builds.
     SUBMISSION_STARTED = "SUBMISSION_STARTED"

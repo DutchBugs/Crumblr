@@ -253,8 +253,33 @@ class PlatformConfig(ConfigSection):
 
     @property
     def config_version(self) -> str:
-        """Content hash of the whole configuration, for the decision capsule."""
-        return fingerprint(self.model_dump(mode="json"))
+        """Content hash of the configuration's substantive content, for the
+
+        decision capsule and `SubmissionGate` condition 6
+        (`RiskConfig.approved_config_version`, F-049/ADR-006).
+
+        Excludes the three governance/approval fields
+        (`risk.approved_config_version`, `execution.submission_enabled`,
+        `execution.feedback_2_0_approved`) deliberately: this hash is what an
+        owner reviews and approves ("the actual numbers this `RiskConfig`
+        carries" — `RiskConfig.approved_config_version`'s own docstring), and
+        an approval field is not itself one of those numbers. Hashing it
+        anyway would make it self-referential — writing the approved hash
+        into the file changes the file, which changes the hash the write was
+        supposed to match, which can never converge (found while adding the
+        wiring in `application/execution.py` that actually evaluates this
+        condition; empirically confirmed unsatisfiable before this fix, see
+        F-062, `review/FEEDBACK.md`). Any other field change still produces a
+        new version, unchanged from before this fix
+        (`tests/unit/test_config.py::TestConfigVersioning`)."""
+        payload = self.model_dump(
+            mode="json",
+            exclude={
+                "risk": {"approved_config_version"},
+                "execution": {"submission_enabled", "feedback_2_0_approved"},
+            },
+        )
+        return fingerprint(payload)
 
     def enabled_symbols(self) -> tuple[str, ...]:
         return tuple(market.canonical_symbol for market in self.markets if market.enabled)

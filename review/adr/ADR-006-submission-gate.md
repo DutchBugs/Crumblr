@@ -116,3 +116,45 @@ gate does not quietly open in production today.
   `approved_config_version` to anything but their closed defaults is an
   owner decision, never an engineering one — this ADR does not authorize
   or recommend when that should happen.
+
+---
+
+## 5. Addendum 2026-08-28 — condition 6 was unsatisfiable as originally shipped (F-062)
+
+While wiring the orchestrator caller this ADR anticipated
+(`application/execution.py::_evaluate_submission_readiness`, "durable
+execution-activation wiring," Dev-1 core critical path item 2),
+condition 6 turned out to be impossible to satisfy by construction, not
+merely unapproved: `RiskConfig.approved_config_version` is compared
+against `PlatformConfig.config_version`, and `config_version` was a
+content hash of the *entire* config — including
+`approved_config_version` itself. Writing the approved hash into the
+file changed the file, which changed the hash the write was supposed to
+match. Confirmed empirically before any fix: setting
+`approved_config_version` to the config's own current `config_version`
+and recomputing produced a *different* `config_version`, every time.
+
+This is not the `MarketConfig.expected_spec_version` precedent §3 cites
+— that field pins a hash of a genuinely separate artifact (the observed
+`InstrumentSpec`), never itself part of the hash it's compared against.
+`approved_config_version` lives inside the very object it was compared
+to, which the precedent does not.
+
+**Fix**: `PlatformConfig.config_version` now excludes the three
+governance/approval fields (`risk.approved_config_version`,
+`execution.submission_enabled`, `execution.feedback_2_0_approved`) from
+what it hashes — it represents the substantive, risk-bearing content an
+owner reviews and approves, not whether that review already happened.
+Every other field still changes the version on any edit, unchanged from
+before (`tests/unit/test_config.py::TestConfigVersioning`). New test:
+`test_approving_this_exact_version_does_not_change_it` proves the fixed
+point now holds. No shipped config sets any of the three fields, so this
+changes no config file and no other reachable behaviour —
+`DecisionCapsule.risk_config_version` binding, `test_the_gate_is_closed
+_against_the_actual_shipped_config`, and everything else that reads
+`config_version` still gets the value it always got before.
+
+Not a live-trading risk either way: `order_send` stays structurally
+unreachable regardless of this leg. But a CRITICAL-severity gate whose
+"owner approves" leg could never actually be satisfied is a real defect
+in what F-049 delivered, logged as `review/FEEDBACK.md` F-062.

@@ -79,7 +79,7 @@ from crumblr.domain.enums import (
     SupervisorVerdict,
 )
 from crumblr.domain.hashing import fingerprint
-from crumblr.domain.models import ApprovedOrder, DecisionCapsule, MarketSnapshot
+from crumblr.domain.models import ApprovedOrder, DecisionCapsule, MarketSnapshot, MarketTick
 from crumblr.domain.money import price_to_points
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
@@ -95,6 +95,7 @@ from crumblr.risk.execution_eligibility import evaluate_execution_eligibility
 from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import RiskSessionStore, recover_session
+from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
 from crumblr.trading_agent.sessions import trading_day
 
 _log = get_logger("execution_orchestrator")
@@ -453,9 +454,84 @@ class ExecutionOrchestrator:
             else ExecutionEventType.ORDER_CHECK_REJECTED
         )
         self._append(order_request_id, event_type, final_now, payload=check.model_dump(mode="json"))
-        return ExecutionAttemptOutcome(
-            order_request_id=order_request_id, capsule_id=capsule.capsule_id, event_type=event_type
+        if not check.accepted:
+            return ExecutionAttemptOutcome(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                event_type=event_type,
+            )
+
+        # Durable execution-activation wiring (Dev-1 core critical path,
+        # item 2): whether real submission would currently be authorized,
+        # evaluated and recorded — never acted on. `order_send` stays
+        # unreachable regardless of this decision; see
+        # `risk/submission_gate.py`'s own module docstring.
+        gate_event_type, gate_reason_codes = self._evaluate_submission_readiness(
+            order_request_id,
+            observation=observation,
+            tick=tick,
+            final_now=final_now,
         )
+        return ExecutionAttemptOutcome(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            event_type=gate_event_type,
+            reason_codes=gate_reason_codes,
+        )
+
+    def _evaluate_submission_readiness(
+        self,
+        order_request_id: UUID,
+        *,
+        observation: BrokerStateObservation,
+        tick: MarketTick,
+        final_now: UtcDatetime,
+    ) -> tuple[ExecutionEventType, tuple[ReasonCode, ...]]:
+        """F-049's `SubmissionGate`, evaluated for real (ADR-006/Dev-1
+
+        core critical path item 2). Every signal is already in scope from
+        `_process()`'s own preceding reads — no new MT5 call, including
+        terminal AlgoTrading state, which `capture_broker_state()` already
+        captured into `observation.account.terminal_trade_allowed`.
+        """
+        assert observation.account_state is not None
+        context = SubmissionGateContext(
+            environment=self._config.environment,
+            account=observation.account_state,
+            reconciliation_status=ReconciliationStatus.MATCHED,
+            fresh_tick=tick,
+            max_market_data_age_ms=self._config.execution.max_market_data_age_ms,
+            kill_switch=self._kill_switch,
+            risk_config_version=self._config.config_version,
+            approved_risk_config_version=self._config.risk.approved_config_version,
+            submission_enabled=self._config.execution.submission_enabled,
+            terminal_trade_allowed=bool(observation.account.terminal_trade_allowed),
+            feedback_2_0_approved=self._config.execution.feedback_2_0_approved,
+            now=final_now,
+        )
+        decision = evaluate_submission_gate(context)
+        event_type = (
+            ExecutionEventType.SUBMISSION_GATE_PASSED
+            if decision.open
+            else ExecutionEventType.SUBMISSION_GATE_BLOCKED
+        )
+        self._append(
+            order_request_id,
+            event_type,
+            final_now,
+            reason_codes=decision.reason_codes,
+            payload={
+                "environment": context.environment.value,
+                "reconciliation_status": context.reconciliation_status.value,
+                "max_market_data_age_ms": context.max_market_data_age_ms,
+                "risk_config_version": context.risk_config_version,
+                "approved_risk_config_version": context.approved_risk_config_version,
+                "submission_enabled": context.submission_enabled,
+                "terminal_trade_allowed": context.terminal_trade_allowed,
+                "feedback_2_0_approved": context.feedback_2_0_approved,
+            },
+        )
+        return event_type, decision.reason_codes
 
     def _risk_context(self) -> policies.RiskContext:
         config = self._config

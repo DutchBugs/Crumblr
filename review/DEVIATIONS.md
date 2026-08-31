@@ -949,9 +949,15 @@ mean anything should start here.
      events.
 - **Also provisional, by design, not oversight:** `risk/submission_gate.py`
   ::`evaluate_submission_gate()` is now real and tested (F-049,
-  `review/adr/ADR-006-submission-gate.md`, 2026-08-28) but called by
-  nobody — no `SubmissionOrchestrator` exists to call it before a real
-  `order_send`; automatic flatten submission stays halt-only (ADR-004); the human-set
+  `review/adr/ADR-006-submission-gate.md`, 2026-08-28) and, as of the same
+  day, genuinely called: `ExecutionOrchestrator._process()` evaluates it
+  immediately after a broker-accepted `order_check` and durably records
+  `SUBMISSION_GATE_PASSED`/`SUBMISSION_GATE_BLOCKED` (core critical path
+  item 2, "durable execution-activation wiring"). This is still
+  evaluate-and-record only — no `SubmissionOrchestrator` exists to act on
+  the result before a real `order_send`, which stays structurally
+  impossible regardless of what the gate decides; automatic flatten
+  submission stays halt-only (ADR-004); the human-set
   `activation_watermark` is `None` in every shipped config, so the normal
   live pipeline (`scripts/live_decision.py`) provably never reaches
   `order_check` today outside a test or a deliberate one-off evidence run

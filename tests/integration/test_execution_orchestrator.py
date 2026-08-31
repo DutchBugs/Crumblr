@@ -28,7 +28,7 @@ from crumblr.config import (
     SupervisorConfig,
     TradingAgentConfig,
 )
-from crumblr.domain.enums import Environment, ExecutionEventType
+from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.models import DecisionCapsule, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
@@ -403,7 +403,18 @@ class TestEndToEnd:
 
         assert len(outcomes) == 1
         assert outcomes[0].capsule_id == capsule.capsule_id
-        assert outcomes[0].event_type == ExecutionEventType.ORDER_CHECKED
+        # `order_check` is real and reached (below); the *outcome* reported
+        # for the run reflects the true final state, one step further —
+        # the submission gate (Dev-1 core critical path item 2). Every
+        # shipped/test config leaves three of nine legs unapproved, so a
+        # clean capsule correctly, honestly ends BLOCKED here, never
+        # PASSED, until an owner explicitly approves submission.
+        assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_GATE_BLOCKED
+        assert set(outcomes[0].reason_codes) == {
+            ReasonCode.RISK_POLICY_NOT_APPROVED,
+            ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED,
+            ReasonCode.FEEDBACK_2_0_NOT_APPROVED,
+        }
         assert fake.order_send_calls == 0
         assert fake.order_check_requests  # the real order_check call happened
 
@@ -413,6 +424,7 @@ class TestEndToEnd:
             ExecutionEventType.REQUEST_CLAIMED,
             ExecutionEventType.FINAL_RISK_PASSED,
             ExecutionEventType.ORDER_CHECKED,
+            ExecutionEventType.SUBMISSION_GATE_BLOCKED,
         ]
 
         # Review 1.22 F-057: the durable link ADR-001 requires. The
@@ -423,6 +435,92 @@ class TestEndToEnd:
         assert final_risk_event.payload is not None
         assert final_risk_event.payload["final_risk_decision"]["verdict"] == "PASS"
         assert final_risk_event.payload["order_fingerprint"]
+
+    def test_a_fully_approved_config_reaches_submission_gate_passed(self, engine: Engine) -> None:
+        """The gate genuinely can open: a test-only config with all three
+
+        approval fields set (F-062 makes this achievable at all — see
+        `tests/unit/test_config.py::test_approving_this_exact_version_does_not_change_it`).
+        Never a shipped default; every real config leaves this BLOCKED, as
+        `test_a_clean_eligible_capsule_reaches_order_checked` proves above.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        capsule = sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        outcomes = orch.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].capsule_id == capsule.capsule_id
+        assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_GATE_PASSED
+        assert outcomes[0].reason_codes == ()
+        assert fake.order_send_calls == 0
+
+        events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        gate_event = next(
+            e for e in events if e.event_type == ExecutionEventType.SUBMISSION_GATE_PASSED
+        )
+        assert gate_event.payload is not None
+        assert gate_event.payload["submission_enabled"] is True
+        assert gate_event.payload["feedback_2_0_approved"] is True
+        assert gate_event.payload["approved_risk_config_version"] == version
+        assert gate_event.payload["risk_config_version"] == version
+
+    def test_a_broker_rejected_order_never_reaches_the_submission_gate(
+        self, engine: Engine
+    ) -> None:
+        """`ORDER_CHECK_REJECTED` short-circuits — the gate is never
+
+        evaluated when the broker itself refused the order, regardless of
+        what it would have decided."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        def rejecting_order_check(request: dict[str, Any]) -> Any:
+            fake.order_check_requests.append(request)
+            return order_check_result(retcode=10019, comment="No money")
+
+        fake.order_check = rejecting_order_check  # type: ignore[method-assign]
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        outcomes = orch.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.ORDER_CHECK_REJECTED
+        assert fake.order_send_calls == 0
+
+        events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        event_types = {event.event_type for event in events}
+        assert ExecutionEventType.SUBMISSION_GATE_PASSED not in event_types
+        assert ExecutionEventType.SUBMISSION_GATE_BLOCKED not in event_types
 
     def test_the_approved_order_is_linked_to_both_risk_decisions(self, engine: Engine) -> None:
         """F-057: `ApprovedOrder` names the intent-time decision it descends
@@ -666,7 +764,14 @@ class TestEndToEnd:
         outcomes = orch.run_once()
 
         assert len(outcomes) == 1
-        assert outcomes[0].event_type == ExecutionEventType.ORDER_CHECKED
+        # The sequencing fix under test reaches ORDER_CHECKED (the durable
+        # event log still has that row); the outcome itself goes one step
+        # further to the submission gate, correctly BLOCKED here since this
+        # test's config carries no governance approvals — unrelated to what
+        # this test verifies, see `test_a_clean_eligible_capsule_reaches_order_checked`.
+        assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_GATE_BLOCKED
+        events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        assert ExecutionEventType.ORDER_CHECKED in [event.event_type for event in events]
 
     def test_order_send_is_never_called_even_when_everything_passes(self, engine: Engine) -> None:
         """The hard assertion: not "the test passed", but that the one method
