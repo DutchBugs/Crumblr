@@ -7328,16 +7328,23 @@ Decision:
   defect" bar): fail-closed throughout, found and fixed same day, with
   evidence. Logged prominently here and in `review/FEEDBACK.md` instead
   so a human can override that judgment if they read it differently.
-- Not yet committed — pending the usual per-turn approval, on
-  `core/execution-activation`. `origin/main` has moved since this branch
-  was created (Dev 2's `d6a5361`, self-review hardening pass,
-  `agent_gateway/persistence/agent_gateway.py` only, `IMPACT: NONE` per
-  their own notice) — will rebase before merging, same pattern as the
-  forty-ninth/fifty-first entries.
+- Committed `49c3571` on `core/execution-activation`, then rebased
+  cleanly onto `origin/main` (Dev 2's `d6a5361`, self-review hardening
+  pass, `agent_gateway/persistence/agent_gateway.py` only, `IMPACT: NONE`
+  per their own notice) — no conflicts.
+
+**Post-rebase evidence correction**: the full-suite count above
+(1017 passed) was measured before the rebase, against the pre-`d6a5361`
+tree; re-run after rebasing onto `d6a5361` reports **1023 passed, 3
+skipped**, zero failures — six more than the naive 1014+3=1017
+arithmetic implied, because `d6a5361` itself added test coverage for the
+three bugs it fixed (AG-007/008/009), not merely code. Recorded here
+rather than silently editing the number above, per this project's own
+"report evidence honestly" rule — the 1017 figure was accurate for what
+it measured, just not the final post-rebase state.
 
 Next:
-- Rebase onto `origin/main`, re-run the full suite once more after the
-  rebase, then commit and merge per V2 §9's short-lived-branch flow.
+- Merge to `main` and push per V2 §9's short-lived-branch flow.
 - Continue down the core critical path: item 3 (`SUBMISSION_STARTED`
   timing) is next, no plan drafted yet.
 
