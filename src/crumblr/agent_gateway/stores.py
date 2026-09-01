@@ -46,6 +46,7 @@ from crumblr.agent_gateway.errors import (
     DecisionConflictError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
+from crumblr.agent_gateway.evidence import AgentContextEvidence
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.timeutils import UtcDatetime
 
@@ -166,6 +167,40 @@ class InMemoryDecisionContextBundleStore:
 
     def by_hash(self, content_hash: str) -> DecisionContextBundle | None:
         return self._by_hash.get(content_hash)
+
+
+# --------------------------------------------------------------------------- #
+# Feature evidence (review 1.26 §5, AG-006) — content-addressed, immutable
+# --------------------------------------------------------------------------- #
+
+
+class FeatureEvidenceStore(Protocol):
+    """Durable storage for `AgentContextEvidence` — a `DecisionContextBundle`'s
+
+    `feature_snapshot_id` must resolve here before the Gateway will issue
+    the bundle (`AgentGateway.issue_context_bundle`). `persistence.features.FeatureSnapshotStore`
+    (already built for `baseline_v1`/`ict_v1`, unmodified by this track)
+    satisfies this Protocol directly — its `record()` accepts the broader
+    `trading_agent.base.FeatureEvidence` Protocol, which
+    `AgentContextEvidence` structurally satisfies.
+    """
+
+    def record(self, features: AgentContextEvidence) -> None: ...
+    def get_payload(self, feature_snapshot_id: UUID) -> dict[str, Any] | None: ...
+
+
+class InMemoryFeatureEvidenceStore:
+    def __init__(self) -> None:
+        self._by_id: dict[UUID, AgentContextEvidence] = {}
+
+    def record(self, features: AgentContextEvidence) -> None:
+        # Idempotent, like the real store's `ON CONFLICT DO NOTHING`: the
+        # first recording of a given feature_snapshot_id wins.
+        self._by_id.setdefault(features.feature_snapshot_id, features)
+
+    def get_payload(self, feature_snapshot_id: UUID) -> dict[str, Any] | None:
+        stored = self._by_id.get(feature_snapshot_id)
+        return None if stored is None else stored.model_dump(mode="json")
 
 
 # --------------------------------------------------------------------------- #

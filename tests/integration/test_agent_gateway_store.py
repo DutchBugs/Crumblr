@@ -33,7 +33,11 @@ from crumblr.agent_gateway.contracts import (
     TradeProposal,
     TradingAssignment,
 )
-from crumblr.agent_gateway.errors import AgentRejectionReason, DecisionConflictError
+from crumblr.agent_gateway.errors import (
+    AgentRejectionReason,
+    DecisionConflictError,
+    UnknownFeatureSnapshotError,
+)
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.persistence.agent_gateway import (
@@ -43,6 +47,7 @@ from crumblr.persistence.agent_gateway import (
     PostgresDecisionContextBundleStore,
     PostgresTradingAssignmentStore,
 )
+from crumblr.persistence.features import FeatureSnapshotStore
 from tests.conftest import FIXED_NOW
 
 pytestmark = pytest.mark.integration
@@ -86,22 +91,6 @@ def assignment(**overrides: Any) -> TradingAssignment:
     }
     fields.update(overrides)
     return TradingAssignment.model_validate(fields)
-
-
-def context_bundle(**overrides: Any) -> DecisionContextBundle:
-    fields: dict[str, Any] = {
-        "context_id": uuid4(),
-        "assignment_id": ASSIGNMENT_ID,
-        "market_snapshot_id": uuid4(),
-        "instrument_spec_version": "spec-v1",
-        "portfolio_summary_hash": "portfolio-abc",
-        "session_state": SessionState.OPEN,
-        "data_quality": DataQuality.GOOD,
-        "issued_at_utc": FIXED_NOW,
-        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
-    }
-    fields.update(overrides)
-    return DecisionContextBundle.model_validate(fields)
 
 
 def proposal(*, context_hash: str, **overrides: Any) -> TradeProposal:
@@ -151,7 +140,85 @@ def build_gateway(engine: Engine) -> AgentGateway:
         assignments=PostgresTradingAssignmentStore(engine),
         contexts=PostgresDecisionContextBundleStore(engine),
         outcomes=PostgresAgentDecisionOutcomeStore(engine),
+        feature_evidence=FeatureSnapshotStore(engine),
     )
+
+
+def _with_context(gateway: AgentGateway, **overrides: Any) -> DecisionContextBundle:
+    """Publishes a context bundle the real way (review 1.26 §5's flow) --
+
+    records `AgentContextEvidence` in the real `feature_snapshots` table
+    first, then issues a bundle citing it."""
+    fields: dict[str, Any] = {
+        "assignment_id": ASSIGNMENT_ID,
+        "symbol": "EUR/USD",
+        "market_snapshot_id": uuid4(),
+        "instrument_spec_version": "spec-v1",
+        "portfolio_summary_hash": "portfolio-abc",
+        "session_state": SessionState.OPEN,
+        "data_quality": DataQuality.GOOD,
+        "now": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return gateway.publish_context(**fields)
+
+
+class TestFeatureEvidenceAgainstRealPostgres:
+    """Review 1.26 §5, AG-006's resolution — proves the evidence layer
+
+    against the real `feature_snapshots` table (`persistence/features.py`,
+    unmodified, shared with `baseline_v1`/`ict_v1`), not just the in-memory
+    fake."""
+
+    def test_publish_context_durably_records_evidence_before_issuing(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+
+        payload = FeatureSnapshotStore(engine).get_payload(bundle.feature_snapshot_id)
+        assert payload is not None
+        assert payload["feature_set_version"] == "agent_context_v1"
+        assert payload["regime"] == "UNKNOWN"
+
+    def test_a_bundle_citing_an_unrecorded_snapshot_is_refused_after_restart(
+        self, engine: Engine
+    ) -> None:
+        """A fresh `AgentGateway` (simulating a restart) still refuses --
+
+        the check reads real Postgres, not process memory."""
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+
+        bundle = DecisionContextBundle.model_validate(
+            {
+                "context_id": uuid4(),
+                "assignment_id": ASSIGNMENT_ID,
+                "market_snapshot_id": uuid4(),
+                "instrument_spec_version": "spec-v1",
+                "portfolio_summary_hash": "portfolio-abc",
+                "session_state": SessionState.OPEN,
+                "data_quality": DataQuality.GOOD,
+                "feature_snapshot_id": uuid4(),  # never recorded
+                "issued_at_utc": FIXED_NOW,
+                "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+            }
+        )
+        second_process = build_gateway(engine)
+        with pytest.raises(UnknownFeatureSnapshotError):
+            second_process.issue_context_bundle(bundle)
+
+    def test_publish_context_is_idempotent_across_restarts(self, engine: Engine) -> None:
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+        first = _with_context(first_process)
+
+        second_process = build_gateway(engine)
+        second = _with_context(second_process)
+
+        assert first.feature_snapshot_id == second.feature_snapshot_id
 
 
 class TestBasicRoundTrip:
@@ -159,7 +226,7 @@ class TestBasicRoundTrip:
         gateway = build_gateway(engine)
         gateway.register_identity(identity(), credential_secret=SECRET)
         gateway.issue_assignment(assignment())
-        bundle = gateway.issue_context_bundle(context_bundle())
+        bundle = _with_context(gateway)
 
         authenticated = gateway.authenticate(agent_id=AGENT_ID, credential_secret=SECRET)
         assert authenticated.agent_id == AGENT_ID
@@ -204,7 +271,7 @@ class TestRestartSafety:
         first_process = build_gateway(engine)
         first_process.register_identity(identity(), credential_secret=SECRET)
         first_process.issue_assignment(assignment())
-        bundle = first_process.issue_context_bundle(context_bundle())
+        bundle = _with_context(first_process)
 
         original = proposal(context_hash=bundle.content_hash)
         first_result = first_process.submit_trade_proposal(
@@ -230,7 +297,7 @@ class TestRestartSafety:
         first_process = build_gateway(engine)
         first_process.register_identity(identity(), credential_secret=SECRET)
         first_process.issue_assignment(assignment())
-        bundle = first_process.issue_context_bundle(context_bundle())
+        bundle = _with_context(first_process)
 
         original = proposal(context_hash=bundle.content_hash)
         first_process.submit_trade_proposal(
@@ -248,7 +315,7 @@ class TestRestartSafety:
         first_process = build_gateway(engine)
         first_process.register_identity(identity(), credential_secret=SECRET)
         first_process.issue_assignment(assignment())
-        bundle = first_process.issue_context_bundle(context_bundle())
+        bundle = _with_context(first_process)
 
         decision = no_trade(context_hash=bundle.content_hash)
         first_result = first_process.submit_no_trade(
@@ -272,7 +339,7 @@ class TestConcurrentClaimIsAtomic:
         gateway = build_gateway(engine)
         gateway.register_identity(identity(), credential_secret=SECRET)
         gateway.issue_assignment(assignment())
-        bundle = gateway.issue_context_bundle(context_bundle())
+        bundle = _with_context(gateway)
         shared = proposal(context_hash=bundle.content_hash)
 
         store = PostgresAgentDecisionOutcomeStore(engine)
@@ -300,7 +367,7 @@ class TestRateLimitIsAtomicUnderRealConcurrency:
         admin = build_gateway(engine)
         admin.register_identity(identity(), credential_secret=SECRET)
         admin.issue_assignment(assignment(max_proposals_per_hour=3))
-        bundle = admin.issue_context_bundle(context_bundle())
+        bundle = _with_context(admin)
 
         proposals = [proposal(context_hash=bundle.content_hash) for _ in range(10)]
         results: list[Any] = []

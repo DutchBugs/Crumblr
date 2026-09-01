@@ -135,6 +135,17 @@ class DecisionContextBundle(Contract):
     mutation rights. `news_snapshot_id` is a reference into an
     already-ingested, content-addressed news store — never a live URL or
     fetch instruction (owner tweak 6; see `review/THREAT_MODEL_AGENT_GATEWAY.md`).
+
+    `feature_snapshot_id` (review 1.26 §5, AG-006's resolution): a trusted,
+    platform-issued reference to a durably-stored `FeatureEvidence`
+    (`AgentContextEvidence` for this track — see `evidence.py`), created by
+    Crumblr *before* this bundle is issued, never by the external agent and
+    never fabricated after a proposal arrives. `AgentGateway.issue_context_bundle`
+    refuses to issue a bundle whose `feature_snapshot_id` does not resolve
+    to a real stored snapshot. When a proposal against this bundle is later
+    accepted, the platform-owned `TradeIntent` this Gateway constructs sets
+    `TradeIntent.feature_snapshot_id = bundle.feature_snapshot_id` directly
+    — the same identity, never a fresh or fabricated one.
     """
 
     context_id: UUID
@@ -144,6 +155,7 @@ class DecisionContextBundle(Contract):
     portfolio_summary_hash: str
     session_state: SessionState
     data_quality: DataQuality
+    feature_snapshot_id: UUID
     policy_hints: PolicyHints | None = None
     news_snapshot_id: UUID | None = None
     issued_at_utc: UtcDatetime
@@ -162,7 +174,10 @@ class DecisionContextBundle(Contract):
 
         `InstrumentSpec.spec_version`/`TradeIntent.decision_hash`'s own
         pattern, so a bundle's freshness claim cannot be forged by
-        supplying a hash the actual content does not match.
+        supplying a hash the actual content does not match. Includes
+        `feature_snapshot_id` (review 1.26 §5's explicit requirement) so a
+        bundle's evidence reference cannot be swapped without changing the
+        hash a proposal binds to.
         """
         return fingerprint(
             {
@@ -172,6 +187,7 @@ class DecisionContextBundle(Contract):
                 "portfolio_summary_hash": self.portfolio_summary_hash,
                 "session_state": self.session_state,
                 "data_quality": self.data_quality,
+                "feature_snapshot_id": self.feature_snapshot_id,
                 "policy_hints": (
                     self.policy_hints.model_dump(mode="json")
                     if self.policy_hints is not None

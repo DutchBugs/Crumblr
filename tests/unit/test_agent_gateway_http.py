@@ -32,6 +32,7 @@ from crumblr.agent_gateway.stores import (
     InMemoryAgentDecisionOutcomeStore,
     InMemoryAgentIdentityStore,
     InMemoryDecisionContextBundleStore,
+    InMemoryFeatureEvidenceStore,
     InMemoryTradingAssignmentStore,
 )
 from crumblr.domain.enums import DataQuality, Environment, SessionState
@@ -76,22 +77,6 @@ def assignment(**overrides: Any) -> TradingAssignment:
     }
     fields.update(overrides)
     return TradingAssignment.model_validate(fields)
-
-
-def context_bundle(**overrides: Any) -> DecisionContextBundle:
-    fields: dict[str, Any] = {
-        "context_id": uuid4(),
-        "assignment_id": ASSIGNMENT_ID,
-        "market_snapshot_id": uuid4(),
-        "instrument_spec_version": "spec-v1",
-        "portfolio_summary_hash": "portfolio-abc",
-        "session_state": SessionState.OPEN,
-        "data_quality": DataQuality.GOOD,
-        "issued_at_utc": FIXED_NOW,
-        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
-    }
-    fields.update(overrides)
-    return DecisionContextBundle.model_validate(fields)
 
 
 def proposal_json(*, context_hash: str, **overrides: Any) -> dict[str, Any]:
@@ -142,6 +127,7 @@ def gateway() -> AgentGateway:
         assignments=InMemoryTradingAssignmentStore(),
         contexts=InMemoryDecisionContextBundleStore(),
         outcomes=InMemoryAgentDecisionOutcomeStore(),
+        feature_evidence=InMemoryFeatureEvidenceStore(),
     )
 
 
@@ -161,7 +147,19 @@ def _registered(gateway: AgentGateway, *, status: AgentStatus = AgentStatus.ACTI
 
 
 def _with_context(gateway: AgentGateway) -> DecisionContextBundle:
-    return gateway.issue_context_bundle(context_bundle())
+    """Publishes a context bundle the real way (review 1.26 §5's flow) --
+
+    records `AgentContextEvidence` first, then issues a bundle citing it."""
+    return gateway.publish_context(
+        assignment_id=ASSIGNMENT_ID,
+        symbol="EUR/USD",
+        market_snapshot_id=uuid4(),
+        instrument_spec_version="spec-v1",
+        portfolio_summary_hash="portfolio-abc",
+        session_state=SessionState.OPEN,
+        data_quality=DataQuality.GOOD,
+        now=FIXED_NOW,
+    )
 
 
 class TestSubmitProposal:

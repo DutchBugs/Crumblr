@@ -80,6 +80,7 @@ def decision_context_bundle(**overrides: Any) -> DecisionContextBundle:
         "portfolio_summary_hash": "portfolio-abc",
         "session_state": SessionState.OPEN,
         "data_quality": DataQuality.GOOD,
+        "feature_snapshot_id": uuid4(),
         "issued_at_utc": FIXED_NOW,
         "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
     }
@@ -207,10 +208,20 @@ class TestDecisionContextBundle:
             "assignment_id": uuid4(),
             "market_snapshot_id": uuid4(),
             "portfolio_summary_hash": "same",
+            "feature_snapshot_id": uuid4(),
         }
         first = decision_context_bundle(**shared)
         second = decision_context_bundle(**shared)
         assert first.content_hash == second.content_hash
+
+    def test_content_hash_changes_when_feature_snapshot_id_changes(self) -> None:
+        """Review 1.26 §5: "bundle content_hash includes the feature
+
+        snapshot reference" -- a bundle's evidence reference cannot be
+        swapped without changing the hash a proposal binds to."""
+        first = decision_context_bundle(feature_snapshot_id=uuid4())
+        second = decision_context_bundle(feature_snapshot_id=uuid4())
+        assert first.content_hash != second.content_hash
 
     def test_content_hash_reacts_to_policy_hints(self) -> None:
         base = decision_context_bundle(policy_hints=PolicyHints(session_blackout_active=False))

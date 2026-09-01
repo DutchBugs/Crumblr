@@ -38,6 +38,7 @@ from crumblr.agent_gateway.errors import (
     DecisionConflictError,
     ImpersonationError,
     UnknownAgentError,
+    UnknownFeatureSnapshotError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
 from crumblr.agent_gateway.gateway import AgentGateway
@@ -46,6 +47,7 @@ from crumblr.agent_gateway.stores import (
     InMemoryAgentDecisionOutcomeStore,
     InMemoryAgentIdentityStore,
     InMemoryDecisionContextBundleStore,
+    InMemoryFeatureEvidenceStore,
     InMemoryTradingAssignmentStore,
 )
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
@@ -92,22 +94,6 @@ def assignment(**overrides: Any) -> TradingAssignment:
     return TradingAssignment.model_validate(fields)
 
 
-def context_bundle(**overrides: Any) -> DecisionContextBundle:
-    fields: dict[str, Any] = {
-        "context_id": uuid4(),
-        "assignment_id": ASSIGNMENT_ID,
-        "market_snapshot_id": uuid4(),
-        "instrument_spec_version": "spec-v1",
-        "portfolio_summary_hash": "portfolio-abc",
-        "session_state": SessionState.OPEN,
-        "data_quality": DataQuality.GOOD,
-        "issued_at_utc": FIXED_NOW,
-        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
-    }
-    fields.update(overrides)
-    return DecisionContextBundle.model_validate(fields)
-
-
 def proposal(*, context_hash: str, **overrides: Any) -> TradeProposal:
     fields: dict[str, Any] = {
         "proposal_id": uuid4(),
@@ -150,13 +136,21 @@ def outcomes() -> InMemoryAgentDecisionOutcomeStore:
 
 
 @pytest.fixture
-def gateway(outcomes: InMemoryAgentDecisionOutcomeStore) -> AgentGateway:
+def feature_evidence() -> InMemoryFeatureEvidenceStore:
+    return InMemoryFeatureEvidenceStore()
+
+
+@pytest.fixture
+def gateway(
+    outcomes: InMemoryAgentDecisionOutcomeStore, feature_evidence: InMemoryFeatureEvidenceStore
+) -> AgentGateway:
     return AgentGateway(
         identities=InMemoryAgentIdentityStore(),
         credentials=InMemoryAgentCredentialStore(),
         assignments=InMemoryTradingAssignmentStore(),
         contexts=InMemoryDecisionContextBundleStore(),
         outcomes=outcomes,
+        feature_evidence=feature_evidence,
     )
 
 
@@ -165,9 +159,23 @@ def _registered(gateway: AgentGateway, *, status: AgentStatus = AgentStatus.ACTI
     gateway.issue_assignment(assignment())
 
 
-def _with_context(gateway: AgentGateway) -> DecisionContextBundle:
-    bundle = gateway.issue_context_bundle(context_bundle())
-    return bundle
+def _with_context(gateway: AgentGateway, **overrides: Any) -> DecisionContextBundle:
+    """Publishes a context bundle the real way (review 1.26 §5's flow):
+
+    records `AgentContextEvidence` first, then issues a bundle citing it —
+    `AgentGateway.publish_context` does both atomically."""
+    fields: dict[str, Any] = {
+        "assignment_id": ASSIGNMENT_ID,
+        "symbol": "EUR/USD",
+        "market_snapshot_id": uuid4(),
+        "instrument_spec_version": "spec-v1",
+        "portfolio_summary_hash": "portfolio-abc",
+        "session_state": SessionState.OPEN,
+        "data_quality": DataQuality.GOOD,
+        "now": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return gateway.publish_context(**fields)
 
 
 class TestIdentity:
@@ -343,7 +351,7 @@ class TestContext:
         self, gateway: AgentGateway
     ) -> None:
         _registered(gateway)
-        bundle = gateway.issue_context_bundle(context_bundle(assignment_id=uuid4()))
+        bundle = _with_context(gateway, assignment_id=uuid4())
         result = gateway.submit_trade_proposal(
             agent_id=AGENT_ID,
             credential_secret=SECRET,
@@ -609,3 +617,74 @@ class TestRequiredEvidence:
             now=FIXED_NOW,
         )
         assert result.accepted is True
+
+
+class TestFeatureEvidence:
+    """Review 1.26 §5, AG-006's resolution: a `DecisionContextBundle` must
+
+    carry a trusted, platform-issued `feature_snapshot_id` that Crumblr
+    creates and durably records *before* the bundle is issued -- never
+    fabricated, never agent-supplied."""
+
+    def test_issue_context_bundle_refuses_an_unknown_feature_snapshot(
+        self, gateway: AgentGateway
+    ) -> None:
+        """ "Gateway refuses an unknown/missing snapshot" (review 1.26 §5) --
+
+        a hand-built bundle citing a `feature_snapshot_id` nothing ever
+        recorded must be refused, not issued on an unchecked claim."""
+        _registered(gateway)
+        bundle = DecisionContextBundle.model_validate(
+            {
+                "context_id": uuid4(),
+                "assignment_id": ASSIGNMENT_ID,
+                "market_snapshot_id": uuid4(),
+                "instrument_spec_version": "spec-v1",
+                "portfolio_summary_hash": "portfolio-abc",
+                "session_state": SessionState.OPEN,
+                "data_quality": DataQuality.GOOD,
+                "feature_snapshot_id": uuid4(),  # never recorded anywhere
+                "issued_at_utc": FIXED_NOW,
+                "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+            }
+        )
+        with pytest.raises(UnknownFeatureSnapshotError):
+            gateway.issue_context_bundle(bundle)
+
+    def test_publish_context_records_evidence_before_issuing_the_bundle(
+        self, gateway: AgentGateway, feature_evidence: InMemoryFeatureEvidenceStore
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        payload = feature_evidence.get_payload(bundle.feature_snapshot_id)
+        assert payload is not None
+        assert payload["feature_set_version"] == "agent_context_v1"
+        assert payload["regime"] == "UNKNOWN"
+
+    def test_publish_context_is_idempotent_for_the_same_symbol_and_instant(
+        self, gateway: AgentGateway
+    ) -> None:
+        """Same `(symbol, now)` republished (e.g. two proposals against the
+
+        same closed decision window) collapses to one evidence snapshot,
+        the same identity discipline `compute_features` already uses."""
+        first = _with_context(gateway)
+        second = _with_context(gateway)
+        assert first.feature_snapshot_id == second.feature_snapshot_id
+
+    def test_a_proposal_accepted_against_a_published_context_is_fully_auditable(
+        self, gateway: AgentGateway, feature_evidence: InMemoryFeatureEvidenceStore
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+        # The evidence the accepted proposal's context was based on is
+        # still resolvable -- nothing about accepting the proposal could
+        # have disturbed it (append-only, content-addressed).
+        assert feature_evidence.get_payload(bundle.feature_snapshot_id) is not None

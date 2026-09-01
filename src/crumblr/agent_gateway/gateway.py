@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from crumblr.agent_gateway.auth import hash_credential, verify_credential
 from crumblr.agent_gateway.contracts import (
@@ -48,6 +48,7 @@ from crumblr.agent_gateway.contracts import (
     AgentStatus,
     DecisionContextBundle,
     NoTradeDecision,
+    PolicyHints,
     TradeProposal,
     TradingAssignment,
 )
@@ -57,19 +58,24 @@ from crumblr.agent_gateway.errors import (
     AuthenticationError,
     ImpersonationError,
     UnknownAgentError,
+    UnknownFeatureSnapshotError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
+from crumblr.agent_gateway.evidence import build_agent_context_evidence
 from crumblr.agent_gateway.stores import (
     AgentCredentialStore,
     AgentDecisionEventRecord,
     AgentDecisionOutcomeStore,
     AgentIdentityStore,
     DecisionContextBundleStore,
+    FeatureEvidenceStore,
     TradingAssignmentStore,
 )
+from crumblr.domain.enums import DataQuality, SessionState
 from crumblr.domain.timeutils import UtcDatetime
 
 _RATE_LIMIT_WINDOW = timedelta(hours=1)
+_DEFAULT_CONTEXT_VALIDITY = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -96,12 +102,14 @@ class AgentGateway:
         assignments: TradingAssignmentStore,
         contexts: DecisionContextBundleStore,
         outcomes: AgentDecisionOutcomeStore,
+        feature_evidence: FeatureEvidenceStore,
     ) -> None:
         self._identities = identities
         self._credentials = credentials
         self._assignments = assignments
         self._contexts = contexts
         self._outcomes = outcomes
+        self._feature_evidence = feature_evidence
 
     # ----------------------------------------------------------------- #
     # Administrative — Crumblr-internal only, never reachable by an agent
@@ -123,8 +131,69 @@ class AgentGateway:
         self._assignments.register(assignment)
 
     def issue_context_bundle(self, bundle: DecisionContextBundle) -> DecisionContextBundle:
+        """Fails closed if `bundle.feature_snapshot_id` does not resolve to
+
+        a durably-stored `AgentContextEvidence` (review 1.26 §5: "Gateway
+        refuses an unknown/missing snapshot") — never issues a bundle on an
+        unchecked claim that evidence exists, whether this is called via
+        `publish_context` below or directly with a hand-built bundle."""
+        if self._feature_evidence.get_payload(bundle.feature_snapshot_id) is None:
+            raise UnknownFeatureSnapshotError(
+                f"feature_snapshot_id {bundle.feature_snapshot_id} does not resolve to any "
+                "durably-stored AgentContextEvidence"
+            )
         self._contexts.issue(bundle)
         return bundle
+
+    def publish_context(
+        self,
+        *,
+        assignment_id: UUID,
+        symbol: str,
+        market_snapshot_id: UUID,
+        instrument_spec_version: str,
+        portfolio_summary_hash: str,
+        session_state: SessionState,
+        data_quality: DataQuality,
+        now: UtcDatetime,
+        policy_hints: PolicyHints | None = None,
+        news_snapshot_id: UUID | None = None,
+        validity: timedelta = _DEFAULT_CONTEXT_VALIDITY,
+    ) -> DecisionContextBundle:
+        """The "platform context publication" entry point review 1.26 §5's
+
+        flow starts with: builds and durably records the
+        `AgentContextEvidence` this observation is based on *before*
+        constructing the bundle that references it, then issues the bundle
+        through the same fail-closed `issue_context_bundle` path a
+        hand-built bundle goes through. This is the normal way a real
+        caller issues a context bundle; `issue_context_bundle` stays public
+        for tests and for a caller that already has its own evidence.
+        """
+        evidence = build_agent_context_evidence(
+            symbol=symbol,
+            computed_at_utc=now,
+            market_snapshot_id=market_snapshot_id,
+            instrument_spec_version=instrument_spec_version,
+            session_state=session_state,
+            data_quality=data_quality,
+        )
+        self._feature_evidence.record(evidence)
+        bundle = DecisionContextBundle(
+            context_id=uuid4(),
+            assignment_id=assignment_id,
+            market_snapshot_id=market_snapshot_id,
+            instrument_spec_version=instrument_spec_version,
+            portfolio_summary_hash=portfolio_summary_hash,
+            session_state=session_state,
+            data_quality=data_quality,
+            feature_snapshot_id=evidence.feature_snapshot_id,
+            policy_hints=policy_hints,
+            news_snapshot_id=news_snapshot_id,
+            issued_at_utc=now,
+            expires_at_utc=now + validity,
+        )
+        return self.issue_context_bundle(bundle)
 
     # ----------------------------------------------------------------- #
     # Authentication

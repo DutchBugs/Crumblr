@@ -65,6 +65,14 @@ class ContextConflictError(AgentGatewayError):
     """The same `context_id` was already issued with different content."""
 
 
+class UnknownFeatureSnapshotError(AgentGatewayError):
+    """A `DecisionContextBundle`'s `feature_snapshot_id` does not resolve to
+
+    any durably-stored `AgentContextEvidence` (review 1.26 §5: "Gateway
+    refuses an unknown/missing snapshot"). Raised by `issue_context_bundle`
+    — a bundle is never issued on an unchecked claim that evidence exists."""
+
+
 class DecisionConflictError(AgentGatewayError):
     """The same `proposal_id`/`decision_id` was already claimed with a
 
