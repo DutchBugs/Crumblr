@@ -1,10 +1,29 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.8  
+**Status document version:** 1.9  
 **Last updated:** 2026-09-01  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
+
+## Current state — mandatory compact header (review 1.26 §3)
+
+This section is the integrated current truth. If any historical paragraph
+below ever disagrees with it, this section wins — update it the same
+session a meaningful slice merges to `main`, not later.
+
+| | |
+|---|---|
+| **`main` HEAD** | `(pending — see the fifty-fifth entry's follow-up commit for the exact SHA)` |
+| **Last hosted CI result** | Not confirmed green. F-063 (`UV_FROZEN=1` + `uv sync --locked` incompatible with current `uv`) fixed and pushed 2026-09-01 — no `gh`/Actions access in this environment to confirm the hosted run itself; needs a human or a session with GitHub access |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 CI fix pushed. NEXT: confirm hosted CI green (needs a human), then core critical path items 3-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged. NEXT: AG-006 (platform-owned `agent_context_v1` evidence shape, no `compute_features()` extraction needed — review 1.26 §5 resolved this), then `TradeProposal → TradeIntent` mapping. BLOCKED: none currently |
+| **F-051 state** | Part 1 PASSED (real-terminal). Part 2 stalled — `mt5_live_reader.py` stopped 2026-08-27 06:20 UTC; needs restart (owner/operator action) |
+| **Owner blockers** | Confirm next hosted CI run is green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading; restart `mt5_live_reader.py` + `live_decision.py` for F-051 part 2 |
+| **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
+| **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md` (2026-09-01) was a deliberate owner-requested exception, not a change to that default |
+
+---
 
 ## What's needed next — owner-only or otherwise blocked
 
@@ -19,12 +38,12 @@ document you have that this repository doesn't yet.
 
 | # | What | Why it needs you | Where |
 |---|---|---|---|
-| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment — the F-056 fix is pushed, but "local green" was never allowed to stand in for "hosted green." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; §2 M0 acceptance below |
+| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. The live blocker is now **F-063** (`UV_FROZEN=1` + `uv sync --locked` — current `uv` refuses the combination; fixed and pushed 2026-09-01), not the older F-056 numpy issue. "Local green" was never allowed to stand in for "hosted green" — a human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; §2 M0 acceptance below; `review/FEEDBACK.md` F-063 |
 | 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
-| 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). Blocked on Dev 1 for the next step | Everything built so far is on `main`, quality-gate clean, full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries. Genuinely blocked on **AG-006**: `TradeProposal → TradeIntent` mapping needs a standalone `compute_features()` that does not exist yet (`baseline_v1`'s is strategy-specific, `ict_v1` has no equivalent) — Dev 1 confirmed this directly, extraction not started, no ETA. Dev 2 was told explicitly not to wait idle and built the HTTP transport instead while blocked | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; §13 fiftieth–fifty-fourth entries; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
+| 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). **No longer blocked** | Review 1.26 §5 resolved AG-006 directly: no standalone cross-strategy `compute_features()` needed after all — Dev 2 adds one platform-owned, deliberately-named evidence shape (`agent_context_v1`) reusing the existing generic `FeatureEvidence` persistence layer, entirely within Dev 2's own ownership. Dev 2 confirmed starting on this 2026-09-01. Full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; `feedback.1.26.md` §5/§7; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
 | 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 self-referential bug found and fixed same day); six items remain | `SubmissionGate` is real, tested, and now actually called by `ExecutionOrchestrator` after a broker-accepted `order_check`. Still open: `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; §13 fifty-second entry; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
@@ -34,7 +53,15 @@ individual Agent Gateway files. Bring the reviewer back only for: (1) a
 material safety defect, (2) a proposed change to a Phase-4 invariant, or
 (3) the complete `feedback.2.0` readiness bundle (review 1.25 §10's
 checklist) — at which point the target is `feedback.2.0.md` directly, not
-another `feedback.1.2x.md`.
+another `feedback.1.2x.md`. **`feedback.1.26.md` (2026-09-01) was a
+deliberate owner-requested exception to this rule, not a reversal of it**
+— it opens Phase 5 (Convergence, Observability & DEMO Readiness) with
+fresh work orders for both tracks; `feedback.2.0.md` remains the next
+*routine* target. It also changes how feedback reaches this repository
+going forward: the owner/reviewer now commits formal feedback directly,
+picked up here via `git fetch` at session start rather than handed over
+as an external document — see `review/FEEDBACK.md`'s own cadence section
+for the full detail.
 
 ---
 
@@ -7515,6 +7542,92 @@ Next:
 - Still waiting on Dev 1's `compute_features()` extraction (AG-006) before
   Step E (`TradeProposal → TradeIntent` mapping) can start. No other
   unblocked work identified in this track as of this entry.
+
+---
+
+## Update 2026-09-01 (fifty-fifth entry) — review 1.26 pulled and processed: Phase 5 opened, F-063 fixed same day, F-064 logged, AG-006 resolved without Dev-1 work
+
+Component: `.github/workflows/ci.yml`, `review/FEEDBACK.md`, `status.md` (new mandatory compact header, review 1.26 §3)
+Milestone: Session-start protocol (`CLAUDE.md` §1) applied to a new standing workflow: formal feedback now arrives committed directly into the repository rather than as an external document
+Status before: `main` at `8749753` (Dev 2's status.md catch-up entries + `feedback.1.26.md`, both pushed directly by the owner/reviewer per the new workflow, not yet pulled into this worktree)
+Status after: Pulled, read in full, registered in `review/FEEDBACK.md`, and acted on the one item explicitly owned by Dev 1 (F-063) the same session
+
+Completed:
+- `git fetch` + fast-forward merge picked up `5e11884` (Dev 2's status.md
+  catch-up) and `8749753` (`feedback.1.26.md`) — clean, no conflicts,
+  working tree was clean before pulling.
+- Read `feedback.1.26.md` in full. It opens **Phase 5 — Convergence,
+  Observability & DEMO Readiness** across three parallel lanes (Dev
+  1/Core, Dev 2/Agent, Lane C/Observability), converging at
+  `feedback.2.0`. Explicitly an owner-requested exception to review
+  1.25's cadence, not a reversal of it.
+- Registered the review in `review/FEEDBACK.md`'s "Reviews received"
+  table, opened **F-063** (HIGH, Dev-1-owned — hosted CI broken by
+  `UV_FROZEN=1` + `uv sync --locked`) and **F-064** (HIGH, Dev-2-owned —
+  the merged HTTP Gateway transport is local/shadow-only, not authorized
+  for unprotected remote exposure; not a blocker for current work).
+  Corrected the tracker's own cadence section, which still literally said
+  "not `feedback.1.26.md`" in its heading.
+- **Fixed F-063 the same session**, per review 1.26 §6 item 1's explicit
+  priority order. Reproduced the exact reported failure locally before
+  touching anything: `UV_FROZEN=1; uv sync --locked` → exit 2,
+  `error: the argument '--locked' cannot be used with 'UV_FROZEN'
+  (environment variable)`, byte-for-byte the message the review quoted.
+  Fixed by removing the workflow-level `env: UV_FROZEN: "1"` block from
+  `.github/workflows/ci.yml`; both jobs keep `uv sync --locked`
+  unchanged. Confirmed the fix locally: `uv sync --locked` alone now
+  exits 0. Full quality gate re-run clean (ruff/mypy, 149 source files).
+- Added the mandatory compact `status.md` header review 1.26 §3
+  requires (`main` HEAD, last hosted CI result, both tracks'
+  DONE/NEXT/BLOCKED, F-051 state, owner blockers, `order_send` state,
+  next review target) directly under the document header, and corrected
+  two stale rows in the older "What's needed next" table that the new
+  header would otherwise contradict: row 1 (F-056 → F-063 as the live CI
+  blocker) and row 6 (AG-006 no longer blocked — review 1.26 §5 resolved
+  it without a Dev-1 `compute_features()` extraction; Dev 2 independently
+  reached and confirmed the same reading before I did, via their own
+  cross-session message).
+- Confirmed via cross-session message that Dev 2 had already read §5/§7
+  themselves and started on AG-006 before I finished processing the
+  review — no coordination gap, just parallel reading of the same
+  now-shared document.
+
+Evidence:
+- Local reproduction of the exact CI failure, then confirmation of the
+  fix, both shown above.
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run mypy`
+  — clean, 149 source files (the three `feedback.1.2x.md` format
+  findings are pre-existing, unrelated to this change, not touched).
+- Hosted CI itself: **not confirmed** — no `gh`/Actions access in this
+  environment, same limitation as every prior CI-adjacent entry. F-063
+  stays open in the "gate pending hosted confirmation" sense, mirroring
+  F-056's exact prior structure, until a human or a session with GitHub
+  access reports the Actions run result.
+
+Problems found:
+- None beyond F-063 itself (the actual subject of this entry) and the
+  tracker's own stale cadence-section heading, both fixed.
+
+Risk impact:
+- None. CI-workflow and documentation changes only; no production code
+  touched.
+
+Decision:
+- F-063's fix is in scope for immediate action under review 1.26 §6's
+  explicit "priority order, item 1" instruction — no separate approval
+  needed to start it, consistent with this session's standing practice
+  of executing named Dev-1 priorities without re-confirming each one.
+- Committing this entry together with the F-063 fix and the
+  `review/FEEDBACK.md` registration as one slice, pending the usual
+  per-turn commit approval.
+
+Next:
+- Push, then fill in this entry's own `main` HEAD value into the compact
+  header (the same self-referential-SHA pattern the fifty-second entry's
+  follow-up commit already established a precedent for) via a small
+  follow-up commit.
+- Resume the Dev-1 core critical path per review 1.26 §6 items 2+
+  (support/restart F-051 part 2, then `SUBMISSION_STARTED` timing).
 
 ---
 

@@ -9,9 +9,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  UV_FROZEN: "1"
-
 jobs:
   quality:
     name: Lint, types and tests (Linux)
