@@ -14,7 +14,7 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `(pending — see the fifty-eighth entry's follow-up commit for the exact SHA)` |
+| **`main` HEAD** | `cf17ccd` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
 | **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` durable pre-side-effect emission built (core critical path item 3). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 4 (execution-event same-id/different-content conflict hardening). BLOCKED: hosted CI confirmation |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed, `TradeProposal → TradeIntent` mapping merged, AG-012 tracked. NEXT: shared no-MT5 Risk → Policy → capsule path, then the Static Agent bridge (review 1.27 §6 items A–J) — `StaticAgentContextPayload`, HTTP client, response translation, idempotent replay, failure-mode proofs, synthetic then live-shadow smoke tests. BLOCKED: none currently |
