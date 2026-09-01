@@ -16,12 +16,12 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `(pending — see the fifty-ninth entry's follow-up commit for the exact SHA)` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4, `ExecutionEventConflictError`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 5 (`order_send` idempotence). BLOCKED: hosted CI confirmation |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–012 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged (AG-014 found/fixed en route). NEXT: Static Agent bridge (review 1.27 §6 items B–J) — found a real vocabulary-mismatch gap along the way (AG-015: the fork's frozen strategy validates `reason_codes` against a closed, strategy-specific vocabulary `ict_v1` doesn't produce); proceeding via the honest `MARKET_DATA_STALE` degenerate path to prove the transport/auth/schema chain first, flagged as a possible review 1.27 §12 return-to-reviewer case. BLOCKED: none currently, AG-015's real resolution may need an owner/reviewer decision later |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4, `ExecutionEventConflictError`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 5 (`order_send` idempotence). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
-| **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md`/`feedback.1.27.md` (both 2026-09-01) were deliberate owner-requested checkpoints, not a change to that default |
+| **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md`/`feedback.1.27.md`/`feedback.1.28.md` (all 2026-09-01) were deliberate owner/reviewer checkpoints (1.28 an explicit early-escalation exception per 1.27 §12's own trigger), not a change to that default |
 
 ### Dev 1 ACK — feedback.1.27 (review 1.27 §1's required format)
 
@@ -8086,6 +8086,72 @@ Decision:
   was written.
 - Not yet committed — pending the usual per-turn approval, on a new
   `core/`-prefixed branch.
+
+Next:
+- Core critical path item 5: `order_send` idempotence — not yet
+  started, no plan drafted.
+
+---
+
+## Update 2026-09-01 (sixtieth entry) — review 1.28 processed: Core declared strategy-neutral, F-066 opened, no Dev-1 code change
+
+Component: `review/FEEDBACK.md`, `status.md`
+Milestone: Session-start protocol applied to `feedback.1.28.md` — a third review filed directly into the repository, and the first genuine architectural-correction review since Phase 5 began
+Status before: `main` at (this entry's own follow-up commit fills in the exact SHA); Dev 2's AG-015 finding (Static Agent fork needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) was open and explicitly flagged as a possible review 1.27 §12 escalation case
+Status after: Resolved as an architectural correction, not a mapping problem — new product invariant "Crumblr is strategy-neutral," F-066 opened tracking a nine-point closure checklist, **zero Dev-1 code change identified or required**
+
+Completed:
+- `git fetch` + rebase picked up `5a237cb` (`feedback.1.28.md`) while
+  item 4's commit was already made — rebased cleanly, re-verified the
+  full quality gate and full suite (1077 passed, 3 skipped, same count
+  as pre-rebase) before pushing, same discipline as every prior rebase
+  this session.
+- Read `feedback.1.28.md` in full. Core conclusion: AG-015 "is not
+  merely a reason-code vocabulary mismatch... the strategy computation
+  is on the wrong side of the interface." Three previously-plausible
+  fixes explicitly rejected (Crumblr re-implementing the external
+  strategy, mapping `ict_v1` onto it, inventing a shared vocabulary) —
+  all three would make Core strategy-specific or fabricate evidence.
+- Registered the review in `review/FEEDBACK.md`'s "Reviews received"
+  table and opened **F-066** (HIGH before directional external-agent
+  shadow promotion/`feedback.2.0`, owners: Dev 2 for the Crumblr
+  boundary, the external Agent Developer for the Static Agent runtime,
+  **Dev 1 only for shared Core seams if specifically requested**).
+- **Confirmed directly against §12's own text that no Dev-1 action is
+  required right now**: "Dev 1 should not reimplement Pivot 2.2 and
+  should not interrupt the Core submission-safety critical path... Only
+  support this architecture when Dev 2 needs a small shared seam...
+  Do not add external strategy semantics to Core." `baseline_v1`/
+  `ict_v1` explicitly kept (reclassified "legacy/internal reference
+  strategies," not deleted) — no change needed to either.
+- Updated the compact `status.md` header (Dev 1/Dev 2 lines, next
+  review target) so it doesn't contradict what actually happened, per
+  review 1.26 §3's own rule — no new ACK block, since (unlike review
+  1.27 §1) review 1.28 does not request one.
+- Cross-session: Dev 2 independently reached and confirmed the same
+  reading before I finished processing the review, and is already
+  building the direct fix for AG-013 (a strategy-neutral external-agent
+  policy gate that drops the mandatory-`Regime` requirement, per review
+  1.28 §7 point 3) — no coordination gap, parallel reading of the same
+  now-shared document, same pattern as every prior review this session.
+
+Evidence:
+- No quality-gate/test run needed for this entry specifically — no
+  `src/` code changed by processing this review. The full suite run
+  that accompanied the item-4 rebase (1077 passed, 3 skipped) already
+  covers everything currently shipped.
+
+Problems found:
+- None. This entry is documentation/registration only.
+
+Risk impact:
+- None. No production code touched.
+
+Decision:
+- No plan drafted for this review — nothing to plan, since §12
+  explicitly assigns no Core work. Continuing straight to core critical
+  path item 5 rather than pausing for a review that named zero Dev-1
+  action items.
 
 Next:
 - Core critical path item 5: `order_send` idempotence — not yet
