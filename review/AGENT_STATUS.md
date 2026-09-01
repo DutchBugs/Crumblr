@@ -714,6 +714,57 @@ clean; full gate (unit + integration against `crumblr_test_dev2`)
 
 ---
 
+## 0j. Real HTTP unhealthy NO_TRADE roundtrip — done 2026-09-01
+
+User-directed priority, next after §0i. New
+`agent_gateway/static_agent_client.py`: an outbound HTTP client for the
+fork's `POST /v1/trader/evaluate`, stdlib-only (`urllib.request`) rather
+than a new project dependency — `httpx2` is dev/test-only
+(`pyproject.toml`), unavailable in production. Satisfies
+`feedback.1.27.md` section 6 item C's four named requirements: strict
+timeout, response-size limit, schema validation (JSON object or refuse),
+no redirects (refused entirely via a custom `HTTPRedirectHandler`, never
+followed), fail-closed handling (`StaticAgentTransportError` subclasses
+for every way the call itself can fail; a non-2xx status the server
+genuinely answered with is returned as data, never raised — the fork's own
+rejection envelope is meaningful JSON a caller must translate).
+
+**Verified against the real, running fork server, not a mock.** Started
+`crumblr_strategy_agent.cli serve` from the raw (`autocrlf=false`) clone
+with a real bearer token, POSTed a payload built by §0h's
+`static_agent_transport.py` over genuine HTTP: **200**, the expected
+`NO_TRADE` / `MARKET_DATA_STALE` / `CRUMBLR_INTEGRATION` decision, byte-
+identical in shape to the earlier CLI-only proof. Also proved the wrong
+bearer token gets a genuine **401 UNAUTHORIZED** through this client's own
+response handling, not a raised exception (a non-2xx answer is data).
+
+Self-review (`/code-review medium`) before commit found one real gap,
+fixed same pass: `evaluate()`'s fail-closed contract only wrapped
+`opener.open()` (the connect/headers phase) — a server that answers
+promptly but stalls mid-body-write let a bare `TimeoutError`/`OSError`
+escape from `response.read()` instead of the documented typed exception,
+which would have crashed any caller that only catches
+`StaticAgentTransportError` to fail closed. Fixed with its own
+`try`/`except` around the read. Tracked as **AG-017** (closed).
+
+Evidence: 9 tests in new `tests/unit/test_static_agent_client.py`, against
+small local `http.server`-based test doubles (no mocking library is a dev
+dependency) — 2xx passthrough, bearer token/content-type sent correctly,
+a 4xx rejection envelope returned as data, a redirect refused, an
+oversized response refused, non-JSON/non-object responses refused, a
+connect-phase timeout, and the AG-017 mid-body-stall regression. ruff/ruff
+format/mypy clean; full gate (unit + integration against
+`crumblr_test_dev2`) **1118 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+**Not done yet:** the response→`NoTradeDecision` translation and
+submission through `AgentGateway` (this client proves Crumblr can reach
+the fork and get an honest answer back; it does not yet turn that answer
+into an audited Crumblr outcome) — the next item on the user's priority
+list.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
@@ -724,7 +775,7 @@ clean; full gate (unit + integration against `crumblr_test_dev2`)
 | — AG-006 (`feature_snapshot_id`) | platform-owned evidence for external-agent context | **DONE, merged, pushed** (§0c). |
 | — `TradeProposal → TradeIntent` mapping | review 1.26 §7 item 2 | **DONE, merged, pushed** (`f9bbceb`). |
 | — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → strategy-neutral Policy → capsule boundary | **DONE, merged, pushed** (`475331f`, strategy-neutral Policy Gate `c50312c` — §0f). |
-| — Static Agent bridge, unhealthy-market smoke | honest transport/schema/identity proof against the real fork | **Core wiring done, merged, pushed** (`34ddbe6` — §0g/§0h). HTTP client + response→`NoTradeDecision`→Gateway submission not yet built. |
+| — Static Agent bridge, unhealthy-market smoke | honest transport/schema/identity/HTTP proof against the real fork | **Core wiring + real HTTP client done, merged, pushed** (`34ddbe6`, HTTP client pending push — §0g/§0h/§0j). Response→`NoTradeDecision`→Gateway submission not yet built. |
 | — Agent Gateway event-conflict hardening | `append_event` fail-closed on same-key-different-content | **DONE, merged, pushed** (§0i, this entry). |
 | C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), next per the user's current priority order. |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP. |
