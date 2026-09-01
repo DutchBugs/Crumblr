@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `367ef6a` |
+| **`main` HEAD** | `(pending — see the sixty-first entry's follow-up commit for the exact SHA)` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4, `ExecutionEventConflictError`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 5 (`order_send` idempotence). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 6 (ambiguous-outcome recovery). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
@@ -61,7 +61,7 @@ document you have that this repository doesn't yet.
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
 | 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). **No longer blocked** | Review 1.26 §5 resolved AG-006 directly: no standalone cross-strategy `compute_features()` needed after all — Dev 2 adds one platform-owned, deliberately-named evidence shape (`agent_context_v1`) reusing the existing generic `FeatureEvidence` persistence layer, entirely within Dev 2's own ownership. Dev 2 confirmed starting on this 2026-09-01. Full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; `feedback.1.26.md` §5/§7; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
-| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28**; `SUBMISSION_STARTED` emission **done 2026-09-01** (item 3); execution-event conflict hardening **done 2026-09-01** (item 4); four items remain | `SubmissionGate` is real, called by `ExecutionOrchestrator`, durably records its own commitment point, and the event log itself now fails closed on a same-id/different-content conflict (`ExecutionEventConflictError`, mirrors `ExecutionRequestConflictError` exactly). Still open: `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification | `review/adr/ADR-006-submission-gate.md`; `src/crumblr/persistence/execution.py`; §13 fifty-ninth entry; `feedback.1.26.md` §6; `feedback.1.27.md` §8 |
+| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28**; `SUBMISSION_STARTED` emission **done 2026-09-01** (item 3); execution-event conflict hardening **done 2026-09-01** (item 4); `order_send` idempotence/magic-number derivation **done 2026-09-01** (item 5); three items remain | `SubmissionGate` is real, called by `ExecutionOrchestrator`, durably records its own commitment point, the event log fails closed on a same-id/different-content conflict, and every `ApprovedOrder` now carries the deterministic MT5 `magic` a future `order_send` would use (`ADR-007`) — the broker-visible identity `order_send` idempotence and the next item both need. Still open: ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification | `review/adr/ADR-006-submission-gate.md`; `review/adr/ADR-007-order-send-idempotence.md`; §13 sixty-first entry; `feedback.1.26.md` §6; `feedback.1.27.md` §8 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
 reviewer artifact for documentation wording, one extra unit test, normal
@@ -8156,6 +8156,104 @@ Decision:
 Next:
 - Core critical path item 5: `order_send` idempotence — not yet
   started, no plan drafted.
+
+---
+
+## Update 2026-09-01 (sixty-first entry) — order_send idempotence: MT5 magic-number derivation (core critical path item 5)
+
+Component: `domain/hashing.py`, `domain/models.py::ApprovedOrder`, `review/adr/ADR-007-order-send-idempotence.md`, `review/FEEDBACK.md`
+Milestone: Dev-1 core critical path item 5 (review 1.25/1.26 §6/1.27 §8), planned via `EnterPlanMode` and approved before implementation
+Status before: `mt5_gateway/port.py::order_send()`'s docstring already required implementations to be idempotent on `order_request_id`, but no mechanism existed anywhere — MT5 has no native idempotency-key concept, and nothing in this repo had ever populated an MT5 order request's `magic` field
+Status after: `domain/hashing.py::mt5_magic_number()` derives a deterministic, conservative MT5 `magic` from `order_request_id` alone; `ApprovedOrder.magic_number` exposes it as a computed field, already flowing into `SUBMISSION_STARTED`'s durable payload with zero code change to that event's own construction
+
+Completed:
+- Researched thoroughly before designing: `build.md` §7 in full (all ten
+  gateway invariants, not only invariant 2), `ADR-001`'s idempotency
+  mentions, every `magic`/`comment` reference in the repo (confirmed:
+  read-path only, nothing ever writes one), `OrderCheckMt5Gateway
+  .order_check()`'s real request-dict construction (confirmed: no
+  `magic`/`comment` key today), `ApprovedOrder`/`ExecutionResult` in
+  full (confirmed `ExecutionResult.order_send_payload`/`request_payload`
+  already exist, unused, `SimulatedBroker`'s own in-process-dict
+  idempotence mechanism confirmed non-durable), a repo-wide search for
+  any existing UUID-to-integer derivation (confirmed: zero hits — fully
+  unaddressed), the read-path reconnect pattern (`LiveReader
+  ._reconnect()`, confirmed there is no reusable "call whose outcome is
+  unknown" helper to reuse, since reads are side-effect-free and never
+  needed one), and the precise item-5/item-6 boundary reviewers have
+  drawn across `feedback.1.20.md`/`1.21.md` (item 5 owns identity/
+  anti-duplication and durable queryability; item 6 owns the
+  unknown-outcome decision procedure — "persist request identity" is
+  step 1 of item 6's own recovery order, already done by items 2-4).
+- **Confirmed the durable-identity half of idempotence was already
+  built** by items 2-4 (claimed `order_request_id`, durably recorded
+  `SUBMISSION_STARTED` commitment, content-conflict-hardened) — this
+  item's genuine gap was narrower and specific: the MT5-visible half,
+  since a broker has no idea what a Crumblr UUID is.
+- `domain/hashing.py`: new `mt5_magic_number(order_request_id) -> int`
+  — `fingerprint({"order_request_id": ...})`, first 8 hex chars, masked
+  to 31 bits. Placed here (not only as a model method) because item 6
+  will need the identical derivation to know what to search broker
+  state for during reconciliation — a shared utility, not a one-off.
+  Documented the 31-bit choice explicitly as deliberate conservatism,
+  not a guess: no real Pepperstone/MT5 evidence exists for this field's
+  actual constraints, and none can be gathered without submitting a
+  real order — exactly what this platform must not yet do.
+- `domain/models.py::ApprovedOrder`: new `@computed_field
+  magic_number`, mirroring `AccountState.login_hash`'s existing pattern
+  exactly (verified that pattern directly before writing the new one).
+  A computed field, not a required one — zero changes needed at any of
+  the many existing `ApprovedOrder(...)` construction sites across the
+  test suite; confirmed no exact-payload-equality test anywhere asserts
+  a closed key set before relying on that (grepped for `payload ==`
+  across `tests/`, found five hits, none against an `ApprovedOrder`
+  -derived payload).
+- `review/adr/ADR-007-order-send-idempotence.md` (new): records the
+  problem, the mechanism, the width/conservatism reasoning, explicitly
+  states `order_send` remains completely unbuilt and unreachable, and
+  that this is a precondition for item 6, not a replacement of it.
+- Tests: `tests/unit/test_control_plane_contracts.py::TestApprovedOrder`
+  — determinism (same `order_request_id` → same magic), distinctness
+  (different orders → different magic), range (`0 <= magic <=
+  0x7FFFFFFF`). Extended the already-shipped
+  `test_a_fully_approved_config_reaches_submission_started` (item 3)
+  with one more payload assertion proving the computed field genuinely
+  flows through the real durable event, not only in isolation.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 152 source files.
+- `uv run pytest tests/unit/test_control_plane_contracts.py
+  ::TestApprovedOrder -v` — 10 passed (3 new).
+  `tests/integration/test_execution_orchestrator.py -v` — 12 passed,
+  confirming the extended payload assertion holds against a real
+  orchestrator run.
+- Grepped the diff for any new `order_send` call site or `Mt5Module`
+  Protocol change — every `order_send` mention is prose/docstring, zero
+  new call sites. Grepped `agent_gateway/` for
+  `mt5_magic_number`/`magic_number` — zero references, confirming
+  `IMPACT: NONE`.
+- Full suite, solo, against `crumblr_test_dev1` — **1080 passed, 3
+  skipped** (1077 + 3 new), zero failures.
+
+Problems found:
+- None in the shipped result.
+
+Risk impact:
+- None. `order_send` remains completely unreachable — this ships a pure
+  derivation function and a computed field, nothing that touches MT5 or
+  changes any existing behaviour.
+
+Decision:
+- Entered plan mode before implementing; plan approved before any code
+  was written.
+- Not yet committed — pending the usual per-turn approval, on a new
+  `core/`-prefixed branch.
+
+Next:
+- Core critical path item 6: ambiguous-outcome recovery — not yet
+  started, no plan drafted. Will need `mt5_magic_number()` (this entry)
+  to actually search broker state once built.
 
 ---
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from crumblr.domain.enums import (
     Side,
     SupervisorVerdict,
 )
+from crumblr.domain.hashing import mt5_magic_number
 from crumblr.domain.models import Incident, SupervisorDecision
 from tests.conftest import (
     FIXED_NOW,
@@ -245,3 +247,30 @@ class TestApprovedOrder:
     def test_the_idempotency_key_is_carried_on_the_order(self) -> None:
         order = make_approved_order()
         assert order.order_request_id is not None
+
+    def test_magic_number_is_derived_from_the_idempotency_key(self) -> None:
+        """Core critical path item 5: the same `order_request_id` must
+
+        always produce the same MT5 `magic` — a future `order_send`
+        caller and a future reconciliation reader have to agree on it
+        independently, without either persisting it separately."""
+        request_id = uuid4()
+        first = make_approved_order(order_request_id=request_id)
+        second = make_approved_order(order_request_id=request_id)
+
+        assert first.magic_number == mt5_magic_number(request_id)
+        assert first.magic_number == second.magic_number
+
+    def test_different_orders_get_different_magic_numbers(self) -> None:
+        first = make_approved_order()
+        second = make_approved_order()
+        assert first.magic_number != second.magic_number
+
+    def test_magic_number_is_a_non_negative_31_bit_value(self) -> None:
+        """No real Pepperstone/MT5 evidence exists for this field's actual
+
+        constraints (submitting a real order to observe one is exactly
+        what this platform must not yet do) — deliberately conservative
+        rather than assuming a wider range is safe."""
+        order = make_approved_order()
+        assert 0 <= order.magic_number <= 0x7FFFFFFF

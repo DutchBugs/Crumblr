@@ -33,7 +33,7 @@ from crumblr.domain.enums import (
     StreamAnomaly,
     SupervisorVerdict,
 )
-from crumblr.domain.hashing import fingerprint
+from crumblr.domain.hashing import fingerprint, mt5_magic_number
 from crumblr.domain.money import ZERO, ExactDecimal, Price, RiskFraction, Volume
 from crumblr.domain.timeutils import UtcDatetime
 
@@ -537,6 +537,17 @@ class ApprovedOrder(Contract):
     created_at_utc: UtcDatetime
     expires_at_utc: UtcDatetime
     environment: Environment
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def magic_number(self) -> int:
+        """The MT5 `magic` a future `order_send` would carry for this order
+
+        — core critical path item 5, `review/adr/ADR-007-order-send-idempotence.md`.
+        Derived, not assigned, so it never needs its own persistence and
+        always agrees with what a future reconciliation reader computes
+        independently for the same `order_request_id`."""
+        return mt5_magic_number(self.order_request_id)
 
     @model_validator(mode="after")
     def _check_order(self) -> Self:

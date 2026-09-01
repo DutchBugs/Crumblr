@@ -29,6 +29,7 @@ from crumblr.config import (
     TradingAgentConfig,
 )
 from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
+from crumblr.domain.hashing import mt5_magic_number
 from crumblr.domain.models import DecisionCapsule, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
@@ -505,6 +506,13 @@ class TestEndToEnd:
         assert submission_event.payload["broker_symbol"] == BROKER_SYMBOL
         assert submission_event.payload["side"] == "BUY"
         assert Decimal(submission_event.payload["volume"]) > 0
+        # Core critical path item 5: the durable commitment record itself
+        # carries the MT5 magic a future order_send would use — proves
+        # the computed field genuinely flows through the real event, not
+        # only in isolation.
+        assert submission_event.payload["magic_number"] == mt5_magic_number(
+            outcomes[0].order_request_id
+        )
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine

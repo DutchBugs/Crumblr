@@ -54,3 +54,32 @@ def canonical_json(payload: dict[str, Any]) -> str:
 def fingerprint(payload: dict[str, Any]) -> str:
     """SHA-256 hex digest of the canonical encoding of `payload`."""
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def mt5_magic_number(order_request_id: UUID) -> int:
+    """A deterministic MT5 `magic` number for one `order_request_id`.
+
+    Core critical path item 5 (`review/adr/ADR-007-order-send-idempotence.md`):
+    MT5 has no native idempotency-key concept, and `order_request_id`
+    (a UUID) means nothing to the broker on its own. `magic` is the
+    established MT5 mechanism that *does* survive into the broker's own
+    position/order records and can be queried back — this derives one
+    deterministically, so a future `order_send` caller and a future
+    reconciliation reader always agree on the same value for the same
+    logical order without either persisting it separately.
+
+    Masked to 31 bits (`0` to `2_147_483_647`): always non-negative,
+    fits both signed and unsigned 32-bit interpretations. No real
+    Pepperstone/MT5 terminal evidence exists for this field's actual
+    constraints — deliberately calling for a conservative, narrower
+    width than the schema's `BigInteger` column could hold, rather than
+    assuming a wider range is safe (`review/DEVIATIONS.md` D-037's own
+    "decode from observation, never hardcode an MT5 assumption" rule,
+    applied here to a field no observation has ever been possible for,
+    since submitting a real order to generate one is exactly what this
+    platform must not yet do). ~2.1 billion possible values — collision
+    risk across this platform's realistic order volume is negligible,
+    the same acceptance already applied to `AccountState.login_hash`'s
+    narrower 64-bit truncation.
+    """
+    return int(fingerprint({"order_request_id": str(order_request_id)})[:8], 16) & 0x7FFFFFFF
