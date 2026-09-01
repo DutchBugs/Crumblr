@@ -273,3 +273,52 @@ reviewer artifacts, they're Dev 2's own living documents), say so and a
 narrower exclude can replace the blanket review/ one.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-01 — REVIEWER (owner-requested cross-track decision)
+Changed: Resolved Dev 2's open question from review/AGENT_STATUS.md §0e
+about the source of `PortfolioState.account` / `open_positions` for the
+Gateway-driven Risk -> Policy -> DecisionCapsule shadow path. No safety
+invariant is changed. The Agent Gateway remains the authenticated proposal
+ingress and constructs the platform-owned TradeIntent; broker-state sourcing
+belongs behind that boundary in Core application integration, not inside the
+external agent and not as an Agent Gateway authority.
+Impact: For a genuine LIVE_SHADOW evaluation, `PortfolioState.account` and
+`PortfolioState.open_positions` MUST come from a Core-owned, read-only,
+fresh broker-state provider. The current preferred concrete source is one
+coherent `application.broker_state.capture_broker_state()` observation (or an
+equivalent future Core seam): use its `account_state` and `position_states`
+for Risk and record the corresponding durable broker snapshot as normal. Do
+not perform a second, unrelated broker read for the same evaluation. Do not
+reconstruct missing Risk fields from `BrokerAccountSnapshot` with guessed
+or permissive defaults; if the fresh Core observation cannot supply the
+required account/position state, fail closed. The external Static Agent must
+never receive MT5 access, broker credentials or Crumblr DB access. The
+Agent Gateway package itself must not become the owner of MT5 reads. For
+synthetic/unit/integration smoke tests, Dev 2 may inject a deterministic fake
+`PortfolioStateProvider`; `SimulatedBroker` is acceptable only for such
+synthetic/replay proof, not as the source for a claim labelled genuine
+LIVE_SHADOW. AG-012 remains unchanged: for the current shadow-only
+multi-process design, recover the Risk session/ledger fresh immediately
+before every Gateway-driven `risk.policies.evaluate()` call and do not cache
+an independent long-lived ledger. This mitigation is still not sufficient
+for agent-driven submission at feedback.2.0; a single serialized/shared Risk
+authority remains required before such promotion. `order_send` remains
+NO-GO throughout this work.
+Action required: Dev 2 is unblocked and should proceed now with the shared
+no-MT5 `TradeIntent -> Risk -> deterministic Policy -> DecisionCapsule`
+wiring against a narrow provider interface. Tests may use a fake provider;
+the first genuine live-shadow proof must use the Core-owned fresh provider.
+Dev 1 should expose/approve the smallest read-only Core adapter around the
+existing broker-state capture if composition cannot already inject it
+cleanly; no agent-specific logic belongs in Core. If the eventual runtime
+must keep the agent-integration orchestrator in a process that cannot access
+the Core read-only broker gateway, stop and define a Core read-only service
+or persist a complete risk-ready state contract — do not give the external
+agent direct broker/DB access and do not invent absent fields.
+Relevant commit: this documentation commit; implements the owner-requested
+reviewer clarification following feedback.1.27, with no `order_send`
+authorization.
+```
