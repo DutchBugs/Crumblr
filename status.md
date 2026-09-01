@@ -14,7 +14,7 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `(pending — see the fifty-ninth entry's follow-up commit for the exact SHA)` |
+| **`main` HEAD** | `367ef6a` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
 | **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4, `ExecutionEventConflictError`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 5 (`order_send` idempotence). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
@@ -8097,7 +8097,7 @@ Next:
 
 Component: `review/FEEDBACK.md`, `status.md`
 Milestone: Session-start protocol applied to `feedback.1.28.md` — a third review filed directly into the repository, and the first genuine architectural-correction review since Phase 5 began
-Status before: `main` at (this entry's own follow-up commit fills in the exact SHA); Dev 2's AG-015 finding (Static Agent fork needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) was open and explicitly flagged as a possible review 1.27 §12 escalation case
+Status before: `main` at `5a237cb`; Dev 2's AG-015 finding (Static Agent fork needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) was open and explicitly flagged as a possible review 1.27 §12 escalation case
 Status after: Resolved as an architectural correction, not a mapping problem — new product invariant "Crumblr is strategy-neutral," F-066 opened tracking a nine-point closure checklist, **zero Dev-1 code change identified or required**
 
 Completed:
