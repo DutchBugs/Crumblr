@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from crumblr.agent_gateway.auth import hash_credential, verify_credential
 from crumblr.agent_gateway.contracts import (
@@ -72,10 +72,19 @@ from crumblr.agent_gateway.stores import (
     TradingAssignmentStore,
 )
 from crumblr.domain.enums import DataQuality, SessionState
+from crumblr.domain.models import TradeIntent
 from crumblr.domain.timeutils import UtcDatetime
 
 _RATE_LIMIT_WINDOW = timedelta(hours=1)
 _DEFAULT_CONTEXT_VALIDITY = timedelta(minutes=5)
+_INTENT_NAMESPACE = "crumblr:agent_trade_intent"
+_EXTERNAL_AGENT_STRATEGY_ID = "external_agent"
+"""`TradeIntent.strategy_id` for every intent this Gateway constructs --
+
+never `baseline_v1`/`ict_v1`, so a reader can always tell an agent-driven
+intent apart from an internal strategy's at a glance. The specific agent's
+own strategy artifact is still fully traceable via `strategy_version`
+(`TradingAssignment.strategy_artifact_hash`)."""
 
 
 @dataclass(frozen=True)
@@ -85,12 +94,22 @@ class AgentDecisionOutcomeResult:
     `accepted=False` is a normal, expected, fully-audited result — not an
     error condition the caller must treat specially. `reason` is populated
     exactly when `accepted` is `False`.
+    `trade_intent` is populated only when `accepted` is `True` **and**
+    `outcome_type` is `TRADE_PROPOSAL` — never for `NO_TRADE` (there is
+    nothing to map) and never for a rejection (review 1.26 §7 item 2: the
+    platform-owned `TradeIntent` this Gateway constructs from an accepted
+    proposal). Deterministic — the same accepted proposal always maps to
+    the same `TradeIntent` (same `intent_id`, same every field), so a
+    replayed identical retry reconstructs byte-identical content rather
+    than needing its own separate durable storage; see
+    `AgentGateway._build_trade_intent`.
     """
 
     outcome_id: UUID
     outcome_type: AgentOutcomeType
     accepted: bool
     reason: AgentRejectionReason | None = None
+    trade_intent: TradeIntent | None = None
 
 
 class AgentGateway:
@@ -248,7 +267,9 @@ class AgentGateway:
                     proposal.proposal_id, connection=connection
                 )
                 if settlement is not None:
-                    return self._result_from_settlement(settlement, AgentOutcomeType.TRADE_PROPOSAL)
+                    return self._result_from_settlement(
+                        settlement, AgentOutcomeType.TRADE_PROPOSAL, proposal=proposal
+                    )
                 # Claimed by an earlier attempt that never recorded a verdict
                 # (crashed/interrupted) -- fall through and evaluate fresh,
                 # rather than assuming that attempt would have accepted it.
@@ -278,13 +299,67 @@ class AgentGateway:
                 count_including_self=count_including_self,
                 now=now,
             )
+            trade_intent = None
+            if reason is None:
+                assert assignment is not None  # narrowed: an evaluation reason of None implies this
+                trade_intent = self._build_trade_intent(proposal=proposal, assignment=assignment)
             return self._settle(
                 proposal.proposal_id,
                 AgentOutcomeType.TRADE_PROPOSAL,
                 reason,
                 now=now,
                 connection=connection,
+                trade_intent=trade_intent,
             )
+
+    def _build_trade_intent(
+        self, *, proposal: TradeProposal, assignment: TradingAssignment
+    ) -> TradeIntent:
+        """Maps an accepted `TradeProposal` into a platform-owned `TradeIntent`
+
+        (review 1.26 §7 item 2). Deterministic and independent of the
+        current call's `now` — the same proposal always maps to the same
+        intent (same `intent_id`, same every field), so a replayed retry
+        reconstructs byte-identical content rather than needing its own
+        separate durable storage; see `_result_from_settlement`. Depends
+        only on `proposal` (immutable, content-addressed once claimed) and
+        `assignment` (immutable once registered) — deliberately **not**
+        `AgentIdentity`, even though `model_version` looked tempting to
+        carry through: identity is a mutable, append-only-latest-wins
+        snapshot (`register_identity` can change it at any time), so
+        sourcing anything from a fresh `current()` lookup at replay time
+        could make a "byte-identical reconstruction" silently drift if the
+        agent's registration changed between the original acceptance and a
+        later retry — caught by a self-review before it shipped.
+        `feature_snapshot_id` is `bundle.feature_snapshot_id` directly,
+        never fabricated (AG-006's own requirement, carried forward here)
+        — the bundle is guaranteed to exist and resolve because
+        `_context_reason` already validated it during evaluation, and
+        `strategy_id` is a fixed sentinel (never `baseline_v1`/`ict_v1`)
+        so an agent-driven intent is never mistaken for an internal
+        strategy's.
+        """
+        bundle = self._contexts.by_hash(proposal.context_hash)
+        assert bundle is not None  # already validated by _context_reason
+        intent_id = uuid5(NAMESPACE_DNS, f"{_INTENT_NAMESPACE}:{proposal.proposal_id}")
+        return TradeIntent(
+            intent_id=intent_id,
+            strategy_id=_EXTERNAL_AGENT_STRATEGY_ID,
+            strategy_version=assignment.strategy_artifact_hash,
+            model_version=None,
+            symbol=assignment.canonical_symbol,
+            side=proposal.side,
+            created_at_utc=proposal.submitted_at_utc,
+            expires_at_utc=proposal.expires_at_utc,
+            entry_type=proposal.entry_type,
+            reference_price=proposal.reference_price,
+            stop_loss_price=proposal.stop_loss_price,
+            take_profit_price=proposal.take_profit_price,
+            confidence=proposal.confidence,
+            reason_codes=proposal.reason_codes,
+            requested_risk_fraction=proposal.requested_risk_fraction,
+            feature_snapshot_id=bundle.feature_snapshot_id,
+        )
 
     def _evaluate_proposal(
         self,
@@ -311,6 +386,15 @@ class AgentGateway:
             <= assignment.allowed_risk_fraction_max
         ):
             return AgentRejectionReason.RISK_FRACTION_OUT_OF_BAND
+        if not proposal.reason_codes:
+            # TradeProposal itself places no non-empty constraint on
+            # reason_codes, but the platform-owned TradeIntent this
+            # Gateway maps an accepted proposal into does
+            # (`domain/models.py::TradeIntent._check_directional_requirements`)
+            # -- caught here, at evaluation time, so a missing reason is an
+            # ordinary auditable rejection rather than a construction
+            # failure deep inside `_build_trade_intent`.
+            return AgentRejectionReason.MISSING_REASON_CODES
         if assignment.required_evidence_fields and not proposal.evidence_refs:
             # Conservative, not exhaustive: proves *some* evidence was cited
             # when the assignment demands it. Does not verify the cited
@@ -432,6 +516,7 @@ class AgentGateway:
         *,
         now: UtcDatetime,
         connection: Any = None,
+        trade_intent: TradeIntent | None = None,
     ) -> AgentDecisionOutcomeResult:
         if reason is not None:
             self._outcomes.append_event(
@@ -451,11 +536,18 @@ class AgentGateway:
             connection=connection,
         )
         return AgentDecisionOutcomeResult(
-            outcome_id=outcome_id, outcome_type=outcome_type, accepted=True
+            outcome_id=outcome_id,
+            outcome_type=outcome_type,
+            accepted=True,
+            trade_intent=trade_intent,
         )
 
     def _result_from_settlement(
-        self, settlement: AgentDecisionEventRecord, outcome_type: AgentOutcomeType
+        self,
+        settlement: AgentDecisionEventRecord,
+        outcome_type: AgentOutcomeType,
+        *,
+        proposal: TradeProposal | None = None,
     ) -> AgentDecisionOutcomeResult:
         """Replays an already-recorded verdict for an identical retry --
 
@@ -464,7 +556,15 @@ class AgentGateway:
         window has since moved). Only reachable when `settlement_for`
         actually found an `ACCEPTED`/`REJECTED` event; an interrupted claim
         with no settlement is handled by the caller resuming evaluation
-        instead of calling this."""
+        instead of calling this.
+
+        `proposal` is required exactly when `outcome_type` is
+        `TRADE_PROPOSAL` and the settlement was `ACCEPTED` — reconstructs
+        the same deterministic `TradeIntent` `_build_trade_intent` would
+        have produced originally, rather than storing it separately.
+        Deliberately does not take an `AgentIdentity` here (see
+        `_build_trade_intent`'s own docstring) — a fresh identity lookup at
+        replay time could make the reconstruction drift from the original."""
         if settlement.event_type is AgentDecisionEventType.REJECTED:
             reason = (
                 AgentRejectionReason(settlement.reason_codes[0])
@@ -477,6 +577,15 @@ class AgentGateway:
                 accepted=False,
                 reason=reason,
             )
+        trade_intent = None
+        if outcome_type is AgentOutcomeType.TRADE_PROPOSAL:
+            assert proposal is not None
+            assignment = self._assignments.current(proposal.assignment_id)
+            assert assignment is not None  # existed when this was first accepted
+            trade_intent = self._build_trade_intent(proposal=proposal, assignment=assignment)
         return AgentDecisionOutcomeResult(
-            outcome_id=settlement.outcome_id, outcome_type=outcome_type, accepted=True
+            outcome_id=settlement.outcome_id,
+            outcome_type=outcome_type,
+            accepted=True,
+            trade_intent=trade_intent,
         )

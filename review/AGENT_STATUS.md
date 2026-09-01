@@ -234,6 +234,71 @@ closure.
 
 ---
 
+## 0d. `TradeProposal → TradeIntent` mapping — done 2026-09-01 (review 1.26 §7 item 2)
+
+**What was built:** `AgentGateway._build_trade_intent(*, proposal, assignment)
+-> TradeIntent` — a pure, deterministic mapping with no dependency on the
+current call's `now`. `AgentDecisionOutcomeResult` gained `trade_intent:
+TradeIntent | None`, populated only when a `TradeProposal` is accepted
+(never for `NO_TRADE`, never for a rejection). `intent_id` is
+content-derived (`uuid5` of `proposal_id`) so a replayed identical retry
+reconstructs byte-identical content rather than needing separate durable
+storage — the same discipline the rest of this track already uses
+everywhere. `feature_snapshot_id = bundle.feature_snapshot_id` directly —
+AG-006's whole point, carried through. `strategy_id` is a fixed sentinel
+(`"external_agent"`, never `baseline_v1`/`ict_v1`); `strategy_version =
+assignment.strategy_artifact_hash`. `http.py`'s response body now
+surfaces `trade_intent.intent_id`/`decision_hash` (identity only, not the
+full contract) — enough for a future external Supervisor to bind its
+review to the exact intent, matching `SupervisorReview`'s own design
+(ADR-005 §5).
+
+**Self-review (medium) caught two real bugs before this shipped, both fixed:**
+- `model_version` was originally sourced from a live `AgentIdentity`
+  lookup at mapping time — but identity is a mutable, append-only-latest-
+  wins snapshot (`register_identity` can change it any time), so a
+  replayed retry after a re-registration could reconstruct a *different*
+  `TradeIntent` (different `model_version`, different `decision_hash`)
+  than the original, directly contradicting the documented determinism
+  guarantee. Fixed by never sourcing anything from identity in the
+  mapping — `model_version` is always `None` for now; real per-agent-model
+  provenance needs its own immutable, content-addressed home, not a live
+  side-channel. Regression test: retries after re-registering the agent
+  with a different `model_version` and confirms the reconstructed intent
+  is unchanged.
+- `TradingAssignment.strategy_artifact_hash` was a bare, unconstrained
+  `str`, but it feeds `TradeIntent.strategy_version` (a `VersionTag`,
+  1-128 chars) — an assignment registered with an empty hash would
+  register fine and then crash the *first* proposal accepted against it
+  with an uncaught `pydantic.ValidationError` (an unhandled `500` at the
+  HTTP layer, since that exception type isn't in `http.py`'s error map).
+  Fixed by tightening the field to `VersionTag` itself, so a malformed
+  value fails closed at registration time, not deep inside acceptance.
+  Regression test at the contract level.
+
+Also found, fixed, and covered separately: `TradeProposal.reason_codes`
+has no non-empty constraint, but `TradeIntent._check_directional_requirements`
+requires at least one — a proposal with `reason_codes=()` would have been
+accepted by the Gateway and then failed `TradeIntent` construction. New
+`AgentRejectionReason.MISSING_REASON_CODES` catches this at evaluation
+time, as an ordinary auditable rejection, before `_build_trade_intent` is
+ever called.
+
+Evidence: 10 new/changed tests (`tests/unit/test_agent_gateway.py::TestTradeIntentMapping`
+×8, `tests/unit/test_agent_gateway_http.py` ×2,
+`tests/unit/test_agent_gateway_contracts.py` ×1,
+`tests/integration/test_agent_gateway_store.py` ×1 — restart-safety of the
+reconstructed intent against real Postgres). Full non-integration suite
+861→**871 passed**, integration suite 10→**11 passed**, ruff/mypy clean.
+
+**Not done — deliberately next, review 1.26 §7 items 3+:** wiring the
+constructed `TradeIntent` through intent-time Risk, the deterministic
+Policy Gate, and `DecisionCapsule` sealing (the "shared no-MT5 integration
+path") — this slice only proves the mapping itself exists and is correct;
+it does not yet call into any Dev-1-owned execution/risk module.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
@@ -241,11 +306,12 @@ closure.
 | A — design/contracts | ADR-005, threat model, eight contracts, structural tests | **DONE, merged, pushed** (`ba658c5`). |
 | B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling | **DONE, merged, pushed** (`bf18ec5`), self-review hardening merged (`d6a5361`, AG-007/008/009). |
 | — HTTP transport | wire boundary for a genuinely separate process | **DONE, merged, pushed** (`a0e380a`). Local/shadow use only — F-064 (open, not blocking) requires TLS/mTLS before any remote exposure. |
-| — AG-006 (`feature_snapshot_id`) | platform-owned evidence for external-agent context | **DONE, implemented and tested 2026-09-01** (§0c) — not yet committed, see §4. |
-| — `TradeProposal → TradeIntent` mapping | review 1.26 §7 item 2 | **NEXT**, not started. |
-| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), blocked behind the mapping above per review 1.26 §7's ordering. |
+| — AG-006 (`feature_snapshot_id`) | platform-owned evidence for external-agent context | **DONE, merged, pushed** (§0c). |
+| — `TradeProposal → TradeIntent` mapping | review 1.26 §7 item 2 | **DONE, implemented and tested 2026-09-01** (§0d) — not yet committed, see §4. |
+| — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → deterministic Policy → capsule boundary | **NEXT**, not started (review 1.26 §7 item 3). |
+| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), blocked behind the integration path above per review 1.26 §7's ordering. |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP. |
-| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on the mapping + C. |
+| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on the integration path + C. |
 
 **Nothing in `src/crumblr/agent_gateway/` or `src/crumblr/persistence/agent_gateway.py`
 is imported by anything outside itself and its own tests** — verified by
@@ -282,16 +348,20 @@ this track's own six tables.
   including the evidence layer (§0c).
 - **A wire transport** (§0b) — a genuinely separate process can reach the
   Gateway over HTTP with only the two agent-facing operations exposed.
+- **`TradeProposal → TradeIntent` mapping** (§0d) — an accepted proposal
+  now durably maps to a platform-owned, deterministic `TradeIntent`
+  carrying the AG-006 evidence reference.
 
 ### What's still open
 
-- **`TradeProposal → TradeIntent` mapping** — review 1.26 §7 item 2, next
-  up. AG-006 (the blocker) is closed; this is a fresh, separate slice.
-- **`ProposalWithdrawal` enforcement** — needs the mapping above first
-  (its `SUBMISSION_STARTED`-cutoff rule needs a real execution timeline to
-  check against).
+- **The shared no-MT5 integration path** — review 1.26 §7 item 3: wire
+  the constructed `TradeIntent` through intent-time Risk, the
+  deterministic Policy Gate, and `DecisionCapsule` sealing. Next up.
+- **`ProposalWithdrawal` enforcement** — needs the integration path above
+  first (its `SUBMISSION_STARTED`-cutoff rule needs a real execution
+  timeline to check against).
 - **External Supervisor boundary** (AG-003) — review 1.26 §7 item 5,
-  after the mapping and the shared integration path.
+  after the integration path.
 - **F-064** — HTTP transport not authorized for remote/public exposure
   yet (not blocking current work).
 
@@ -365,12 +435,11 @@ See `review/AGENT_FEEDBACK.md` for the full register with evidence. Summary:
 ## 4. Merge status — updated 2026-09-01
 
 Step A, Step B, the self-review hardening pass, and the HTTP transport are
-all merged and pushed (`a0e380a`). The AG-006 implementation (§0c) is
-built, tested, quality-gate clean, **not yet committed** — pending the
-same per-turn commit confirmation every other slice this session has
-gotten. `agent/contracts` will again be identical to `origin/main` once it
-lands. `agent/tradeintent-mapping` (V3 §6/§7) is still not created — the
-next slice opens it.
+all merged and pushed (`a0e380a`). The AG-006 implementation (§0c) and the
+`TradeProposal → TradeIntent` mapping (§0d) are both built, tested,
+quality-gate clean, **not yet committed** — pending the same per-turn
+commit confirmation every other slice this session has gotten.
+`agent/contracts` will again be identical to `origin/main` once they land.
 
 ---
 
@@ -379,13 +448,17 @@ next slice opens it.
 1. ~~Implement the AG-006 decision~~ — **DONE 2026-09-01** (§0c). Not the
    Dev-1 `compute_features()` extraction both tracks were pursuing before
    the review arrived — the reviewer explicitly redirected to a narrower,
-   already-sufficient design. Dev 1 notified; their extraction is no
-   longer needed on their side.
-2. **Build `TradeProposal → platform-owned TradeIntent` mapping** — next,
-   on a new `agent/tradeintent-mapping` branch.
+   already-sufficient design.
+2. ~~Build `TradeProposal → platform-owned TradeIntent` mapping~~ —
+   **DONE 2026-09-01** (§0d). Self-review caught and fixed two real bugs
+   before it shipped (identity-drift on replay, an unconstrained field
+   that could crash acceptance).
 3. **Add the shared no-MT5 integration path**: `DecisionContextBundle` →
    proposal/NO_TRADE → Gateway → `TradeIntent` → intent-time Risk →
-   deterministic Policy → capsule boundary.
+   deterministic Policy → capsule boundary. Next up — this is the first
+   place this track calls into Dev-1-owned/protected modules
+   (`src/crumblr/risk/**`), so it needs care about the boundary even
+   though no code there should need to change.
 4. **Prove one genuine Crumblr context can reach the external Trader path
    in SHADOW with zero broker submission.**
 5. **Implement the external Supervisor boundary** (AG-003): `APPROVE`/
@@ -395,8 +468,8 @@ next slice opens it.
    boundary, once it exists.
 7. Replace placeholder code provenance before any agent-driven promotion.
 
-Also authorized, after item 1/2 land or are waiting on a handshake: one
-bounded Dashboard Observability slice (review 1.26 §9) — temporary
+Also authorized, after item 2 (now done) or while waiting on a handshake:
+one bounded Dashboard Observability slice (review 1.26 §9) — temporary
 exception to normal file ownership, `src/crumblr/dashboard/**` only,
 read-only boundary preserved, capped scope (not a redesign cycle).
 
@@ -411,19 +484,31 @@ unexpected agent→execution path, complete agent-driven canary readiness).
 
 > Agent Integration track: Step A, Step B, the self-review hardening pass
 > (AG-007/008/009), and the HTTP transport are all merged/pushed to `main`
-> (`a0e380a`). **AG-006 is now closed** (2026-09-01) — `feedback.1.26.md`
-> §5 redirected both of us away from the `compute_features()` extraction
-> we were discussing: a new, narrow, honestly-named platform-owned
-> evidence shape (`agent_context_v1`) reusing the existing generic
-> `FeatureEvidence`/`FeatureSnapshotStore` layer unmodified, no schema
-> change needed. Your extraction is no longer needed on your side — thanks
-> for confirming the gap was real before I built anything. Full detail:
-> `review/AGENT_STATUS.md` §0c, `review/AGENT_FEEDBACK.md` AG-006. 8 new
-> tests, full non-integration suite 855→861 passed, integration suite
-> 7→10 passed, ruff/mypy clean. Not yet committed — pending the usual
-> per-turn confirmation, will sync onto your latest first.
+> (`a0e380a`). **AG-006 is closed** and the **`TradeProposal → TradeIntent`
+> mapping is done** (both 2026-09-01, review 1.26 §7 items 1-2) — an
+> accepted proposal now durably maps to a deterministic, platform-owned
+> `TradeIntent` carrying the AG-006 evidence reference
+> (`feature_snapshot_id`), a fixed `strategy_id` sentinel (`"external_agent"`,
+> never confusable with `baseline_v1`/`ict_v1`), and `intent_id` derived
+> from `proposal_id` so a replay reconstructs byte-identical content.
 >
-> Next on my side: `TradeProposal → TradeIntent` mapping (review 1.26 §7
-> item 2), then the shared integration path, then the external Supervisor
-> boundary. No shared-contract touch expected for the mapping itself —
-> will raise a handshake if that changes.
+> Self-review caught two real bugs before either shipped: (1) the mapping
+> originally sourced `model_version` from a live `AgentIdentity` lookup,
+> which could make a replayed retry reconstruct a *different* intent than
+> the original if the agent had been re-registered in between — fixed by
+> never reading from identity in the mapping at all; (2)
+> `TradingAssignment.strategy_artifact_hash` was an unconstrained `str`
+> feeding directly into `TradeIntent.strategy_version` (a bounded
+> `VersionTag`), so a malformed assignment could crash the first proposal
+> accepted against it — fixed by tightening the field itself so it fails
+> closed at registration, not deep inside acceptance. Full detail:
+> `review/AGENT_STATUS.md` §0c/§0d, `review/AGENT_FEEDBACK.md` AG-006.
+> 18 new tests total across both slices, full non-integration suite
+> 855→871 passed, integration suite 7→11 passed, ruff/mypy clean. Not yet
+> committed — pending the usual per-turn confirmation, will sync onto your
+> latest first.
+>
+> Next on my side: the shared no-MT5 integration path (review 1.26 §7 item
+> 3) — the first place this track calls into your Risk/Policy modules. No
+> code changes to your side expected, but will raise a handshake
+> immediately if that assumption turns out wrong.

@@ -79,6 +79,19 @@ def _outcome_to_json(result: AgentDecisionOutcomeResult) -> dict[str, Any]:
         "outcome_type": result.outcome_type.value,
         "accepted": result.accepted,
         "reason": result.reason.value if result.reason is not None else None,
+        # Identity only, not the full TradeIntent -- enough for a future
+        # external Supervisor to bind its review to the exact intent this
+        # Gateway constructed (ADR-005 §5's SupervisorReview design:
+        # trade_intent_id/trade_intent_decision_hash), without handing an
+        # external process the whole internal contract's shape.
+        "trade_intent": (
+            None
+            if result.trade_intent is None
+            else {
+                "intent_id": str(result.trade_intent.intent_id),
+                "decision_hash": result.trade_intent.decision_hash,
+            }
+        ),
     }
 
 

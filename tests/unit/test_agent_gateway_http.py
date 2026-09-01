@@ -178,6 +178,19 @@ class TestSubmitProposal:
         assert body["accepted"] is True
         assert body["outcome_type"] == "TRADE_PROPOSAL"
         assert body["reason"] is None
+        assert body["trade_intent"]["intent_id"]
+        assert body["trade_intent"]["decision_hash"]
+
+    def test_a_rejected_proposal_carries_no_trade_intent(
+        self, gateway: AgentGateway, client: TestClient
+    ) -> None:
+        _registered(gateway)
+        response = client.post(
+            "/agent/proposals",
+            json=proposal_json(context_hash="never-issued-hash"),
+            headers=_headers(),
+        )
+        assert response.json()["trade_intent"] is None
 
     def test_a_rejected_proposal_still_returns_200_with_accepted_false(
         self, gateway: AgentGateway, client: TestClient

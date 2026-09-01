@@ -192,6 +192,20 @@ class TestTradingAssignment:
         assignment = trading_assignment()
         assert assignment.champion_shadow_status is ChampionShadowStatus.SHADOW
 
+    def test_an_empty_strategy_artifact_hash_is_rejected(self) -> None:
+        """Regression coverage for a self-review finding:
+
+        `strategy_artifact_hash` used to be a bare `str`, but
+        `gateway.py::_build_trade_intent` copies it directly into
+        `TradeIntent.strategy_version` (a `VersionTag`, 1-128 chars) --
+        an assignment with an empty hash would have registered fine and
+        then crashed the first proposal accepted against it with an
+        uncaught `ValidationError` deep inside acceptance. Now a
+        `VersionTag` itself, so this fails closed at registration time
+        instead."""
+        with pytest.raises(ValidationError):
+            trading_assignment(strategy_artifact_hash="")
+
 
 class TestDecisionContextBundle:
     def test_expires_must_be_after_issued(self) -> None:

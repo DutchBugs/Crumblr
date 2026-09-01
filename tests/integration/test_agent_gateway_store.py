@@ -311,6 +311,36 @@ class TestRestartSafety:
                 agent_id=AGENT_ID, credential_secret=SECRET, proposal=conflicting, now=FIXED_NOW
             )
 
+    def test_the_reconstructed_trade_intent_is_identical_across_a_restart(
+        self, engine: Engine
+    ) -> None:
+        """Review 1.26 §7 item 2: the mapping is deterministic, so a
+
+        "crashed and restarted" process reconstructs the exact same
+        `TradeIntent` (same `intent_id`, same every field) rather than
+        needing it stored separately -- explicit regression coverage for
+        what `test_a_retry_against_a_freshly_constructed_gateway_is_still_idempotent`
+        above already proves implicitly via `==`."""
+        first_process = build_gateway(engine)
+        first_process.register_identity(identity(), credential_secret=SECRET)
+        first_process.issue_assignment(assignment())
+        bundle = _with_context(first_process)
+
+        original = proposal(context_hash=bundle.content_hash)
+        first_result = first_process.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+        assert first_result.trade_intent is not None
+
+        second_process = build_gateway(engine)
+        second_result = second_process.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=original,
+            now=FIXED_NOW + timedelta(hours=1),
+        )
+        assert second_result.trade_intent == first_result.trade_intent
+
     def test_no_trade_survives_a_restart_idempotently(self, engine: Engine) -> None:
         first_process = build_gateway(engine)
         first_process.register_identity(identity(), credential_secret=SECRET)

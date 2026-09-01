@@ -83,7 +83,16 @@ class TradingAssignment(Contract):
     canonical_symbol: Symbol
     timeframe: Annotated[str, Field(min_length=1, max_length=16)]
     strategy_artifact_id: UUID
-    strategy_artifact_hash: str
+    strategy_artifact_hash: VersionTag
+    """`VersionTag`, not a bare `str` — `gateway.py::_build_trade_intent`
+
+    copies this directly into `TradeIntent.strategy_version`, which is
+    itself a `VersionTag` (1-128 chars). Bounding it here, at assignment
+    registration, means a malformed value fails closed immediately
+    (`AssignmentConflictError`-adjacent, a normal registration-time
+    rejection) rather than as an uncaught `ValidationError` deep inside
+    proposal acceptance the first time someone tries to map a proposal
+    against this assignment — caught by a self-review before it shipped."""
     valid_from_utc: UtcDatetime
     valid_until_utc: UtcDatetime
     max_proposals_per_hour: int = Field(gt=0)

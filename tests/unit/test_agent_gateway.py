@@ -51,6 +51,7 @@ from crumblr.agent_gateway.stores import (
     InMemoryTradingAssignmentStore,
 )
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
+from crumblr.domain.models import TradeIntent
 from tests.conftest import FIXED_NOW
 
 AGENT_ID = uuid4()
@@ -688,3 +689,162 @@ class TestFeatureEvidence:
         # still resolvable -- nothing about accepting the proposal could
         # have disturbed it (append-only, content-addressed).
         assert feature_evidence.get_payload(bundle.feature_snapshot_id) is not None
+
+
+class TestTradeIntentMapping:
+    """Review 1.26 §7 item 2: `TradeProposal → platform-owned TradeIntent`
+
+    mapping."""
+
+    def test_an_accepted_proposal_carries_a_trade_intent(self, gateway: AgentGateway) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+        assert isinstance(result.trade_intent, TradeIntent)
+
+    def test_the_trade_intent_carries_the_bundles_feature_snapshot_id(
+        self, gateway: AgentGateway
+    ) -> None:
+        """AG-006's whole point: never fabricated, always the bundle's own."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.trade_intent is not None
+        assert result.trade_intent.feature_snapshot_id == bundle.feature_snapshot_id
+
+    def test_the_trade_intent_fields_match_the_proposal_and_assignment(
+        self, gateway: AgentGateway
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        original = proposal(context_hash=bundle.content_hash)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+        intent = result.trade_intent
+        assert intent is not None
+        assert intent.strategy_id == "external_agent"
+        assert intent.strategy_version == "abc123"  # assignment()'s strategy_artifact_hash
+        assert intent.symbol == "EUR/USD"  # assignment()'s canonical_symbol
+        assert intent.side is original.side
+        assert intent.created_at_utc == original.submitted_at_utc
+        assert intent.expires_at_utc == original.expires_at_utc
+        assert intent.entry_type is original.entry_type
+        assert intent.reference_price == original.reference_price
+        assert intent.stop_loss_price == original.stop_loss_price
+        assert intent.take_profit_price == original.take_profit_price
+        assert intent.confidence == original.confidence
+        assert intent.reason_codes == original.reason_codes
+        assert intent.requested_risk_fraction == original.requested_risk_fraction
+
+    def test_model_version_is_never_sourced_from_a_live_identity_lookup(
+        self, gateway: AgentGateway
+    ) -> None:
+        """Regression coverage for a self-review finding: `model_version`
+
+        was originally sourced from `AgentIdentity` at mapping time, but
+        identity is a mutable, append-only-latest-wins snapshot -- a
+        re-registration between the original acceptance and a later replay
+        would have made the "byte-identical reconstruction" guarantee
+        silently drift. `TradeIntent.model_version` is always `None` now;
+        real per-agent-model provenance would need its own immutable,
+        content-addressed home, not a live side-channel lookup."""
+        gateway.register_identity(identity(model_version="gpt-trader-1"), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+        original = proposal(context_hash=bundle.content_hash)
+
+        first = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+        assert first.trade_intent is not None
+        assert first.trade_intent.model_version is None
+
+        # Re-register the same agent with a different model_version, then
+        # retry the identical proposal -- the reconstructed intent must
+        # not change.
+        gateway.register_identity(identity(model_version="gpt-trader-2"), credential_secret=SECRET)
+        second = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=original,
+            now=FIXED_NOW + timedelta(minutes=1),
+        )
+        assert second.trade_intent == first.trade_intent
+
+    def test_a_rejected_proposal_carries_no_trade_intent(self, gateway: AgentGateway) -> None:
+        _registered(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash="never-issued-hash"),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is False
+        assert result.trade_intent is None
+
+    def test_no_trade_never_carries_a_trade_intent(self, gateway: AgentGateway) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+        assert result.trade_intent is None
+
+    def test_an_identical_retry_reconstructs_an_equal_trade_intent(
+        self, gateway: AgentGateway
+    ) -> None:
+        """Deterministic: the same accepted proposal always maps to the
+
+        same TradeIntent (same intent_id, same every field) -- proven by
+        retrying at a *different* `now` and confirming nothing about the
+        intent changed."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        original = proposal(context_hash=bundle.content_hash)
+        first = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=original, now=FIXED_NOW
+        )
+        second = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=original,
+            now=FIXED_NOW + timedelta(seconds=30),
+        )
+        assert first.trade_intent == second.trade_intent
+
+    def test_a_proposal_with_no_reason_codes_is_rejected_not_left_to_fail_construction(
+        self, gateway: AgentGateway
+    ) -> None:
+        """`TradeProposal` itself places no non-empty constraint on
+
+        `reason_codes`, but the `TradeIntent` this Gateway maps an accepted
+        proposal into requires at least one for a directional side
+        (`domain/models.py::TradeIntent._check_directional_requirements`).
+        Caught here as an ordinary auditable rejection, not a construction
+        failure deep inside `_build_trade_intent`."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash, reason_codes=()),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is False
+        assert result.reason is AgentRejectionReason.MISSING_REASON_CODES
