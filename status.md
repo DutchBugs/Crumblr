@@ -14,7 +14,7 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `(pending — see the fifty-fifth entry's follow-up commit for the exact SHA)` |
+| **`main` HEAD** | `e1ab80f` |
 | **Last hosted CI result** | Not confirmed green. F-063 (`UV_FROZEN=1` + `uv sync --locked` incompatible with current `uv`) fixed and pushed 2026-09-01 — no `gh`/Actions access in this environment to confirm the hosted run itself; needs a human or a session with GitHub access |
 | **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 CI fix pushed. NEXT: confirm hosted CI green (needs a human), then core critical path items 3-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged. NEXT: AG-006 (platform-owned `agent_context_v1` evidence shape, no `compute_features()` extraction needed — review 1.26 §5 resolved this), then `TradeProposal → TradeIntent` mapping. BLOCKED: none currently |
