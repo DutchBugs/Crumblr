@@ -2,7 +2,7 @@
 
 **Project:** Autonomous EUR/USD Trading Platform  
 **Status document version:** 1.8  
-**Last updated:** 2026-08-28  
+**Last updated:** 2026-09-01  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -24,8 +24,8 @@ document you have that this repository doesn't yet.
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
-| 6 | Agent Integration track (Dev 2) — Step A design package **done 2026-08-27**, Step B Gateway ingestion+audit layer **done 2026-08-28**; on branch `agent/contracts`, not yet merged into `main` | The §11 design package (ADR-005, threat model, eight contracts) and Step B (`AgentGateway`: identity/credential auth, assignment authorization, context binding, idempotent `TradeProposal`/`NoTradeDecision` claiming, six new tables) are both built and tested — see §13 fiftieth entry for the full first-hand account. One open item needs a Dev-1 handshake before Step B can map an accepted proposal into a platform `TradeIntent`: `review/AGENT_FEEDBACK.md` AG-006 (`TradeIntent.feature_snapshot_id` is non-optional; an externally-originated proposal has none). Merging `agent/contracts` into `main` is an owner/Dev-2 decision, not yet made | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; §13 fiftieth entry; commits `cc16e4f`, `2f7c921` on `agent/contracts` |
-| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; seven items remain | `SubmissionGate` is real and tested (`review/adr/ADR-006-submission-gate.md`), called by nobody yet. Still open: durable execution-activation authority *wiring* (the config fields exist; nothing sets/reads them from a real orchestrator), `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
+| 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). Blocked on Dev 1 for the next step | Everything built so far is on `main`, quality-gate clean, full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries. Genuinely blocked on **AG-006**: `TradeProposal → TradeIntent` mapping needs a standalone `compute_features()` that does not exist yet (`baseline_v1`'s is strategy-specific, `ict_v1` has no equivalent) — Dev 1 confirmed this directly, extraction not started, no ETA. Dev 2 was told explicitly not to wait idle and built the HTTP transport instead while blocked | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; §13 fiftieth–fifty-fourth entries; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
+| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 self-referential bug found and fixed same day); six items remain | `SubmissionGate` is real, tested, and now actually called by `ExecutionOrchestrator` after a broker-accepted `order_check`. Still open: `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; §13 fifty-second entry; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
 reviewer artifact for documentation wording, one extra unit test, normal
@@ -7347,6 +7347,174 @@ Next:
 - Merge to `main` and push per V2 §9's short-lived-branch flow.
 - Continue down the core critical path: item 3 (`SUBMISSION_STARTED`
   timing) is next, no plan drafted yet.
+
+---
+
+## Update 2026-08-28 (fifty-third entry) — Dev 2: self-review hardening pass finds and fixes three real bugs (AG-007/008/009)
+
+Component: `src/crumblr/agent_gateway/gateway.py`, `stores.py`,
+`persistence/agent_gateway.py`, `errors.py`, `__init__.py`,
+`tests/unit/test_agent_gateway.py`, `tests/integration/test_agent_gateway_store.py`
+Milestone: Agent Integration track (Dev 2), post-Step-A/B quality pass —
+not requested by anyone, run because solid test coverage does not rule
+out logic bugs a second look catches
+Status before: Step A + Step B merged to `main` (`bf18ec5`), 30 tests
+green, believed correct
+Status after: a `/code-review high` self-review against the whole
+`agent_gateway` package found five issues; three were genuine
+correctness/fail-closed bugs, not style. All fixed same day, all
+AG-numbered in `review/AGENT_FEEDBACK.md`
+
+Completed:
+- **AG-007 (HIGH) — proposal-rate-limit check-then-act race.** Reading
+  `count_claimed_since` and claiming the outcome happened in two separate
+  transactions, so concurrent proposals for one assignment could each
+  observe a stale below-limit count and all get accepted, silently
+  exceeding `max_proposals_per_hour`. Fixed with a Postgres
+  transaction-scoped advisory lock (`pg_advisory_xact_lock`) serializing
+  the whole claim→count→evaluate→settle sequence per `assignment_id`
+  (`AgentDecisionOutcomeStore.transaction()`/`.lock_assignment()`, mirrors
+  `persistence/execution.py`'s own optional `connection` parameter).
+  Verified the fix is real, not incidental: manually disabled the lock,
+  confirmed a new 10-real-thread concurrency test against real PostgreSQL
+  genuinely fails (10/10 or 7/10 accepted instead of the configured 3),
+  then restored it and re-confirmed green.
+- **AG-008 (HIGH) — fail-open idempotent-retry replay.** The retry path
+  read "no `REJECTED` event found" as proof of acceptance. A claim
+  interrupted between commit and verdict (a crash) left a claimed-but-
+  unsettled row that every future retry would then silently report
+  `accepted=True` for, without the authorization checks ever actually
+  running. Fixed by making an unsettled claim resume evaluation with
+  fresh inputs rather than assume any verdict — genuinely fail-closed, not
+  merely stuck: a raise-based fix was considered and rejected, since every
+  retry would hit the identical unresolved state forever. Event ids for
+  `agent_decision_events` also switched from random `uuid4()` to
+  content-derived (mirrors `persistence/execution.py::event_id_for`), so a
+  resumed attempt's re-appended `RECEIVED` event collapses instead of
+  duplicating.
+- **AG-009 (MEDIUM) — unenforced `required_evidence_fields`.** Defined on
+  `TradingAssignment` at Step A, never checked anywhere — a proposal with
+  zero evidence was accepted even against an assignment naming required
+  evidence fields. Fixed with a deliberately conservative check (some
+  evidence must be cited when required; verifying the cited evidence
+  actually *covers* each named field needs content inspection, out of
+  scope until AG-005's evidence-ingestion path exists).
+- Also: de-duplicated assignment/context validation logic that had been
+  copy-pasted between the proposal and NO_TRADE evaluation paths, and
+  fixed a stale package docstring still describing "Step A only" after
+  Step B shipped.
+
+Evidence:
+- 35 new/changed tests total (2 for the interrupted-claim resume, 3 for
+  required-evidence, 1 new real-concurrency integration test, plus the
+  connection-threading refactor re-verified against the full existing
+  suite with zero regressions).
+- Full non-integration suite: 839 passed, 1 skipped.
+- `agent_gateway` integration suite: 7/7 against an isolated database.
+- `uv run ruff check .` / `mypy` — clean.
+
+Problems found:
+- The three AG-numbered bugs above — the actual point of this entry.
+
+Risk impact:
+- None to live trading — this track has no execution path regardless. The
+  bugs themselves were real (a rate-limit could be silently exceeded; a
+  crashed-and-retried claim could be silently accepted without
+  authorization) and are exactly the class of defect this project's review
+  culture exists to catch before a capability surface goes live, not after.
+
+Decision:
+- All three findings CLOSED/SHIPPED same day. Committed `d6a5361` on
+  `agent/contracts`, rebased cleanly onto Dev 1's concurrent work, pushed
+  to `main`.
+
+Next:
+- Check in with Dev 1 on AG-006/`compute_features()` before starting
+  Step E (`TradeProposal → TradeIntent` mapping).
+
+---
+
+## Update 2026-08-31 (fifty-fourth entry) — Dev 2: HTTP transport for the Agent Gateway, built while AG-006 stays blocked
+
+Component: `src/crumblr/agent_gateway/http.py` (new),
+`tests/unit/test_agent_gateway_http.py` (new)
+Milestone: Agent Integration track (Dev 2) — infrastructure for V3 §18
+step G ("external Trader against genuine Crumblr shadow context"), built
+ahead of E/F since it did not itself depend on AG-006
+Status before: every Step B proof called `AgentGateway` directly from a
+test — same process, no wire in between. AG-006 (`TradeProposal →
+TradeIntent` mapping) still blocked: checked in with Dev 1 after three
+quiet days, confirmed `trading_agent/features.py::compute_features()` is
+`baseline_v1`-specific, not a cross-strategy fit; extraction not started,
+no ETA; explicitly told not to wait idle
+Status after: a genuinely separate process can now reach the Gateway over
+HTTP with only the two agent-facing operations exposed; AG-006 remains
+open, unaffected by this entry
+
+Completed:
+- Asked the owner before building, since a wire transport is a new
+  externally-reachable surface, not an internal fix — approved.
+- `agent_gateway/http.py::create_app(*, gateway, clock) -> FastAPI`:
+  exactly two routes, `POST /agent/proposals` and `POST /agent/no-trade`
+  — the only two operations `gateway.py`'s own docstring calls
+  agent-facing. No route for `register_identity`/`issue_assignment`/
+  `issue_context_bundle` at all, checked structurally
+  (`TestNoAdministrativeRouteExists`, mirrors `test_dashboard.py`'s own
+  "no mutation route" pattern) — a docstring promise is not a guarantee.
+  Kept under `agent_gateway/`, not `src/crumblr/api/` — `build.md`'s
+  architecture diagram already earmarks `api/` for Core's own Control API,
+  a different authority boundary.
+- Auth: the same interim shared-secret mechanism (AG-001), as two headers
+  (`X-Agent-Id`, `X-Agent-Credential`). Unknown agent / wrong credential /
+  suspended agent all collapse to one `401` (never help enumerate agent
+  ids, same discipline `AuthenticationError` already documents);
+  impersonation is `403`; a fingerprint conflict is `409`; malformed JSON
+  or a failed contract validation is `400`. A **rejected** proposal is
+  still `200 OK` with `"accepted": false` in the body — a refusal is a
+  normal, fully-audited outcome, not a transport error.
+- **Found and fixed one real bug via the test suite itself**:
+  `pydantic.ValidationError.errors()` can carry the raw exception object
+  in a validator's `ctx` (e.g. `TradeProposal`'s own stop/target-direction
+  check), which plain `json.dumps` (`JSONResponse`'s encoder) cannot
+  serialize — a domain-validator rejection was coming back as an
+  unhandled `500` instead of the intended `400`. Fixed with
+  `error.errors(include_url=False, include_context=False)`; regression
+  test included.
+
+Evidence:
+- `tests/unit/test_agent_gateway_http.py` — new, 16 tests (accept/reject,
+  all four failure-mode status codes, malformed JSON, malformed contract,
+  idempotent replay, conflicting retry, both routes, structural
+  route/docs checks).
+- Full non-integration suite: 839 → **855 passed**, 1 skipped.
+- `uv run ruff check .` / `mypy` — clean. No new dependency — FastAPI/
+  `TestClient` already in use by `dashboard/app.py`.
+
+Problems found:
+- The `ValidationError`/`json.dumps` serialization bug above — the only
+  real finding, caught by the tests themselves, not by inspection.
+
+Risk impact:
+- None. Nothing outside `agent_gateway/` and its own tests imports any of
+  this — verified by grep. No admin operation is reachable over HTTP. No
+  deployment/process wiring exists yet (no `uvicorn` invocation, no port,
+  no TLS) — this proves the boundary is safe to eventually expose, not
+  that anything is listening anywhere today.
+
+Decision:
+- Built, tested, merged. Committed `a0e380a` on `agent/contracts`, pushed
+  to `main` as a clean fast-forward.
+- Synced onto Dev 1's `68af9c1` afterward (durable execution-activation
+  wiring + F-062 fix, `IMPACT: SHARED-CONTRACT` — two additive
+  `ExecutionEventType` members and a `PlatformConfig.config_version`
+  hashing change) — independently grepped `agent_gateway/` for both
+  changed names, confirmed zero references, full suite re-verified green
+  (856 passed) after the rebase.
+
+Next:
+- Still waiting on Dev 1's `compute_features()` extraction (AG-006) before
+  Step E (`TradeProposal → TradeIntent` mapping) can start. No other
+  unblocked work identified in this track as of this entry.
 
 ---
 
