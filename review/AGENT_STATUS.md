@@ -765,6 +765,65 @@ list.
 
 ---
 
+## 0k. Response → `NoTradeDecision` → `AgentGateway` — done 2026-09-01
+
+User-directed priority, next after §0j. New
+`agent_gateway/static_agent_translate.py`: `translate_no_trade_response()`
++ `submit_static_agent_no_trade()` — the end of the bridge for the
+unhealthy-market case. Matches `feedback.1.27.md` section 5.2 exactly:
+scope is deliberately `decision_type == "NO_TRADE"` only — a
+`TRADE_INTENT` response's nested `trade_intent` object must never be
+accepted as the platform `TradeIntent`, and building that translation
+stays out of scope until AG-015/F-066's fork-side strategy-runtime
+question is resolved.
+
+**Never trusted blindly.** Before constructing a decision: `input_identity`
+must match what this bridge actually sent (proves the response answers
+*this* request, not a stale or mismatched one), the echoed `strategy`
+block must match the known frozen-package identity exactly, and
+`executable`/`execution_authority` must both be `false` — any disagreement
+refuses outright.
+
+**Proven against the real captured fork response, not a hand-built
+fixture.** `REAL_FORK_RESPONSE` in the test file is the exact JSON body
+§0j's live HTTP round trip returned — used for the translation tests *and*
+a full end-to-end submission through a real `AgentGateway` (in-memory
+stores), which comes back `accepted=True`.
+
+Self-review (`/code-review medium`) before commit found one real,
+non-obvious gap, fixed same pass — tracked as **AG-018** (closed):
+`decided_at_utc` was originally a caller-supplied wall-clock parameter,
+but `NoTradeDecision.decision_fingerprint` hashes it, so retrying the
+identical response with a fresh "now" would produce the same deterministic
+`decision_id` but a *different* fingerprint — `_claim` treats that as a
+genuine conflict, not a safe retry. The exact same class of bug AG-016
+fixed for `append_event`'s `occurred_at_utc`, reintroduced here via a
+different path. Fixed: `decided_at_utc` is no longer a parameter at all —
+derived from the response's own `decision_time_utc` (parsed, refuses if
+missing/malformed/timezone-naive).
+
+Evidence: 18 tests in new `tests/unit/test_static_agent_translate.py` —
+translating the real captured response, `decision_id` determinism, full
+retry-safety including `decision_fingerprint` equality (the AG-018
+regression), end-to-end Gateway submission, eleven refusal cases (schema
+version, wrong decision type, claimed execution authority, an unexpected
+`trade_intent`, mismatched `input_identity`, tampered strategy identity,
+empty reason codes, missing `decision_id`, and the three `decision_time_utc`
+parsing failures), and proof that ordinary Gateway-level semantics
+(unknown-assignment rejection, impersonation) still apply unweakened. ruff/
+ruff format/mypy clean; full gate (unit + integration against
+`crumblr_test_dev2`) **1138 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+**Not done yet:** this closes review 1.27's item D for the NO_TRADE case
+only. Item B (`TRADE_INTENT`→`TradeProposal` translation) stays blocked on
+the fork-side strategy-runtime work (F-066); nothing wires this bridge into
+a real, running process yet (that needs a registered Static Agent
+identity/assignment and a script driving `static_agent_client.evaluate()`
+→ this module → the Gateway on a schedule, not built).
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
