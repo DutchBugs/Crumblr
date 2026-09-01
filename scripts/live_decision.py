@@ -55,6 +55,15 @@ def main() -> int:
         help="stop after this many polls; omit to run until Ctrl+C",
     )
     parser.add_argument("--environment", default=Environment.PAPER.value)
+    parser.add_argument(
+        "--strategy-id",
+        default=None,
+        help=(
+            "override config/paper.yaml's trading_agent.strategy_id for this run only "
+            "(e.g. F-051 part 2 evidence with baseline_v1 while real bar history is still "
+            "short of ict_v1's warm-up requirement) — never edits the shipped config file"
+        ),
+    )
     args = parser.parse_args()
 
     database_url = os.environ.get(DATABASE_URL_ENV_VAR)
@@ -69,6 +78,9 @@ def main() -> int:
 
     environment = Environment(args.environment)
     config = load_config(environment, config_dir=REPO_ROOT / "config")
+    if args.strategy_id is not None:
+        agent = config.trading_agent.model_copy(update={"strategy_id": args.strategy_id})
+        config = config.model_copy(update={"trading_agent": agent})
     runtime = build_durable_runtime(
         environment=environment,
         state_file=REPO_ROOT / "var" / "safety_state.json",

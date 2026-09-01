@@ -200,3 +200,48 @@ fields from an identity hash is exactly the kind of design decision
 this log exists to surface before it causes cross-track confusion.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-01 — DEV1
+Changed: No code change. Architecture guidance recorded ahead of Dev 2
+starting review 1.26 section 7 item 3 (wiring the Gateway's constructed
+TradeIntent through intent-time Risk -> deterministic Policy -> capsule
+boundary) after Dev 2 asked whether risk.policies.evaluate()/CapsuleStore
+.seal() are safe to call from outside application/orchestration.py's
+usual flow.
+Impact: Found while reading application/live_decision.py that
+risk.policies.evaluate()'s PortfolioState.ledger (EquityLedger) is
+stateful and per-process, not re-derived fresh on every call.
+LiveDecisionOrchestrator recovers it once per process (risk.session
+.recover_session(), on first decide_once() or a trading-day rollover),
+holds it in memory, and periodically persists it back to
+risk_session_states — it is not reloaded from the database before every
+evaluate() call. Two independent processes each recovering their own
+copy of this ledger (one for internal strategies, one for external-agent
+proposals) would produce two independent in-memory views of one
+daily-loss/drawdown budget, each blind to what the other just decided —
+a lost-update race on risk_session_states, invisible to either pipeline
+on its own. This reads as a genuine conflict with the "one Risk engine"
+invariant feedback.1.26.md closes on ("Agent proposes. Risk engine
+constrains...").
+Not a defect today: order_send is unreachable from both pipelines, so no
+real position can ever result from this race regardless — this is
+architecture guidance to settle before feedback.2.0 could ever treat
+agent-driven submission as real, not a live safety gap.
+CapsuleStore.seal() and evaluator.pretrade.evaluate() were checked too
+and are NOT gotchas: seal() is content-derived-ID/ON-CONFLICT-safe from
+any caller, and evaluate()'s intents_in_last_hour check is currently
+uncalibrated (max_intents_per_hour: null in every shipped config, F-024)
+so it is a no-op today regardless of how it is counted across pipelines.
+Action required: Dev 2 to decide, when building the shared integration
+path, either (a) route external-agent proposals into the same running
+instance that holds the canonical ledger rather than a separate process
+reimplementing recover_session(), or (b) if a separate process is
+architecturally necessary, re-recover the ledger fresh immediately
+before every evaluate() call instead of caching it — not fully
+race-free without real DB-level locking, but avoids the worst
+staleness. No Dev-1 code change needed either way.
+Relevant commit: (this commit — documentation only)
+```

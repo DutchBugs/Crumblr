@@ -14,12 +14,12 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `e1ab80f` |
+| **`main` HEAD** | `(pending — see the fifty-sixth entry's follow-up commit for the exact SHA)` |
 | **Last hosted CI result** | Not confirmed green. F-063 (`UV_FROZEN=1` + `uv sync --locked` incompatible with current `uv`) fixed and pushed 2026-09-01 — no `gh`/Actions access in this environment to confirm the hosted run itself; needs a human or a session with GitHub access |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 CI fix pushed. NEXT: confirm hosted CI green (needs a human), then core critical path items 3-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged. NEXT: AG-006 (platform-owned `agent_context_v1` evidence shape, no `compute_features()` extraction needed — review 1.26 §5 resolved this), then `TradeProposal → TradeIntent` mapping. BLOCKED: none currently |
-| **F-051 state** | Part 1 PASSED (real-terminal). Part 2 stalled — `mt5_live_reader.py` stopped 2026-08-27 06:20 UTC; needs restart (owner/operator action) |
-| **Owner blockers** | Confirm next hosted CI run is green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading; restart `mt5_live_reader.py` + `live_decision.py` for F-051 part 2 |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 CI fix pushed, F-051 part 2 CLOSED (real `baseline_v1` decision reached risk PASS/Supervisor APPROVE against real EUR/USD data, 2026-09-01). NEXT: confirm hosted CI green (needs a human), then core critical path items 3-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed (`agent_context_v1` evidence shape), `TradeProposal → TradeIntent` mapping merged. NEXT: wiring the constructed `TradeIntent` through intent-time Risk → deterministic Policy → capsule boundary (review 1.26 §7 item 3) — AG-012 (shared risk-evaluation authority, not yet settled architecturally) named as a thing to resolve before `feedback.2.0` could treat agent-driven submission as real, not a blocker for shadow work today. BLOCKED: none currently |
+| **F-051 state** | **Both parts CLOSED.** Part 1 PASSED 2026-08-26 (real-terminal). Part 2 CLOSED 2026-09-01 — restarted `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE. Reader left running (owner decision) to keep accumulating toward `ict_v1`'s 120-bar threshold; decision pipeline stopped and kill switch reverted to HALTED |
+| **Owner blockers** | Confirm next hosted CI run is green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
 | **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md` (2026-09-01) was a deliberate owner-requested exception, not a change to that default |
 
@@ -42,7 +42,7 @@ document you have that this repository doesn't yet.
 | 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
-| 5 | Restart real M5 bar accumulation for F-051 part 2 — via `baseline_v1`, not waiting for `ict_v1` | `scripts/mt5_live_reader.py`'s writes to `crumblr_soak` stopped at **2026-08-27 06:20 UTC** (confirmed stale by a direct query, ~7h behind at last check) — nothing has been accumulating. 82 real M5 bars exist there today, already past `baseline_v1`'s 65-bar threshold (`ict_v1` still needs 120, and can keep accumulating separately). No real `DecisionCapsule` has ever been sealed against this data, which also means `scripts/live_decision.py` has never actually run against it for long enough to produce one — both processes need to be running, not just the reader. **Review 1.25 §8 independently reached the same finding and is explicit: use `baseline_v1` to close F-051 part 2 now, don't wait for 120 bars merely to close the plumbing proof** | `scripts/mt5_live_reader.py`, `scripts/live_decision.py`; §13 thirty-first/forty-sixth entries |
+| ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
 | 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). **No longer blocked** | Review 1.26 §5 resolved AG-006 directly: no standalone cross-strategy `compute_features()` needed after all — Dev 2 adds one platform-owned, deliberately-named evidence shape (`agent_context_v1`) reusing the existing generic `FeatureEvidence` persistence layer, entirely within Dev 2's own ownership. Dev 2 confirmed starting on this 2026-09-01. Full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; `feedback.1.26.md` §5/§7; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
 | 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 self-referential bug found and fixed same day); six items remain | `SubmissionGate` is real, tested, and now actually called by `ExecutionOrchestrator` after a broker-accepted `order_check`. Still open: `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; §13 fifty-second entry; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
 
@@ -7628,6 +7628,131 @@ Next:
   follow-up commit.
 - Resume the Dev-1 core critical path per review 1.26 §6 items 2+
   (support/restart F-051 part 2, then `SUBMISSION_STARTED` timing).
+
+---
+
+## Update 2026-09-01 (fifty-sixth entry) — F-051 part 2 closed: a real baseline_v1 decision reaches risk PASS/Supervisor APPROVE against real EUR/USD data
+
+Component: `scripts/live_decision.py` (new `--strategy-id` override), operational (MT5 terminal, `crumblr_soak`), `review/FEEDBACK.md`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1 core critical path, review 1.26 §6 item 2 / §10; the last open half of F-051
+Status before: Real M5 bar accumulation stalled since 2026-08-27 06:20 UTC; no real `LiveDecisionOrchestrator` decision had ever reached the Supervisor against real data
+Status after: **F-051 both parts CLOSED.** Two real `baseline_v1` decisions reached `risk_decision.verdict=PASS` and `supervisor_decision.verdict=APPROVE` against real Pepperstone DEMO EUR/USD bars — the first `SUPERVISOR APPROVE` this project has produced against real data
+
+Completed:
+- Copied `.env` from the original shared checkout into this isolated
+  worktree (local file copy, same machine/user, values never read into
+  this session's own context) and installed the `mt5` extra
+  (`uv sync --locked --extra mt5`) — this worktree had neither, since
+  `.env` is git-ignored and worktrees don't inherit gitignored files, and
+  `uv sync --locked` alone never installs optional extras.
+- One-shot `scripts/mt5_probe.py` confirmed the real terminal connection
+  works before starting anything long-running: account `***706`,
+  `PepperstoneUK-Demo`, `trade_allowed=True`, terminal connected, EURUSD
+  resolved. `var/` didn't exist yet in this fresh worktree (fixed).
+- Upgraded `crumblr_soak`'s schema to the latest Alembic head
+  (`d4b6e2f81a37`, Dev 2's Agent Gateway Step B tables) — it was one
+  migration behind.
+- Added `scripts/live_decision.py --strategy-id` (optional, defaults to
+  the shipped config's strategy): lets this evidence run use
+  `baseline_v1` without editing `config/paper.yaml`'s shipped default
+  (`ict_v1`), per review 1.26 §10's explicit instruction not to wait for
+  `ict_v1`'s 120-bar threshold when `baseline_v1`'s 65 is already
+  cleared (82+ bars existed).
+- Restarted both `mt5_live_reader.py` (real MT5, read-only, no CLI
+  change) and `live_decision.py --strategy-id baseline_v1` against
+  `crumblr_soak`, confirmed both healthy (reader: `HEALTHY`, real ticks
+  and bars advancing; decision process: polling cleanly).
+- **Asked for and received explicit approval before arming
+  `crumblr_soak`'s kill switch** (`build.md` §8.2's operator-only reset
+  rule, same discipline the 2026-08-27 `order_check` evidence run used) —
+  two capsules sealed before arming correctly `BLOCK`ed on
+  `SYSTEM_HALTED`, proving the gate itself works.
+- **First arm attempt was incomplete, and the platform's own ADR-002
+  safety mechanism correctly caught it.** The first reset touched only
+  `PostgresSafetyStateStore` (a one-off script against the DB directly),
+  not `CompositeSafetyStateStore`'s local file latch
+  (`var/safety_state.json`), which didn't exist yet in this fresh
+  worktree. Restarting `live_decision.py` afterward surfaced
+  `safety_state.disagreement` ("latch halted, journal running") and
+  resolved to `UNKNOWN` — even more cautious than `HALTED` — exactly the
+  two-independent-records design ADR-002 specifies, refusing to trust a
+  half-written state rather than silently proceeding. Also separately
+  confirmed that `KillSwitch.is_halted` is read from in-memory state
+  loaded once at process startup (`KillSwitch.on_startup()`), never
+  re-polled from the store during a run — the same statefulness pattern
+  already flagged to Dev 2 as AG-012's root cause (`EquityLedger`), now
+  independently confirmed to apply to the kill switch too. Fixed by
+  re-arming through `build_durable_runtime()`'s actual
+  `CompositeSafetyStateStore` (writing both records together, the same
+  path the application itself uses) and restarting the process again —
+  correct and complete after that.
+- Real evidence reached, four capsules total this session:
+  `4a796878.../22332f29...` (07:40/07:45, `BLOCK`/`SYSTEM_HALTED`,
+  before the fix) — expected. `5b8c89df...` (08:05:44) —
+  **`risk PASS`, `supervisor APPROVE`**. `0adb331a...` (08:10:28) —
+  `BLOCK`/`MARKET_DISABLED`+`EXPERT_TRADING_DISABLED`+`STALE_MARKET_DATA`,
+  a real transient broker-snapshot hiccup, not investigated further
+  since it doesn't affect the evidence requirement and the gate reacted
+  correctly. `ed0b5c4a...` (08:15:31) — **`risk PASS`,
+  `supervisor APPROVE`** again. `d193025e...` (08:20:59) —
+  `BLOCK`/`STALE_MARKET_DATA`, another transient.
+- Stopped `live_decision.py` and tripped `crumblr_soak`'s kill switch
+  back to `HALTED` (attributed, `build_durable_runtime()`'s composite
+  store again, detail references both PASS capsules) — same discipline
+  as the prior evidence run, so a future session doesn't find `RUNNING`
+  without a fresh, deliberate decision. Confirmed both records agree on
+  `HALTED` afterward.
+- Asked whether to keep `mt5_live_reader.py` running afterward (real,
+  ongoing resource use on the host) rather than assuming — approved to
+  leave it running, read-only, toward `ict_v1`'s remaining bar count.
+- Flagged the `EquityLedger`/kill-switch statefulness pattern to Dev 2
+  before they started review 1.26 §7 item 3 (wiring `TradeIntent`
+  through Risk/Policy/capsule sealing) — a real architectural question
+  about whether two independent processes can each hold their own
+  in-memory safety/risk state without a shared authority. Recorded as
+  AG-012 on Dev 2's own tracker; not a blocker for shadow work today
+  since `order_send` stays unreachable either way. Logged in
+  `review/INTEGRATION_NOTICES.md`.
+- Updated `review/FEEDBACK.md`'s F-051 row (part 2 CLOSED) and the
+  compact `status.md` header (F-051 state, Dev 1/Dev 2 DONE/NEXT/BLOCKED)
+  to match — no stale "stalled"/"blocked" prose left standing after
+  `main` (and this document) says otherwise, per review 1.26 §3's own
+  rule.
+
+Evidence:
+- Capsule ids and verdicts as listed above, read directly from
+  `crumblr_soak` via `CapsuleStore.read_all()`, not inferred from logs.
+- `var/safety_state.json` and the journal both confirmed to read
+  `HALTED` after the final trip.
+- No `uv run pytest`/quality-gate run this entry — no `src/` production
+  code changed beyond the one-line `--strategy-id` CLI addition to
+  `scripts/live_decision.py`, which was itself quality-gate-checked
+  (`ruff`/`mypy` clean) before use.
+
+Problems found:
+- The incomplete first kill-switch arm (above) — a real operational
+  mistake on this session's part, not a platform defect. The platform's
+  own ADR-002 double-record design caught it correctly and refused to
+  proceed on a disagreeing state, which is exactly what that design is
+  for. Recorded here in full rather than only mentioning the eventual
+  success, per this project's own "report evidence honestly" rule.
+
+Risk impact:
+- None adverse. `order_send` stayed structurally unreachable throughout;
+  every step here was either read-only (the reader) or produced
+  non-sending decision capsules (the decision pipeline). The kill switch
+  was armed only for the deliberate evidence window and confirmed
+  reverted to `HALTED` before this entry was written.
+
+Decision:
+- F-051 is now fully CLOSED — both parts real-terminal-validated, zero
+  outstanding gap. Not committed yet — pending the usual per-turn
+  approval, same slice as the `review/FEEDBACK.md`/`INTEGRATION_NOTICES.md`
+  updates above.
+
+Next:
+- Core critical path item 3: `SUBMISSION_STARTED` timing at the correct
+  pre-side-effect point — not yet started, no plan drafted.
 
 ---
 
