@@ -44,6 +44,7 @@ from crumblr.agent_gateway.errors import (
     AssignmentConflictError,
     ContextConflictError,
     DecisionConflictError,
+    EventConflictError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
 from crumblr.agent_gateway.evidence import AgentContextEvidence
@@ -272,7 +273,13 @@ class AgentDecisionOutcomeStore(Protocol):
         reason_codes: tuple[str, ...] = (),
         detail: str | None = None,
         connection: Any = None,
-    ) -> None: ...
+    ) -> None:
+        """Idempotent on `(outcome_id, event_type)` only when the content
+        also matches -- a same-key call with different `occurred_at_utc`
+        /`reason_codes`/`detail` raises `EventConflictError` rather than
+        silently discarding the second write (`errors.EventConflictError`'s
+        own docstring)."""
+        ...
 
     def events_for(self, outcome_id: UUID) -> tuple[AgentDecisionEventRecord, ...]: ...
 
@@ -388,8 +395,25 @@ class InMemoryAgentDecisionOutcomeStore:
         # Content-derived identity, same discipline as
         # `persistence/execution.py::event_id_for` -- re-appending the same
         # (outcome_id, event_type) pair (a resumed, interrupted attempt) is
-        # a no-op, never a duplicate row.
-        if any(event.event_type == event_type for event in stored.events):
+        # a no-op *only when the substantive content matches*. Deliberately
+        # excludes `occurred_at_utc`: `RECEIVED` is re-appended on every
+        # resumed-but-unsettled retry (`AgentGateway.submit_trade_proposal`/
+        # `submit_no_trade`) with that call's own fresh wall-clock `now`,
+        # which is expected to differ from the original attempt's -- not a
+        # conflict, the same "same logical event, different observation
+        # time" reasoning `_claim`'s own fingerprint check already applies
+        # by excluding `claimed_at_utc`. A different `reason_codes`/`detail`
+        # for the same key *is* a genuine conflict, never a silent
+        # overwrite (self-review finding, `EventConflictError`'s docstring;
+        # the timestamp-inclusive version of this check was itself a
+        # self-review finding, fixed before ever committed).
+        existing = next((event for event in stored.events if event.event_type == event_type), None)
+        if existing is not None:
+            if (existing.reason_codes, existing.detail) != (reason_codes, detail):
+                raise EventConflictError(
+                    f"event ({outcome_id}, {event_type.value}) was already recorded with "
+                    "different content"
+                )
             return
         stored.events.append(
             AgentDecisionEventRecord(

@@ -587,8 +587,11 @@ ruff/ruff format/mypy clean; full gate (unit + integration against
 `crumblr_test_dev2`) **1076 passed**, 3 skipped (pre-existing, unrelated),
 0 failed.
 
-**Item A — the unhealthy-market Static Agent NO_TRADE smoke proof — core
-wiring done same session.** New `agent_gateway/static_agent_transport.py`:
+---
+
+## 0h. Static Agent bridge, item A — unhealthy-market NO_TRADE smoke proof — core wiring done 2026-09-01
+
+New `agent_gateway/static_agent_transport.py`:
 `build_unhealthy_market_context()`, the outbound `TraderContext 1.0` wire
 payload for exactly the one directional case this track can honestly send
 today (`market.market_data_health != "HEALTHY"`, which
@@ -664,6 +667,53 @@ through the Gateway/HTTP layer, not just this module).
 
 ---
 
+## 0i. Agent Gateway event-conflict hardening — done 2026-09-01 (AG-016)
+
+User-directed priority. `AgentDecisionOutcomeStore.append_event()`
+(`agent_gateway/stores.py`, `persistence/agent_gateway.py`) had no
+fail-closed conflict check at all — the one method in this package that
+did not follow its own module docstring's rule ("the same id with
+different content always raises, never silently overwrites"). A
+same-`(outcome_id, event_type)` re-append with genuinely different
+`reason_codes`/`detail` was silently discarded (`ON CONFLICT DO NOTHING` /
+in-memory early-return), never detected.
+
+New `EventConflictError` (`agent_gateway/errors.py`), wired into
+`http.py`'s `_CONFLICT_TYPES` so it maps to `409`, not an unmapped `500`.
+Both stores now read the already-durable row back on conflict and compare
+content rather than storing a new fingerprint column — no schema/migration
+change needed.
+
+**Self-review caught a real regression in the fix itself, before commit.**
+The first version compared `occurred_at_utc` too. `RECEIVED` is
+legitimately re-appended on every resumed-but-unsettled retry
+(`AgentGateway.submit_trade_proposal`/`submit_no_trade`'s AG-008 path —
+"claimed by an earlier attempt that never recorded a verdict, fall through
+and evaluate fresh") with that call's own fresh wall-clock `now`, which the
+original attempt's `now` will never match. Including the timestamp in the
+comparison would have converted every resumed retry into a permanent `409`
+— worse than the original gap, since an interrupted claim would become
+unrecoverable rather than merely under-defended. Fixed to compare only
+`reason_codes`/`detail`, matching `_claim`'s own precedent (its fingerprint
+already excludes `claimed_at_utc` for the same reason). Confirmed the
+existing `tests/unit/test_agent_gateway.py
+::TestInterruptedClaimIsResumedNotAssumedAccepted` — which calls
+`submit_trade_proposal` a second time with a `now` deliberately different
+from the original claim's — would have caught this regression on its own
+even without the dedicated new tests.
+
+Evidence: `tests/unit/test_agent_gateway_stores.py
+::TestAppendEventConflictDetection` (5 tests — identical-content no-op,
+different-reason-codes/detail raises, different-`occurred_at_utc`-alone
+does *not* raise, a rejected conflict does not corrupt the already-durable
+row), `tests/integration/test_agent_gateway_store.py
+::TestEventConflictIsDetectedUnderRealPostgres` (3 tests, the same
+properties against a real database). Full gate: ruff/ruff format/mypy
+clean; full gate (unit + integration against `crumblr_test_dev2`)
+**1106 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
@@ -672,11 +722,13 @@ through the Gateway/HTTP layer, not just this module).
 | B — Agent Gateway in shadow | auth, assignment enforcement, idempotent proposal/NO_TRADE persistence, fail-closed error handling | **DONE, merged, pushed** (`bf18ec5`), self-review hardening merged (`d6a5361`, AG-007/008/009). |
 | — HTTP transport | wire boundary for a genuinely separate process | **DONE, merged, pushed** (`a0e380a`). Local/shadow use only — F-064 (open, not blocking) requires TLS/mTLS before any remote exposure. |
 | — AG-006 (`feature_snapshot_id`) | platform-owned evidence for external-agent context | **DONE, merged, pushed** (§0c). |
-| — `TradeProposal → TradeIntent` mapping | review 1.26 §7 item 2 | **DONE, implemented and tested 2026-09-01** (§0d) — not yet committed, see §4. |
-| — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → deterministic Policy → capsule boundary | **NEXT**, not started (review 1.26 §7 item 3). |
-| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), blocked behind the integration path above per review 1.26 §7's ordering. |
+| — `TradeProposal → TradeIntent` mapping | review 1.26 §7 item 2 | **DONE, merged, pushed** (`f9bbceb`). |
+| — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → strategy-neutral Policy → capsule boundary | **DONE, merged, pushed** (`475331f`, strategy-neutral Policy Gate `c50312c` — §0f). |
+| — Static Agent bridge, unhealthy-market smoke | honest transport/schema/identity proof against the real fork | **Core wiring done, merged, pushed** (`34ddbe6` — §0g/§0h). HTTP client + response→`NoTradeDecision`→Gateway submission not yet built. |
+| — Agent Gateway event-conflict hardening | `append_event` fail-closed on same-key-different-content | **DONE, merged, pushed** (§0i, this entry). |
+| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), next per the user's current priority order. |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP. |
-| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on the integration path + C. |
+| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on C + a HEALTHY genuine Static Agent decision (blocked on fork-side strategy-runtime work, F-066). |
 
 **Nothing in `src/crumblr/agent_gateway/` or `src/crumblr/persistence/agent_gateway.py`
 is imported by anything outside itself and its own tests** — verified by

@@ -80,6 +80,25 @@ class DecisionConflictError(AgentGatewayError):
     conflict, never a silent overwrite of the first claim."""
 
 
+class EventConflictError(AgentGatewayError):
+    """The same lifecycle event (`outcome_id`, `event_type`) was already
+
+    recorded with different content — self-review finding: `append_event`'s
+    `(outcome_id, event_type)`-derived id makes a same-id-different-content
+    collision structurally possible (a bug or a race resuming evaluation
+    with different inputs), and unlike every other "register/issue/claim"
+    method in this package, it had no fail-closed conflict check at all —
+    `ON CONFLICT DO NOTHING` alone would have silently discarded the
+    second, different write. Content is compared field for field
+    (`reason_codes`, `detail`) against the already-durable row rather than
+    a stored fingerprint, so no schema change was needed. Deliberately
+    excludes `occurred_at_utc`: `RECEIVED` is re-appended on every
+    resumed-but-unsettled retry (AG-008) with that call's own fresh
+    wall-clock `now`, which is expected to differ from the original
+    attempt's, not a conflict — the timestamp-inclusive version of this
+    check was itself a self-review finding, fixed before ever committed."""
+
+
 class MalformedInputError(AgentGatewayError):
     """The caller supplied a value that could not even be validated into
 

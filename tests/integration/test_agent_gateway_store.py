@@ -36,8 +36,10 @@ from crumblr.agent_gateway.contracts import (
 from crumblr.agent_gateway.errors import (
     AgentRejectionReason,
     DecisionConflictError,
+    EventConflictError,
     UnknownFeatureSnapshotError,
 )
+from crumblr.agent_gateway.events import AgentDecisionEventType
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.persistence.agent_gateway import (
@@ -378,6 +380,88 @@ class TestConcurrentClaimIsAtomic:
 
         assert first.claimed is True
         assert second.claimed is False
+
+
+class TestEventConflictIsDetectedUnderRealPostgres:
+    """Self-review finding: `append_event`'s `(outcome_id, event_type)`-derived
+    `event_id` made a same-id-different-content collision structurally
+    possible, and unlike every other claim/register/issue method in this
+    package it had no fail-closed conflict check at all -- `ON CONFLICT DO
+    NOTHING` alone silently discarded the second, different write. Proven
+    here against a real database, not merely the in-memory store, since the
+    fix reads the already-committed row back on conflict."""
+
+    def test_identical_content_is_a_safe_idempotent_no_op(self, engine: Engine) -> None:
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        decision = no_trade(context_hash="ctx-event-conflict-1")
+        store.claim_no_trade(decision, now=FIXED_NOW)
+
+        store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.RECEIVED,
+            occurred_at_utc=FIXED_NOW,
+            reason_codes=(),
+            detail=None,
+        )
+        store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.RECEIVED,
+            occurred_at_utc=FIXED_NOW,
+            reason_codes=(),
+            detail=None,
+        )
+        events = store.events_for(decision.decision_id)
+        assert len(events) == 1
+
+    def test_a_different_occurred_at_utc_alone_is_not_a_conflict(self, engine: Engine) -> None:
+        """Code-review finding on the first version of this fix: a same-key
+        re-append with a different `occurred_at_utc` but identical
+        `reason_codes`/`detail` must stay a safe no-op -- `RECEIVED` is
+        re-appended on every resumed-but-unsettled retry with that call's
+        own fresh wall-clock `now` (AG-008). Treating that as a conflict
+        would make an interrupted claim permanently unrecoverable against a
+        real database too, not only in the in-memory store."""
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        decision = no_trade(context_hash="ctx-event-conflict-3")
+        store.claim_no_trade(decision, now=FIXED_NOW)
+
+        store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.RECEIVED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.RECEIVED,
+            occurred_at_utc=FIXED_NOW + timedelta(seconds=5),
+        )
+        events = store.events_for(decision.decision_id)
+        assert len(events) == 1
+
+    def test_different_content_for_the_same_key_raises(self, engine: Engine) -> None:
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        decision = no_trade(context_hash="ctx-event-conflict-2")
+        store.claim_no_trade(decision, now=FIXED_NOW)
+
+        store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.REJECTED,
+            occurred_at_utc=FIXED_NOW,
+            reason_codes=("first_reason",),
+            detail=None,
+        )
+        with pytest.raises(EventConflictError):
+            store.append_event(
+                outcome_id=decision.decision_id,
+                event_type=AgentDecisionEventType.REJECTED,
+                occurred_at_utc=FIXED_NOW,
+                reason_codes=("a_completely_different_reason",),
+                detail=None,
+            )
+        # The conflicting write never landed -- the original content stands.
+        events = store.events_for(decision.decision_id)
+        assert len(events) == 1
+        assert events[0].reason_codes == ("first_reason",)
 
 
 class TestRateLimitIsAtomicUnderRealConcurrency:

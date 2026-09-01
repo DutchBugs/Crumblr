@@ -54,6 +54,7 @@ from crumblr.agent_gateway.errors import (
     AuthenticationError,
     ContextConflictError,
     DecisionConflictError,
+    EventConflictError,
     ImpersonationError,
     UnknownAgentError,
 )
@@ -70,7 +71,12 @@ docstring on `AuthenticationError`: never let the response distinguish
 "unknown agent" from "wrong secret" from "suspended", since that
 distinction is exactly what would help an attacker enumerate agents."""
 
-_CONFLICT_TYPES = (DecisionConflictError, AssignmentConflictError, ContextConflictError)
+_CONFLICT_TYPES = (
+    DecisionConflictError,
+    AssignmentConflictError,
+    ContextConflictError,
+    EventConflictError,
+)
 
 
 def _outcome_to_json(result: AgentDecisionOutcomeResult) -> dict[str, Any]:

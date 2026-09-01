@@ -40,6 +40,7 @@ from crumblr.agent_gateway.errors import (
     AssignmentConflictError,
     ContextConflictError,
     DecisionConflictError,
+    EventConflictError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
 from crumblr.agent_gateway.stores import AgentDecisionEventRecord, OutcomeClaimResult
@@ -367,10 +368,11 @@ class PostgresAgentDecisionOutcomeStore:
         detail: str | None = None,
         connection: Connection | None = None,
     ) -> None:
+        event_id = _event_id_for(outcome_id=outcome_id, event_type=event_type)
         statement = (
             pg_insert(agent_decision_events)
             .values(
-                event_id=_event_id_for(outcome_id=outcome_id, event_type=event_type),
+                event_id=event_id,
                 outcome_id=outcome_id,
                 event_type=event_type.value,
                 occurred_at_utc=occurred_at_utc,
@@ -378,12 +380,51 @@ class PostgresAgentDecisionOutcomeStore:
                 detail=detail,
             )
             .on_conflict_do_nothing(index_elements=["event_id"])
+            .returning(agent_decision_events.c.event_id)
         )
         if connection is not None:
-            connection.execute(statement)
+            self._run_append(connection, statement, event_id, reason_codes, detail)
             return
         with self._engine.begin() as own_connection:
-            own_connection.execute(statement)
+            self._run_append(own_connection, statement, event_id, reason_codes, detail)
+
+    def _run_append(
+        self,
+        connection: Connection,
+        statement: Any,
+        event_id: UUID,
+        reason_codes: tuple[str, ...],
+        detail: str | None,
+    ) -> None:
+        """Checks substantive content only -- deliberately excludes
+        `occurred_at_utc`. `RECEIVED` is re-appended on every
+        resumed-but-unsettled retry (`AgentGateway.submit_trade_proposal`/
+        `submit_no_trade`) with that call's own fresh wall-clock `now`,
+        expected to differ from the original attempt's -- not a conflict,
+        the same "same logical event, different observation time"
+        reasoning `PostgresTradingAssignmentStore`/`_run_claim`'s own
+        fingerprint checks already apply by excluding their own claim
+        timestamps. (The timestamp-inclusive version of this check was
+        itself a self-review finding, fixed before ever committed.)
+        """
+        won = connection.execute(statement).first() is not None
+        if won:
+            return
+        existing = (
+            connection.execute(
+                select(
+                    agent_decision_events.c.reason_codes,
+                    agent_decision_events.c.detail,
+                ).where(agent_decision_events.c.event_id == event_id)
+            )
+            .mappings()
+            .one()
+        )
+        if (tuple(existing["reason_codes"]), existing["detail"]) != (reason_codes, detail):
+            raise EventConflictError(
+                f"event_id {event_id} (same outcome_id/event_type) was already recorded "
+                "with different content"
+            )
 
     def events_for(self, outcome_id: UUID) -> tuple[AgentDecisionEventRecord, ...]:
         statement = (
