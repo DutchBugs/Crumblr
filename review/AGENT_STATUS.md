@@ -316,6 +316,54 @@ does not eliminate the race, explicitly documented as shadow-mode-only.
 
 ---
 
+## 0e. `feedback.1.27` ACK — 2026-09-01
+
+```text
+ACK feedback.1.27
+
+current branch/worktree: agent/contracts, .claude/worktrees/agent-dev2
+current main SHA fetched: fa0a6b3
+
+DONE since 1.26:
+- AG-006 (agent_context_v1 evidence) closed
+- TradeProposal -> platform-owned TradeIntent mapping implemented, merged,
+  pushed (two self-review findings fixed: AG-010 model_version identity
+  drift, AG-011 unconstrained strategy_artifact_hash)
+- AG-012 (risk-ledger statefulness, raised by Dev 1) recorded and
+  documented with the accepted shadow-only interim mitigation
+
+NEXT: item A (this review's Dev 2 work order) — complete the shared
+no-MT5 integration path: TradeIntent -> fresh intent-time Risk ->
+deterministic Policy Gate -> DecisionCapsule boundary. Then B-J, the
+Static Agent bridge (StaticAgentContextPayload, HTTP client, response
+translation, AgentGateway submission, idempotent-replay/failure-mode
+proof, synthetic smoke test, first genuine live-shadow decision).
+
+BLOCKED: item A cannot be written yet without deciding where
+PortfolioState.account/open_positions (AccountState/PositionState) come
+from for a Gateway-driven evaluate() call. Both are documented as "live"
+reads (models.py: connected/trade_allowed/expert_allowed/server, all
+MT5-terminal-derived) and the only existing source is SimulatedBroker
+inside ReplayOrchestrator -- BrokerStateStore exists but nothing
+populates it yet (no real broker). Asked Dev 1 directly (SendMessage,
+not yet answered) with three candidate options; leaning toward running
+the Gateway-driven evaluation against the same replay's SimulatedBroker
+state per this review's own EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md Stap B
+guidance ("historische replay en live shadow data... de huidige
+in-process strategy uitsluitend als vergelijking/twin"), but holding for
+Dev 1's answer before writing code rather than guessing and reworking.
+
+NEEDS THE OTHER TRACK: the AccountState/PositionState sourcing decision
+above (Dev 1 owns risk/policies.py, risk/session.py,
+application/orchestration.py and knows what a real broker connection
+will eventually look like); and, per this review's §8/§9, a read-only
+Core persistence/query seam if the Static Agent bridge (item B) needs one
+that does not yet exist -- not yet known to be needed, flagged in advance
+per this review's instruction.
+```
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
