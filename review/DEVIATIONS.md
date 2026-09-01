@@ -11,9 +11,11 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-08-27, second pass — D-047's second gap (two separate
-live MT5 reads) closed same day per review 1.22 F-058; its first gap
-(capsule-table full scan) remains open.
+Last updated 2026-09-01 — D-049 added: ambiguous-outcome recovery (core
+critical path item 6, ADR-008) only covers open positions, not pending
+orders. D-047's second gap (two separate live MT5 reads) closed
+2026-08-27 per review 1.22 F-058; its first gap (capsule-table full
+scan) remains open.
 
 ---
 
@@ -996,6 +998,42 @@ mean anything should start here.
   metadata to rely on there), not only from a packaged deployment
 - **Gate affected:** none directly today; named as a pre-Milestone-B
   (Agent-Driven MVP) migration item, review 1.25 §6
+
+### D-049 — Ambiguous-outcome recovery only covers open positions, not pending orders
+- **Status:** deliberate, with a named remaining gap
+- **Spec:** review 1.20 §10 / review 1.21 §12 — "query durable request
+  state → reconcile broker state → determine whether the request
+  already took effect"
+- **Code:** `application/execution.py::ExecutionOrchestrator
+  ._recover_ambiguous_submission()`, `review/adr/ADR-008
+  -ambiguous-outcome-recovery.md`
+- **Original gap / current state:** a request stuck at
+  `SUBMISSION_STARTED` (the one state a crash between that commitment
+  and a real broker response could leave behind) is now recovered on
+  the next `run_once()` pass by searching `ReadOnlyMt5Gateway
+  .positions()` for a position whose `magic` matches
+  `mt5_magic_number(order_request_id)` (item 5, ADR-007). `positions()`
+  is magic-aware end to end; `pending_orders()` is not — confirmed by
+  direct search before implementation, `magic` is not tracked at any
+  layer for pending orders (`PendingOrderState`,
+  `BrokerPendingOrderSnapshot`, or the schema behind it).
+- **Remaining gap:** a submitted `EntryType.LIMIT` order sitting
+  pending, not yet filled at the moment of a crash, would not be found
+  by this recovery check — it would resolve `submitted=False` even if
+  the order genuinely reached the broker. `ApprovedOrder`'s default and
+  currently-tested shape is `EntryType.MARKET`, which becomes a
+  position immediately if ever filled, never a pending order — so this
+  gap has no effect on any path this platform can exercise today, but
+  it is real and would matter the moment `order_send` and LIMIT entries
+  both exist.
+- **Watch for:** extending pending-order tracking to carry `magic` is
+  real, separate infrastructure work comparable in size to item 5
+  itself — must be closed before LIMIT-entry execution is ever enabled,
+  not assumed to follow automatically from this item.
+- **Gate affected:** none directly today; `order_send` remains
+  unreachable through every path this item added. A prerequisite for
+  full-coverage recovery once LIMIT entries and `order_send` both
+  exist.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

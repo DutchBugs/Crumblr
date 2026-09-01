@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `9a96fe7` |
+| **`main` HEAD** | `f1bff67` (pending — see the sixty-third entry's follow-up commit for the exact SHA once item 6 merges) |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 6 (ambiguous-outcome recovery). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 7 (automatic flatten submission). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
@@ -8345,6 +8345,129 @@ Next:
   human or a session with GitHub access — no `gh` access here).
 - Core critical path item 6: ambiguous-outcome recovery — not yet
   started, no plan drafted.
+
+---
+
+## Update 2026-09-01 (sixty-third entry) — ambiguous-outcome recovery (core critical path item 6)
+
+Component: `application/execution.py`, `domain/enums.py`, `review/adr/ADR-008-ambiguous-outcome-recovery.md`, `review/DEVIATIONS.md`
+Milestone: Dev-1 core critical path item 6 (review 1.20 §10/1.21 §12, ADR-003 §6), planned via `EnterPlanMode` and approved before implementation; second item of the owner's punch list after item 5/F-067
+Status before: once an `order_request_id` was claimed, every later `run_once()` pass for it returned `None` unconditionally, regardless of how far the first pass got — a process crash between `SUBMISSION_STARTED` committing (item 3) and the run finishing left that request permanently, silently stuck, never revisited
+Status after: `ExecutionOrchestrator._recover_ambiguous_submission()` runs instead of that no-op whenever a claimed request's last durable event is `SUBMISSION_STARTED`; it searches real broker positions by the deterministic `mt5_magic_number()` (item 5, reused directly per ADR-007's own instruction) and durably records the determination as a new `AMBIGUOUS_OUTCOME_RESOLVED` event — idempotent, never resubmits, `order_send` stays completely unreachable
+
+Completed:
+- Researched before designing (via `Agent`/`Explore`, `model: opus`):
+  confirmed the exact gap by reading `_process()` directly (the
+  claim-skip branch, unconditional `return None`); confirmed
+  `SUBMISSION_STARTED` is the only event that can be "last" without a
+  real terminal outcome, so it is a complete detector on its own with
+  no time-based staleness check needed; confirmed
+  `application/reconciliation.py::reconcile()` (whole-account,
+  tri-state, 5-minute-freshness snapshot) is genuinely not reusable for
+  this per-request question, ruling out reusing it before building
+  something new; confirmed `positions()` is magic-aware end to end and
+  `pending_orders()` is not, at any layer, ruling in the open-positions
+  scope and ruling out silently claiming pending-order coverage.
+- `domain/enums.py`: new `ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED`
+  — deliberately not `RECONCILED`, which stays reserved for item 8's
+  later, different purpose (confirming a *known* fill, not determining
+  whether an *unclear* submission happened at all).
+- `application/execution.py`: the claim-skip branch now calls
+  `self._recover_ambiguous_submission(order_request_id, capsule)`
+  instead of returning `None` directly. New method: reads
+  `events_for()`, returns `None` immediately unless the last event is
+  `SUBMISSION_STARTED`; otherwise derives `mt5_magic_number()`, searches
+  `self._adapter.positions()` for a match, and appends
+  `AMBIGUOUS_OUTCOME_RESOLVED` with the full determination
+  (`magic_number`, `submitted`, match count, matching tickets) as its
+  payload. Idempotent by construction — the next pass's `events[-1]`
+  check is no longer `SUBMISSION_STARTED` once this runs once.
+- `review/adr/ADR-008-ambiguous-outcome-recovery.md` (new): records the
+  procedure and source, the `AMBIGUOUS_OUTCOME_RESOLVED`-vs-`RECONCILED`
+  naming decision, the structural (not time-based) detector rationale,
+  the pending-orders/magic scope gap, and that `order_send` remains
+  unreachable.
+- `review/DEVIATIONS.md`: new D-049, recording the pending-orders/magic
+  gap as a real, acknowledged boundary — a submitted `EntryType.LIMIT`
+  order sitting pending at crash time would not be found by this check;
+  has no effect on any path this platform can exercise today (the
+  tested/default shape is `EntryType.MARKET`), but is real.
+- `review/FEEDBACK.md`: added a completion row for item 6, same
+  structure as items 4/5 before it — no new F-number, consistent with
+  how routine core-critical-path progress has been logged this session.
+- Tests (`tests/integration/test_execution_orchestrator.py`): new
+  `fake_position()` helper and `FakeMt5.positions_get_calls`/
+  `open_positions` state. Two new `TestEndToEnd` methods:
+  `test_a_stalled_submission_is_recovered_not_reprocessed` (three
+  `run_once()` passes — `SUBMISSION_STARTED`, then
+  `AMBIGUOUS_OUTCOME_RESOLVED` with `submitted=False`, then `()` with no
+  further broker reads, asserted via a delta on the fake's call
+  counter, not an absolute count, since the normal pipeline itself
+  already reads positions once during regular portfolio observation)
+  and `test_a_matching_broker_position_resolves_as_submitted` (a fake
+  broker position carrying the exact computed magic number resolves
+  `submitted=True` — proving the positive case works even though
+  nothing in this codebase can produce it for real yet). Verified the
+  pre-existing `test_a_second_run_once_does_not_reprocess_an_already
+  _claimed_capsule` by direct read, not assumption — its capsule never
+  reaches `SUBMISSION_STARTED`, so the new recovery check falls through
+  to the same `None` it already asserted; confirmed unaffected.
+- Rebased onto `origin/main` (which had moved to Dev 2's `f1bff67`,
+  Agent Gateway event-conflict hardening) before finalizing — new
+  `core/ambiguous-recovery` branch created directly from `origin/main`,
+  carrying the uncommitted changes forward cleanly (no conflicts, since
+  Dev 2's commit only touches `agent_gateway/`); quality gate and full
+  suite re-run against the rebased base rather than trusting the
+  pre-rebase result.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 155 source files, run fresh on `core/ambiguous-recovery`
+  after the rebase onto `origin/main`.
+- `uv run pytest tests/integration/test_execution_orchestrator.py -v`
+  — 14 passed (12 pre-existing including the already-claimed-capsule
+  test, unaffected + 2 new).
+- Full suite, solo, against `crumblr_test_dev1`, run on the rebased
+  branch — **1111 passed, 3 skipped** (1101 + 2 new item-6 tests +
+  Dev 2's own new Agent Gateway tests carried in via the rebase), zero
+  failures.
+- Grepped the diff for `order_send` — every hit is prose/docstring/
+  existing-line-context (`FakeMt5.order_send_calls` assertions, ADR/
+  docstring mentions), zero new call sites. Grepped
+  `src/crumblr/agent_gateway/` for `AMBIGUOUS_OUTCOME_RESOLVED`/
+  `_recover_ambiguous_submission` — zero references, confirming
+  `IMPACT: NONE`.
+
+Problems found:
+- One self-caught test-assertion bug during writing: the first draft of
+  `test_a_stalled_submission_is_recovered_not_reprocessed` assumed
+  recovery's broker read would be the only caller of `positions_get()`
+  and asserted an absolute count of 1; the normal pipeline itself
+  already calls `positions()` once during the first successful
+  `run_once()` pass, so the counter was at 2, not 1, after the second
+  (recovery-triggering) call. Fixed by switching to delta assertions
+  (`positions_read_before_recovery` / `..._after_recovery`) rather than
+  absolute counts. Caught and fixed before any commit; no user
+  involvement.
+
+Risk impact:
+- None. `order_send` remains completely unreachable through every path
+  this item added — recovery only reads already-real broker state and
+  durably records what it found; nothing here decides to resubmit
+  anything, per ADR-003 §6.
+
+Decision:
+- Entered plan mode before implementing; plan approved before any code
+  was written.
+- Not yet committed — pending the usual per-turn approval, on
+  `core/ambiguous-recovery` (rebased onto current `origin/main`).
+
+Next:
+- Confirm hosted CI is genuinely fully green (still needs a human or a
+  session with GitHub access — no `gh` access here); unchanged from the
+  prior entry.
+- Core critical path item 7: automatic flatten submission — not yet
+  started, no plan drafted. Next item on the owner's punch list.
 
 ---
 

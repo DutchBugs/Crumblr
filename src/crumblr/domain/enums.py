@@ -382,6 +382,30 @@ class ExecutionEventType(StrEnum):
     explicit reviewer instruction. No shipped config can reach
     `SUBMISSION_GATE_PASSED` today, so this stays unreachable in every
     real deployment exactly as that event already is."""
+    AMBIGUOUS_OUTCOME_RESOLVED = "AMBIGUOUS_OUTCOME_RESOLVED"
+    """Core critical path item 6 (review 1.20 §10 / review 1.21 §12):
+
+    "query durable request state -> reconcile broker state -> determine
+    whether the request already took effect." Appended when a claimed
+    request's last durable event is `SUBMISSION_STARTED` with nothing
+    after it — the one state a process crash between that commitment and
+    a real broker response could leave behind. Payload carries the
+    complete determination: the `magic_number` searched for
+    (`domain/hashing.py::mt5_magic_number`, item 5) and whether a
+    matching broker position was found.
+
+    **Not `RECONCILED`, deliberately.** `RECONCILED` (below) stays
+    reserved for its original M5 purpose — post-fill reconciliation
+    (core critical path item 8), confirming a *known* fill against
+    expected state. This event answers a different question: whether an
+    *unclear* submission happened at all. Reusing `RECONCILED` here
+    would collide with item 8's own later need for it.
+
+    **Never a decision to resubmit.** ADR-003 §6: "an ambiguous outcome
+    resolves to reconcile, never to retry the action." This event
+    records a determination; `order_send` is not called by it, and
+    nothing here decides to attempt one — that stays exactly as
+    unreachable as it has always been."""
 
     # Reserved for M5. Never emitted by anything Phase 4 builds.
     SUBMITTED = "SUBMITTED"

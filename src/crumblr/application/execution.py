@@ -78,7 +78,7 @@ from crumblr.domain.enums import (
     SessionState,
     SupervisorVerdict,
 )
-from crumblr.domain.hashing import fingerprint
+from crumblr.domain.hashing import fingerprint, mt5_magic_number
 from crumblr.domain.models import ApprovedOrder, DecisionCapsule, MarketSnapshot, MarketTick
 from crumblr.domain.money import price_to_points
 from crumblr.domain.timeutils import UtcDatetime, utc_now
@@ -212,8 +212,10 @@ class ExecutionOrchestrator:
 
         if not claim.claimed:
             # Already claimed by an earlier pass (this worker or another).
-            # The claim's whole purpose is to make this a no-op, not a retry.
-            return None
+            # The claim's whole purpose is to make this a no-op, not a
+            # blind retry — but "no-op" must not mean "never revisit a
+            # request a crash left ambiguous". Core critical path item 6.
+            return self._recover_ambiguous_submission(order_request_id, capsule)
 
         self._append(order_request_id, ExecutionEventType.REQUEST_CLAIMED, now)
 
@@ -514,6 +516,63 @@ class ExecutionOrchestrator:
             payload=order.model_dump(mode="json"),
         )
         return ExecutionEventType.SUBMISSION_STARTED
+
+    def _recover_ambiguous_submission(
+        self, order_request_id: UUID, capsule: DecisionCapsule
+    ) -> ExecutionAttemptOutcome | None:
+        """Core critical path item 6 (review 1.20 §10 / review 1.21 §12):
+
+        "query durable request state -> reconcile broker state ->
+        determine whether the request already took effect." Runs only
+        when a claimed request's last durable event is
+        `SUBMISSION_STARTED` with nothing after it — the one state a
+        process crash between that commitment and a real broker
+        response could leave behind. Every other already-claimed state
+        is a genuine terminal outcome, not an ambiguity, and needs no
+        recovery.
+
+        Never resubmits — `order_send` is not called here, and nothing
+        in this method decides to attempt one. It only reads broker
+        state (already-reachable, read-only) and durably records what
+        it found. Idempotent: once this appends
+        `AMBIGUOUS_OUTCOME_RESOLVED`, the next pass's event-history
+        check no longer sees `SUBMISSION_STARTED` as the last event, so
+        recovery never re-runs or re-reads the broker for an
+        already-resolved request.
+
+        Scoped to open positions only, not pending orders — `magic` is
+        not tracked for pending orders at any layer today
+        (`review/DEVIATIONS.md`); a submitted `EntryType.LIMIT` order
+        sitting pending, not yet filled, would not be found by this
+        check. Named as a real, separate gap, not silently ignored.
+        """
+        events = self._events.events_for(order_request_id)
+        if not events or events[-1].event_type is not ExecutionEventType.SUBMISSION_STARTED:
+            return None
+
+        magic = mt5_magic_number(order_request_id)
+        matches = tuple(
+            position for position in self._adapter.positions() if position.magic == magic
+        )
+        submitted = len(matches) > 0
+
+        now = self._clock()
+        self._append(
+            order_request_id,
+            ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+            now,
+            payload={
+                "magic_number": magic,
+                "submitted": submitted,
+                "matching_position_count": len(matches),
+                "matching_tickets": [position.ticket for position in matches],
+            },
+        )
+        return ExecutionAttemptOutcome(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+        )
 
     def _evaluate_submission_readiness(
         self,

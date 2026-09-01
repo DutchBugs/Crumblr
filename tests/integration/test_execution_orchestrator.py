@@ -119,6 +119,31 @@ def order_check_result(**overrides: Any) -> Any:
     return SimpleNamespace(**fields)
 
 
+def fake_position(**overrides: Any) -> Any:
+    """A raw MT5 position, shaped the way `readonly.py::positions()` decodes
+
+    it — core critical path item 6, so a test can simulate a broker-side
+    match for a specific `magic` number."""
+    from types import SimpleNamespace
+
+    fields: dict[str, Any] = {
+        "ticket": 900001,
+        "symbol": BROKER_SYMBOL,
+        "type": 0,  # MT5_POSITION_TYPE_BUY
+        "volume": 0.05,
+        "price_open": 1.08500,
+        "price_current": 1.08600,
+        "sl": 1.08300,
+        "tp": 1.08900,
+        "time": int(FIXED_NOW.timestamp()),
+        "profit": 5.0,
+        "swap": 0.0,
+        "magic": 0,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 class FakeMt5:
     """A flat demo account, a stable EUR/USD spec, and an accepting
 
@@ -147,6 +172,12 @@ class FakeMt5:
         self._tick_ask = tick_ask
         self.order_check_requests: list[dict[str, Any]] = []
         self.order_send_calls = 0
+        self.positions_get_calls = 0
+        self.open_positions: tuple[Any, ...] = ()
+        """Core critical path item 6: settable so a test can simulate a
+
+        broker-side position matching a specific magic number — never
+        populated by order_send itself, which stays unreachable."""
 
     def initialize(self, *_a: Any, **_k: Any) -> bool:
         return True
@@ -208,7 +239,8 @@ class FakeMt5:
         )
 
     def positions_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...]:
-        return ()
+        self.positions_get_calls += 1
+        return self.open_positions
 
     def orders_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...]:
         return ()
@@ -513,6 +545,107 @@ class TestEndToEnd:
         assert submission_event.payload["magic_number"] == mt5_magic_number(
             outcomes[0].order_request_id
         )
+
+    def test_a_stalled_submission_is_recovered_not_reprocessed(self, engine: Engine) -> None:
+        """Core critical path item 6: a request stuck at `SUBMISSION_STARTED`
+
+        (the one state a crash between commitment and a real broker
+        response could leave behind) is recovered on the next
+        `run_once()` pass, not silently ignored forever — but recovery
+        never resubmits, and never re-reads the broker once resolved.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        capsule = sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        first = orch.run_once()
+        assert len(first) == 1
+        assert first[0].event_type == ExecutionEventType.SUBMISSION_STARTED
+        request_id = first[0].order_request_id
+        # The normal pipeline itself already reads positions once, as
+        # part of the regular portfolio-state observation — the baseline
+        # to measure recovery's own read against, not zero.
+        positions_read_before_recovery = fake.positions_get_calls
+
+        second = orch.run_once()
+        assert len(second) == 1
+        assert second[0].capsule_id == capsule.capsule_id
+        assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert fake.order_send_calls == 0
+        assert fake.positions_get_calls == positions_read_before_recovery + 1
+
+        events = ExecutionEventStore(engine).events_for(request_id)
+        assert [event.event_type for event in events][-2:] == [
+            ExecutionEventType.SUBMISSION_STARTED,
+            ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+        ]
+        recovery_event = events[-1]
+        assert recovery_event.payload is not None
+        assert recovery_event.payload["magic_number"] == mt5_magic_number(request_id)
+        assert recovery_event.payload["submitted"] is False
+        assert recovery_event.payload["matching_position_count"] == 0
+        assert recovery_event.payload["matching_tickets"] == []
+
+        # A third pass must not re-run recovery or re-read the broker —
+        # the request is already resolved.
+        positions_read_after_recovery = fake.positions_get_calls
+        third = orch.run_once()
+        assert third == ()
+        assert fake.positions_get_calls == positions_read_after_recovery
+
+    def test_a_matching_broker_position_resolves_as_submitted(self, engine: Engine) -> None:
+        """The positive case: a broker position genuinely carrying the
+
+        computed magic number makes recovery conclude `submitted=True` —
+        proving the mechanism correctly detects this too, even though
+        nothing in this codebase can produce that case for real yet
+        (`order_send` stays unreachable regardless of this test)."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        fake.open_positions = (fake_position(magic=mt5_magic_number(request_id), ticket=900042),)
+
+        second = orch.run_once()
+        assert len(second) == 1
+        assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert fake.order_send_calls == 0
+
+        recovery_event = ExecutionEventStore(engine).events_for(request_id)[-1]
+        assert recovery_event.payload is not None
+        assert recovery_event.payload["submitted"] is True
+        assert recovery_event.payload["matching_position_count"] == 1
+        assert recovery_event.payload["matching_tickets"] == [900042]
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine
