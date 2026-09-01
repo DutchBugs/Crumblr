@@ -433,6 +433,63 @@ LIVE_SHADOW proof is item I, also not built yet.
 
 ---
 
+## 0g. Static Agent bridge (feedback.1.27 §6 item B) — investigation done 2026-09-01, blocked on one design question
+
+Cloned `DutchBugs/crumblr-static-agent-host` (shallow, read-only, scratchpad
+only — not committed here) to get ground truth on its actual wire contract
+rather than build against feedback.1.27's prose description alone.
+
+Confirmed the real wire protocol: `POST /v1/trader/evaluate` (bearer auth,
+`application/json`, 1MB cap), body validated against
+`contracts/crumblr-trader-context-1.0.schema.json` ("TraderContext 1.0"),
+response shaped by `contracts/crumblr-trader-decision-1.0.schema.json`
+("TraderDecision 1.0"). Matches feedback.1.27 §5.2's warning exactly: the
+response's `decision_type: TRADE_INTENT` carries its own nested
+`trade_intent` object that must never be treated as the platform
+`TradeIntent` — untrusted proposal material only, to be translated into a
+Crumblr `TradeProposal` and submitted through the existing `AgentGateway` so
+it constructs the one authoritative platform `TradeIntent`, exactly as
+§5.2 specifies.
+
+**The finding that blocks starting to write code:** the fork's frozen
+trader (`crumblr_trader.py::CrumblrStaticTrader.evaluate`) does no
+technical analysis of its own. `TraderContext.features.observation` must
+already carry a fully-computed, already-confirmed ICT setup —
+`event_type` (`SWEEP_DETECTED`/`FVG_CONFIRMED`/`STRATEGY_TRIGGER`/etc.),
+`sweep_time_utc`, `fvg_time_utc`, `mss_time_utc`, `direction`, `session`,
+`entry_price`, `stop_loss`, `take_profit`, `rr`, `expiry_bars`,
+`pivot_level`. `static_trader.py::StaticTrader.decide` only validates and
+formats that into an order; it never detects a sweep or an FVG. Whoever
+calls this fork must therefore hand it a complete ICT setup, not merely
+market/instrument context — `agent_context_v1` (AG-006) is deliberately
+the opposite of this (no TA, `regime` always `UNKNOWN`) and is the wrong
+source for this specific bridge.
+
+Crumblr already computes exactly this kind of structure internally:
+`trading_agent/ict.py` (`ict_v1`, Dev-1/Core-owned) — `IctFeatureSnapshot`
+carries `sweep_direction`, `fvg_lower`/`fvg_upper`, `swept_level`, and its
+`_evaluate()` already produces a full entry/stop/target `TradeIntent`.
+Matches `EXTERNAL_AGENT_ARCHITECTURE_GUIDE.md`'s own framing of the
+internal strategy becoming the comparison/twin data source for the
+external hop ("Draai de huidige in-process strategy uitsluitend als
+vergelijking/twin") — the Static Agent is a deterministic plumbing-proof
+fixture (feedback.1.27's own closing framing), not a competing
+decision-maker, so feeding it Crumblr's own already-computed ICT
+structure to format/validate is consistent with what it's *for*.
+
+Asked Dev 1 directly (SendMessage, not yet answered) whether reusing
+`ict_v1`'s structural detection as the source for this bridge's
+`features.observation` block is the intended design, and — if so — the
+right way to call it read-only from outside
+`application/orchestration.py`'s usual flow, since it's their file and
+building a parallel ICT detector inside `agent_gateway/` would be exactly
+the "reinvent instead of reuse" mistake this session's coordination
+pattern exists to catch before it happens. Holding on `StaticAgentContextPayload`
+code until that answer lands, same discipline as the item-3
+`PortfolioStateProvider` question.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
