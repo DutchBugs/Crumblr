@@ -587,12 +587,80 @@ ruff/ruff format/mypy clean; full gate (unit + integration against
 `crumblr_test_dev2`) **1076 passed**, 3 skipped (pre-existing, unrelated),
 0 failed.
 
-**Not done yet:** items C (`AgentMarketContextV1` contract), E (opaque
-Gateway reason-code handling — `AgentGateway`'s own contracts/validation
-still need a look for any Core-side vocabulary assumptions), G (fork-side
-coordination — not this track's code to write), H (a full end-to-end
-strategy-neutrality proof through the Gateway/HTTP layer, not just this
-module), and A (the unhealthy-market smoke proof itself, still not started).
+**Item A — the unhealthy-market Static Agent NO_TRADE smoke proof — core
+wiring done same session.** New `agent_gateway/static_agent_transport.py`:
+`build_unhealthy_market_context()`, the outbound `TraderContext 1.0` wire
+payload for exactly the one directional case this track can honestly send
+today (`market.market_data_health != "HEALTHY"`, which
+`CrumblrStaticTrader.evaluate()` short-circuits on *before* it ever reads
+`features.observation.reason_codes` — verified by reading the actual fork
+code, not assumed). Refuses (raises) a payload that claims
+`market_data_health == "HEALTHY"` — that path reaches the closed
+Pivot-2-2 reason-code vocabulary AG-015/F-066 says this track must not
+speak. `features.observation` carries only a schema-valid, clearly-labelled
+placeholder (`NOT_EVALUATED_MARKET_DATA_UNHEALTHY`) that the fork's own
+code never reads on this path.
+
+`compute_input_identity`/`canonical_json`/`canonical_decimal` mirror the
+fork's own `crumblr_strategy_agent.identity` algorithm byte for byte — the
+fork independently recomputes and compares this value, so this has to
+match exactly, not approximately.
+
+**Verified against the real fork, not just its schema.** Cloned
+`DutchBugs/crumblr-static-agent-host` a second time with
+`-c core.autocrlf=false` (the first, default clone failed the fork's own
+`StrategyPackage.verify()` self-check with a source-hash mismatch —
+tracked down to Windows `core.autocrlf=true` converting the frozen
+`.mq5` source's line endings on checkout, a local clone artifact, not a
+real defect in the fork's repository; confirmed by re-cloning with
+autocrlf disabled). Generated a payload with this module, fed it to the
+fork's own `crumblr_strategy_agent.cli evaluate` command (pure stdlib, no
+install needed) against the real, unmodified `ICT_SB_EURUSD_PIVOT2 5.0`
+package: validated cleanly, `input_identity` matched the fork's
+independent recomputation, and it produced exactly the expected
+`decision_type: NO_TRADE`, `reason_codes: ["MARKET_DATA_STALE"]`,
+`reason_code_source: "CRUMBLR_INTEGRATION"` decision — a genuine,
+honest end-to-end proof of the schema/identity/transport chain, not
+merely a shape check against documentation. Not vendored or made a CI
+dependency — the fork stays a scratchpad-only clone, per instructions
+never importing external strategy code into Crumblr.
+
+Self-review (`/code-review medium`) before commit found two real issues,
+both fixed same pass: (1) the placeholder `features.observation` was built
+via a shallow copy of a module-level dict, sharing the same mutable
+`reason_codes` list object across every call — a caller mutating one
+payload's list would have silently corrupted every other call's; (2)
+`UtcDatetime`-typed plain dataclass fields/function parameters get none of
+Pydantic's UTC coercion for free (that only runs inside model
+construction), so a naive or non-UTC datetime was silently accepted and
+would have produced a malformed timestamp the fork rejects instead of
+failing closed at the Crumblr boundary. Fixed: `_stamp()` now explicitly
+checks `tzinfo`/`utcoffset()`; the observation dict is built fresh every
+call. Re-ran the real fork round-trip after both fixes — identical
+`input_identity` and decision output, confirming the fixes changed nothing
+about the actual wire content for a well-formed call.
+
+Evidence: 19 tests in new `tests/unit/test_static_agent_transport.py`
+(schema shape, refusals — including the two self-review regressions —
+`input_identity` determinism/format, and the canonicalization helpers
+against known-good outputs). ruff/ruff format/mypy clean; full gate (unit + integration against
+`crumblr_test_dev2`) **1098 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+**Not done yet:** an HTTP client (the fork's real transport is
+`POST /v1/trader/evaluate`, bearer-authenticated, 1MB body cap — this
+session's verification used the fork's local `cli evaluate` command
+directly, not HTTP, since Crumblr's own production code needs a real
+client with timeout/size-limit/no-redirect/fail-closed handling, item C
+from `feedback.1.27.md` §6, not yet built), the response→`NoTradeDecision`
+translation and submission through `AgentGateway` (this proof currently
+stops at "the fork validated and returned the expected decision," not yet
+"Crumblr accepted that decision as an audited outcome"), items C
+(`AgentMarketContextV1` contract), E (opaque Gateway reason-code handling
+— `AgentGateway`'s own contracts/validation still need a look for any
+Core-side vocabulary assumptions), G (fork-side coordination — not this
+track's code to write), and H (a full end-to-end strategy-neutrality proof
+through the Gateway/HTTP layer, not just this module).
 
 ---
 
