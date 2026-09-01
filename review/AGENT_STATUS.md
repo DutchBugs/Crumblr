@@ -364,6 +364,75 @@ per this review's instruction.
 
 ---
 
+## 0f. Shared no-MT5 integration path (review 1.26 §7 item 3 / feedback.1.27 §6.A) — core wiring done 2026-09-01
+
+`TradeIntent -> intent-time Risk -> deterministic Policy Gate -> DecisionCapsule`,
+stopping there — no `ApprovedOrder`, no `order_check`, no `order_send` anywhere
+reachable. New `agent_gateway/decision_path.py`, `evaluate_agent_trade_intent()`.
+
+**Design resolved by the owner-requested reviewer decision**
+(`review/INTEGRATION_NOTICES.md`, 2026-09-01, "Record reviewer decision for
+agent PortfolioState source") and confirmed with Dev 1 (cross-session message,
+who checked `application.broker_state.capture_broker_state()` and
+`application/live_decision.py` directly rather than guessing): account/position
+state is never read here. A narrow `PortfolioStateProvider` Protocol is
+injected instead — a fake is correct for this level of proof; a genuine
+LIVE_SHADOW claim needs a Core-adjacent process (sibling of
+`application/live_decision.py`, not code inside `agent_gateway/`) backing it
+with `capture_broker_state()`. Not built yet — deliberately deferred to item I,
+after the wiring itself was proven against a fake first, per the reviewer's own
+"tests may use a fake provider; the first genuine live-shadow proof must use
+the Core-owned fresh provider."
+
+AG-012's interim mitigation is implemented here, not merely documented: every
+call recovers the risk session fresh via `risk.session.recover_session()`,
+never caching a ledger across calls — proven by
+`TestAG012FreshSessionRecoveryEveryCall` (a loss gate that can only trip if the
+store's carried-forward state genuinely participated in that specific call).
+
+Self-review (`/code-review medium`) before the first commit found one real bug
+(**AG-014**, HIGH, fixed same day): the function sealed a HALT-verdict capsule
+without ever calling `kill_switch.trip()` — `policies.evaluate()`/
+`pretrade.evaluate()` only name a HALT, they never trip the switch themselves,
+which is the caller's job in every other pipeline in this codebase. Fixed with
+a `_trip()` helper mirroring `application/live_decision.py`'s own, called on
+both a Risk HALT and a Supervisor HALT.
+
+Also surfaced, not a bug in this module but a real cross-cutting gap
+(**AG-013**, MEDIUM, not blocking — see `review/AGENT_FEEDBACK.md`): real
+`agent_context_v1` evidence always carries `regime=UNKNOWN` (AG-006, by
+design), and the shipped config's `veto_on_unknown_regime=True` means a
+directional external-agent proposal can reach Risk `PASS` but can never reach
+Supervisor `APPROVE` today — only `VETO` or `NO_TRADE`. Review 1.27 §6 item I
+already allows "NO_TRADE is valid proof," so this does not block the next
+step, but it means a directional-APPROVE demonstration needs an owner decision
+first.
+
+Evidence: 16 new tests, `tests/unit/test_agent_decision_path.py` — NO_TRADE
+still seals a capsule, PASS+APPROVE, Risk BLOCK stops before the Policy Gate,
+an already-halted kill switch produces `SYSTEM_HALTED`, both HALT verdicts now
+trip the switch (AG-014 regression, 3 tests), AG-012 freshness (2 tests),
+replay/idempotency (capsule reseals identically for the same `outcome_id`, 2
+tests), fail-closed defaults (`incident_status`/`reconciliation_status`
+`UNKNOWN`, 2 tests), and the AG-013 proof. ruff/ruff format/mypy clean
+throughout. Full gate (unit + integration against `crumblr_test_dev2`) run
+twice: once before the AG-014 fix (1071 passed) and once after it, on the
+final committed state — **1074 passed**, 3 skipped (pre-existing, unrelated:
+filesystem-permission and optional-MT5-import skips), 0 failed.
+
+**Not done yet, deliberately next:** resolving `DecisionContextBundle`
+references (`market_snapshot_id`, `feature_snapshot_id`,
+`instrument_spec_version`) into the full domain objects
+(`MarketSnapshot`/`FeatureEvidence`/`InstrumentSpec`) this function takes as
+pre-resolved inputs — this function is intentionally narrow, "everything
+pre-observed," matching `risk.policies.evaluate()`'s own philosophy; the
+resolution/composition layer is separate work, naturally folding into item B
+onward (the Static Agent bridge) or item H (the first synthetic transport
+smoke test). The real Core-backed `PortfolioStateProvider` for a genuine
+LIVE_SHADOW proof is item I, also not built yet.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
