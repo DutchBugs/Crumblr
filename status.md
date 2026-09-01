@@ -14,8 +14,8 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `b68c08a` |
-| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
+| **`main` HEAD** | `(pending — see the sixty-second entry's follow-up commit for the exact SHA)` |
+| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
 | **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 6 (ambiguous-outcome recovery). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
@@ -55,7 +55,7 @@ document you have that this repository doesn't yet.
 
 | # | What | Why it needs you | Where |
 |---|---|---|---|
-| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. Hosted run 60 already confirmed **F-063** genuinely fixed (dependency install/lint/Windows/secret-scan all PASS); the live blocker was **F-065** (`ruff format --check` rewriting immutable reviewer Markdown), fixed 2026-09-01. "Local green" was never allowed to stand in for "hosted green" — a human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; `pyproject.toml`; §2 M0 acceptance below; `review/FEEDBACK.md` F-065 |
+| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. Hosted run 60 already confirmed **F-063** genuinely fixed; **F-065** (`ruff format --check`) and now **F-067** (the `pg_dump`/`psql` restore proof silently skipping instead of running — `postgresql-client` was never installed on the runner, and the dump/restore subprocess calls carried no connection parameters underneath that) are both fixed 2026-09-01. "Local green" was never allowed to stand in for "hosted green," and now — for the first time — neither is "hosted green that never actually exercised the restore test." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job (including the two new "assert not silently skipped" steps), Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; `tests/integration/test_migrations.py`; §2 M0 acceptance below; `review/FEEDBACK.md` F-067 |
 | 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
@@ -8254,6 +8254,97 @@ Next:
 - Core critical path item 6: ambiguous-outcome recovery — not yet
   started, no plan drafted. Will need `mt5_magic_number()` (this entry)
   to actually search broker state once built.
+
+---
+
+## Update 2026-09-01 (sixty-second entry) — F-067: the hosted pg_dump/psql restore proof had never actually run
+
+Component: `.github/workflows/ci.yml`, `tests/integration/test_migrations.py`, `review/FEEDBACK.md`
+Milestone: Owner-directed punch list — "CI pg_dump/psql verbinding fixen" first, then hosted-CI-green, then core critical path items 6-9
+Status before: `TestABackupCanBeRestored` passed locally (via a `docker exec crumblr-pg` fallback this workstation happens to have running) but had never been confirmed to run — not merely pass, *run* — in any hosted CI execution
+Status after: two independent, real bugs found and fixed — `postgresql-client` was never installed on the CI runner, and the dump/restore subprocess calls carried no host/port/password at all, so even installing the binaries would not have been sufficient on its own
+
+Completed:
+- Investigated before assuming: read `test_migrations.py`'s
+  `_pg_dump_command()`/`_psql_command()` in full. Confirmed the
+  fallback shape — a locally-installed binary, or `docker exec` into a
+  container named `crumblr-pg` (`CRUMBLR_PG_CONTAINER` overridable) —
+  and confirmed via `docker ps` that a real `crumblr-pg` container is
+  running on this workstation, explaining why this test has passed in
+  every local full-suite run this session without ever exercising the
+  path hosted CI would actually need. GitHub Actions' Postgres service
+  container is never reachable by that fixed name — that fallback
+  exists for local development only.
+- Confirmed via `grep` that neither subprocess call anywhere passed
+  `-h`/`-p`/`PGPASSWORD` — a second, independent bug underneath the
+  first: even with `pg_dump`/`psql` installed, a bare `pg_dump -U
+  crumblr -d ...` would attempt a local Unix-socket connection instead
+  of the mapped `localhost:55432` service container.
+- `.github/workflows/ci.yml`: new "Install PostgreSQL client tools"
+  step (`apt-get install -y postgresql-client`) ahead of the existing
+  steps in the Linux job.
+- `tests/integration/test_migrations.py`: new `PG_HOST`/`PG_PORT`/
+  `PG_USER`/`PG_PASSWORD` module constants, parsed from the same
+  `TEST_URL` everything else in the file already connects with (printed
+  and confirmed locally: `localhost:55432`, `crumblr`, password set —
+  exactly matching `ci.yml`'s Postgres service). `_pg_dump_command()`/
+  `_psql_command()` now return `(command, env)` — the local-binary path
+  gets `-h`/`-p` appended and `PGPASSWORD` layered into the subprocess
+  environment; the `docker exec` path is untouched (inside that
+  container, different, already-working trust-auth semantics apply —
+  adding host/port flags there would have pointed at the wrong place
+  entirely, the host-mapped port from inside the container that owns
+  it).
+- New CI step, "Assert the backup/restore test actually ran, not just
+  skipped" — mirrors F-056's own "assert reachable, don't silently
+  skip" pattern exactly: calls `_pg_dump_command()`/`_psql_command()`
+  directly and fails the hosted run loudly if either returns `None`,
+  so a future regression in either fix can never again pass CI by
+  quietly not running.
+- `review/FEEDBACK.md`: registered as **F-067**, same structure as
+  F-056/F-063/F-065 before it (specific defect fixed same day,
+  hosted-green confirmation held open pending an actual hosted run —
+  no `gh`/Actions access in this environment). Updated the compact
+  header's CI-result line and the "What's needed next" table's row 1
+  so neither still names F-065 as the live blocker.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 154 source files.
+- `uv run pytest tests/integration/test_migrations.py -v` — 8 passed,
+  including the restore test via the local `crumblr-pg` container,
+  confirming the `docker exec` path is genuinely unaffected by this
+  change.
+- Ran the new CI guard script directly against this workstation's own
+  environment before adding it to the workflow — confirmed it correctly
+  reports "available" via the `docker exec` fallback, the same check
+  hosted CI will run against the newly-installed local binary instead.
+- Full suite, solo, against `crumblr_test_dev1` — **1101 passed, 3
+  skipped**, zero failures — the exact same total as the last confirmed
+  run, confirming zero regressions (no test added or removed, only
+  existing test infrastructure and the CI workflow changed).
+
+Problems found:
+- F-067 itself (the actual subject of this entry) — two real, distinct
+  bugs (missing client tools, missing connection parameters), both
+  found by reading the code rather than guessing, per this project's
+  own standing practice.
+
+Risk impact:
+- None. Test infrastructure and CI-workflow changes only; no production
+  code touched. The `docker exec` path used by every local run this
+  session — including the one that just re-confirmed the full suite —
+  is provably unaffected.
+
+Decision:
+- Not yet committed — pending the usual per-turn approval, on a new
+  `core/`-prefixed branch, continuing the owner-directed punch list.
+
+Next:
+- Confirm hosted CI is genuinely fully green once pushed (still needs a
+  human or a session with GitHub access — no `gh` access here).
+- Core critical path item 6: ambiguous-outcome recovery — not yet
+  started, no plan drafted.
 
 ---
 

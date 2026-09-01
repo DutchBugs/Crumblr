@@ -70,7 +70,8 @@ TEST_URL = database_url(DEFAULT_TEST_URL)
 `pg_dump`/restore tests below target this URL's own database name inside
 `PG_CONTAINER`, so they stay isolated too, not only the schema-level
 tests."""
-_test_db_name = make_url(TEST_URL).database
+_parsed_test_url = make_url(TEST_URL)
+_test_db_name = _parsed_test_url.database
 assert _test_db_name is not None, f"{TEST_URL!r} has no database component"
 TEST_DB_NAME: str = _test_db_name
 """The database name alone, for `pg_dump`/`psql -d`, which take a bare
@@ -78,6 +79,27 @@ TEST_DB_NAME: str = _test_db_name
 name rather than a full URL — must match `TEST_URL`'s database, not the
 literal `"crumblr"` default, or the dump/restore pair would silently
 target the shared database regardless of `CRUMBLR_DATABASE_URL`."""
+
+PG_HOST: str = _parsed_test_url.host or "localhost"
+PG_PORT: int = _parsed_test_url.port or 5432
+PG_USER: str = _parsed_test_url.username or "crumblr"
+PG_PASSWORD: str = _parsed_test_url.password or ""
+"""Connection parameters for a *locally installed* `pg_dump`/`psql`,
+
+parsed from the same `TEST_URL` everything else in this file already
+connects with. Found to be genuinely missing while investigating why
+this file's dump/restore test could pass locally (this workstation's
+`crumblr-pg` dev container, where Postgres trusts local connections
+without a password) while never actually running in hosted CI: with
+neither a local `pg_dump` binary nor a container named `crumblr-pg`
+reachable there, `_pg_dump_command()`/`_psql_command()` returned `None`
+and the test silently skipped — F-023's own "a restore nobody has run
+is a plan, not a capability" requirement was never actually being
+proven in the one place that matters. Even once `pg_dump`/`psql` are
+installed on the CI runner (`.github/workflows/ci.yml`), a bare
+`pg_dump -U crumblr -d ...` with no host/port/password would still try
+a local Unix-socket connection instead of the mapped `localhost:55432`
+service container — this is the missing other half."""
 
 
 @pytest.fixture
@@ -190,11 +212,36 @@ class TestTheRuntimeUsesTheMigrations:
             runtime.dispose()
 
 
-def _pg_dump_command() -> list[str] | None:
-    """Where to find `pg_dump`: on this host, or inside the dev container."""
+def _local_connection_args() -> list[str]:
+    """`-h`/`-p` for a locally-installed client — never for `docker exec`,
+
+    where Postgres listens on its own internal port and these would
+    point at the wrong place entirely (the host-mapped port, from
+    inside the container that owns it)."""
+    return ["-h", PG_HOST, "-p", str(PG_PORT)]
+
+
+def _local_connection_env() -> dict[str, str]:
+    """`PGPASSWORD` for a locally-installed client, layered onto the
+
+    current environment — `docker exec` needs none of this, since the
+    dev container's Postgres trusts local connections without one."""
+    return {**os.environ, "PGPASSWORD": PG_PASSWORD}
+
+
+def _pg_dump_command() -> tuple[list[str], dict[str, str] | None] | None:
+    """Where to find `pg_dump`, and what to run it with.
+
+    On this host: a real TCP connection to `TEST_URL`'s own host/port —
+    the only path that can ever be exercised in hosted CI, where the
+    Postgres service container is reachable that way and no other. Inside
+    the dev container (`CRUMBLR_PG_CONTAINER`): no connection params, the
+    command runs where Postgres already trusts local connections;
+    `env=None` leaves the caller's own environment untouched.
+    """
     local = shutil.which("pg_dump")
     if local:
-        return [local]
+        return [local, *_local_connection_args()], _local_connection_env()
     if shutil.which("docker") is None:
         return None
     probe = subprocess.run(
@@ -205,13 +252,13 @@ def _pg_dump_command() -> list[str] | None:
     )
     if probe.returncode != 0:
         return None
-    return ["docker", "exec", "-i", PG_CONTAINER, "pg_dump"]
+    return ["docker", "exec", "-i", PG_CONTAINER, "pg_dump"], None
 
 
-def _psql_command() -> list[str] | None:
+def _psql_command() -> tuple[list[str], dict[str, str] | None] | None:
     local = shutil.which("psql")
     if local:
-        return [local]
+        return [local, *_local_connection_args()], _local_connection_env()
     if shutil.which("docker") is None:
         return None
     probe = subprocess.run(
@@ -222,7 +269,7 @@ def _psql_command() -> list[str] | None:
     )
     if probe.returncode != 0:
         return None
-    return ["docker", "exec", "-i", PG_CONTAINER, "psql"]
+    return ["docker", "exec", "-i", PG_CONTAINER, "psql"], None
 
 
 class TestABackupCanBeRestored:
@@ -262,23 +309,26 @@ class TestABackupCanBeRestored:
     def test_a_dump_restores_into_a_database_the_application_can_read(
         self, empty_database: Engine, tmp_path: Path
     ) -> None:
-        dump_command = _pg_dump_command()
-        restore_command = _psql_command()
-        if dump_command is None or restore_command is None:
+        dump_found = _pg_dump_command()
+        restore_found = _psql_command()
+        if dump_found is None or restore_found is None:
             pytest.skip(
                 "pg_dump/psql not available on this host and not reachable in the "
                 f"{PG_CONTAINER!r} container; install the PostgreSQL client tools or "
                 "set CRUMBLR_PG_CONTAINER"
             )
+        dump_command, dump_env = dump_found
+        restore_command, restore_env = restore_found
 
         before_fingerprint, before_counts = self._run_and_capture(empty_database, tmp_path)
         assert before_counts["bars"] > 0, "nothing was written; the test proves nothing"
 
         dump = subprocess.run(
-            [*dump_command, "-U", "crumblr", "-d", TEST_DB_NAME, "--clean", "--if-exists"],
+            [*dump_command, "-U", PG_USER, "-d", TEST_DB_NAME, "--clean", "--if-exists"],
             capture_output=True,
             text=True,
             check=False,
+            env=dump_env,
         )
         assert dump.returncode == 0, f"pg_dump failed:\n{dump.stderr[-2000:]}"
         assert dump.stdout, "pg_dump produced an empty backup"
@@ -288,11 +338,12 @@ class TestABackupCanBeRestored:
         assert current_revision(empty_database) is None
 
         restore = subprocess.run(
-            [*restore_command, "-U", "crumblr", "-d", TEST_DB_NAME, "-v", "ON_ERROR_STOP=1"],
+            [*restore_command, "-U", PG_USER, "-d", TEST_DB_NAME, "-v", "ON_ERROR_STOP=1"],
             input=dump.stdout,
             capture_output=True,
             text=True,
             check=False,
+            env=restore_env,
         )
         assert restore.returncode == 0, f"restore failed:\n{restore.stderr[-2000:]}"
 

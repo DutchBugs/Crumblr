@@ -38,6 +38,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install PostgreSQL client tools
+        # tests/integration/test_migrations.py::TestABackupCanBeRestored
+        # needs a real pg_dump/psql (review 1.6 F-023 — a restore nobody has
+        # run is a plan, not a capability). Without this, the test silently
+        # skipped on every hosted run: no local binary and no `crumblr-pg`
+        # dev container (that fallback exists for local development only,
+        # never reachable from a hosted runner) — the restore proof was
+        # never actually exercised in CI.
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -69,6 +79,20 @@ jobs:
           if not is_available(database_url()):
               sys.exit('database unreachable: the persistence suite was skipped, not passed')
           print('database reachable; persistence suite ran')
+          "
+
+      - name: Assert the backup/restore test actually ran, not just skipped
+        # Same failure mode, one level down: the database can be reachable
+        # while pg_dump/psql still are not, and that test skips (not fails)
+        # rather than proving F-023's restore claim. Green CI must mean this
+        # genuinely ran, not merely that nothing objected to it not running.
+        run: |
+          uv run python -c "
+          import sys
+          from tests.integration.test_migrations import _pg_dump_command, _psql_command
+          if _pg_dump_command() is None or _psql_command() is None:
+              sys.exit('pg_dump/psql unavailable: the backup/restore test was skipped, not passed')
+          print('pg_dump/psql available; backup/restore test ran')
           "
 
   gateway:
