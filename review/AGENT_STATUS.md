@@ -297,6 +297,23 @@ Policy Gate, and `DecisionCapsule` sealing (the "shared no-MT5 integration
 path") — this slice only proves the mapping itself exists and is correct;
 it does not yet call into any Dev-1-owned execution/risk module.
 
+**Before starting that wiring**, asked Dev 1 directly whether there were
+gotchas calling `risk.policies.evaluate()`/sealing a capsule from outside
+`application/orchestration.py`'s usual flow. There was a real one — see
+**AG-012** in `review/AGENT_FEEDBACK.md`: `PortfolioState.ledger` is
+stateful and per-process, held in memory by `LiveDecisionOrchestrator`
+across cycles rather than reloaded before every `evaluate()` call. A
+Gateway-driven evaluation running as its own independent process would
+hold its own independent copy of that same ledger — a lost-update race on
+one shared daily-loss/drawdown budget between an internal decision and an
+external-agent proposal, invisible to either pipeline on its own. Not a
+safety gap today (`order_send` unreachable regardless), but a real
+architecture question for before `feedback.2.0` could treat agent-driven
+submission as real. Adopted Dev 1's suggested interim approach for this
+slice: `risk.session.recover_session()` freshly, immediately before every
+Gateway-driven `evaluate()` call, never cached in-process — narrows but
+does not eliminate the race, explicitly documented as shadow-mode-only.
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
