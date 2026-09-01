@@ -488,6 +488,44 @@ pattern exists to catch before it happens. Holding on `StaticAgentContextPayload
 code until that answer lands, same discipline as the item-3
 `PortfolioStateProvider` question.
 
+**Update, same session: Dev 1 confirmed** `ict.py::evaluate()` (public,
+standalone, no MT5/DB coupling) is the right call, and flagged that
+`IctFeatureSnapshot`'s fields don't line up 1:1 with what the fork wants
+(no per-event timestamps, no `session`/`rr`/`expiry_bars`/`pivot_level` by
+those names). Verified that independently by reading `ict.py` directly —
+confirmed, and tractable (`rr`/`expiry_bars` are honestly derivable from
+the intent/config, `pivot_level` maps from `swept_level`, the killzone→session
+mapping is total for every reachable case since `TRADING_KILLZONES` only
+ever permits `LONDON_OPEN`/`NEW_YORK_AM`).
+
+**Then found something bigger while reading the actual translation code
+(`crumblr_trader.py::CrumblrStaticTrader.evaluate()`) and the strategy
+package's `reason_codes.json` — see AG-015, `review/AGENT_FEEDBACK.md`.**
+`features.observation.reason_codes` is validated against a *closed,
+fork-specific vocabulary* encoding Jari's particular "ICT Silver Bullet /
+Pivot 2.2" state machine (`OUTSIDE_SESSION`, `WAITING_FOR_MSS`,
+`PIVOT_2_2_CONFIRMED`, `STATIC_STRATEGY_TRIGGER_VALID`, …) — not a generic
+ICT vocabulary, and not something `ict_v1`'s own reason codes
+(`market_closed`, `no_liquidity_sweep`, `already_positioned`, …) map onto
+honestly beyond a couple of coincidental overlaps. This check runs
+*unconditionally*, before the NO_TRADE/STRATEGY_TRIGGER branch, so there is
+no way to sidestep it by only ever sending NO_TRADE. This is a real
+architectural question, not a naming gap — see AG-015 for the three
+options identified (Crumblr genuinely implements enough of the Pivot-2-2
+methodology to produce the real vocabulary; the fork gains a second,
+Crumblr-facing reason-code set; or the first bridge proves only the
+`market_data_health != HEALTHY` path, which `CrumblrStaticTrader.evaluate()`
+short-circuits on *before* ever touching `reason_codes` at all — a
+genuinely honest, buildable proof of the transport/auth/schema/idempotency
+chain that does not require resolving the vocabulary question first).
+
+Not yet raised with Dev 1 as of this entry (about to send). Per
+`feedback.1.27` §12's own return-to-reviewer criteria ("the team cannot
+resolve the context-materialization... seam without an architectural
+decision") this may need to go to the reviewer if Dev 1 doesn't already
+know the answer — not escalating unilaterally before giving Dev 1 the
+chance to react first.
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
