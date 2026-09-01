@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `7566d12` |
+| **`main` HEAD** | `(pending — see the fifty-eighth entry's follow-up commit for the exact SHA)` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened. NEXT: confirm hosted CI fully green (needs a human), then core critical path items 2-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` durable pre-side-effect emission built (core critical path item 3). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 4 (execution-event same-id/different-content conflict hardening). BLOCKED: hosted CI confirmation |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed, `TradeProposal → TradeIntent` mapping merged, AG-012 tracked. NEXT: shared no-MT5 Risk → Policy → capsule path, then the Static Agent bridge (review 1.27 §6 items A–J) — `StaticAgentContextPayload`, HTTP client, response translation, idempotent replay, failure-mode proofs, synthetic then live-shadow smoke tests. BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
@@ -61,7 +61,7 @@ document you have that this repository doesn't yet.
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
 | 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). **No longer blocked** | Review 1.26 §5 resolved AG-006 directly: no standalone cross-strategy `compute_features()` needed after all — Dev 2 adds one platform-owned, deliberately-named evidence shape (`agent_context_v1`) reusing the existing generic `FeatureEvidence` persistence layer, entirely within Dev 2's own ownership. Dev 2 confirmed starting on this 2026-09-01. Full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; `feedback.1.26.md` §5/§7; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
-| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 self-referential bug found and fixed same day); six items remain | `SubmissionGate` is real, tested, and now actually called by `ExecutionOrchestrator` after a broker-accepted `order_check`. Still open: `SUBMISSION_STARTED` emission at the correct pre-side-effect point, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification, execution-event content-conflict hardening | `review/adr/ADR-006-submission-gate.md`; §13 fifty-second entry; `feedback.1.24.md` §12; `feedback.1.25.md` §4/§12 |
+| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 fixed same day); `SUBMISSION_STARTED` durable pre-side-effect emission **done 2026-09-01**; five items remain | `SubmissionGate` is real, called by `ExecutionOrchestrator`, and now durably records its own commitment point when it opens. Still open: execution-event same-id/different-content conflict hardening, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification | `review/adr/ADR-006-submission-gate.md`; §13 fifty-eighth entry; `feedback.1.26.md` §6; `feedback.1.27.md` §8 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
 reviewer artifact for documentation wording, one extra unit test, normal
@@ -7860,6 +7860,125 @@ Next:
   fifty-second/fifty-fifth entries).
 - Resume core critical path item 2, `SUBMISSION_STARTED` timing at the
   correct pre-side-effect point — not yet started, no plan drafted.
+
+---
+
+## Update 2026-09-01 (fifty-eighth entry) — SUBMISSION_STARTED durable pre-side-effect emission (core critical path item 3)
+
+Component: `domain/enums.py`, `application/execution.py`, `persistence/execution.py`, `review/adr/ADR-006-submission-gate.md`, `review/FEEDBACK.md`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1 core critical path item 3 (review 1.26 §6 / review 1.27 §8), planned via `EnterPlanMode` and approved before implementation
+Status before: `SubmissionGate` real and wired (items 1-2); `ExecutionEventType.SUBMISSION_STARTED` a bare, undocumented member inside a "Reserved for M5, never emitted" block; F-060's `orders_in_last_hour` counter a real query, honestly returning `0`
+Status after: `SUBMISSION_STARTED` is real — appended durably, as the platform's commitment point, the moment `SubmissionGate` opens. `order_send` still not called anywhere — the explicit scope decision this slice makes and documents
+
+Completed:
+- Researched thoroughly before designing (`OrderCheckMt5Gateway
+  .order_send`'s exact behaviour — confirmed a pure unconditional raise
+  touching neither `order` nor MT5; every existing reference to
+  `SUBMISSION_STARTED`; the established "unknown-state recovery"
+  pattern shape across `risk/session.py`/`application/decision_window.py`
+  /`risk/kill_switch.py`; ADR-001/003/005/006's relevant sections; every
+  existing `order_send`-never-called assertion in the test suite) via a
+  dedicated research pass before writing the plan.
+- **The scope decision, made explicit and documented, not just
+  implied**: two ways existed to build this — actually call
+  `order_send` right after the event (letting its guaranteed raise
+  propagate) or append the event as the new terminal outcome and stop,
+  leaving the broker-call pairing to the explicitly later idempotence/
+  ambiguous-outcome-recovery items. Took the second, narrower option —
+  reasoning recorded in `review/adr/ADR-006-submission-gate.md` §6 and
+  in the plan file: wiring the literal `order_send` call site is a
+  materially larger change than "record a commitment," and risks
+  reading as exactly what both reviews warn against ("do not add a real
+  `order_send` call merely because items 1-5 exist").
+- `domain/enums.py`: `SUBMISSION_STARTED` moved out of the "Reserved for
+  M5" block, given a real docstring (what it means, that it fires only
+  when the gate opens, that emitting it is explicitly not calling
+  `order_send`). Fixed two now-stale spots the research surfaced:
+  `SUBMISSION_GATE_PASSED`'s docstring no longer claims
+  `SUBMISSION_STARTED` is "reserved for" the eventual `order_send` step;
+  the "Reserved for M5" comment above the remaining five members
+  corrected to no longer include it.
+- `application/execution.py`: `_process()` now branches on the gate's
+  outcome — `BLOCKED` returns exactly as before; `PASSED` calls new
+  method `_start_submission(order_request_id, order, final_now)`,
+  which appends `SUBMISSION_STARTED` with the complete serialized
+  `ApprovedOrder` as payload (F-059's "complete content, not a
+  hand-picked subset" discipline) and becomes the reported outcome.
+  `order` was already in scope from `order_check`'s own construction —
+  no new read, no new object built.
+- `persistence/execution.py`: fixed `count_events_since`'s docstring,
+  which claimed "Phase 4 never emits `SUBMISSION_STARTED`" — no longer
+  literally true. Corrected to state the real invariant: the counter
+  stays `0` in every real deployment because no shipped config can open
+  `SubmissionGate`, not because the event type is unemittable.
+- `review/adr/ADR-006-submission-gate.md`: new §6 addendum recording the
+  decision and its reasoning in full; §4 Consequences updated to mark
+  this item done rather than future work.
+- Test: renamed/extended
+  `test_a_fully_approved_config_reaches_submission_gate_passed` →
+  `test_a_fully_approved_config_reaches_submission_started`. Now asserts
+  the outcome is `SUBMISSION_STARTED`, the durable event log reads
+  `REQUEST_CLAIMED → FINAL_RISK_PASSED → ORDER_CHECKED →
+  SUBMISSION_GATE_PASSED → SUBMISSION_STARTED` (5 events, was 4), the
+  new event's payload carries the real `ApprovedOrder` content
+  (`order_request_id`, `broker_symbol`, `side`, `volume` checked
+  directly — caught and fixed my own first-draft assumption that the
+  test fixture's intent side was `SELL`; it's `BUY`, verified against
+  `tests/conftest.py::make_intent`'s actual default before asserting
+  rather than guessing), and — the hard assertion this test exists for
+  — `order_send_calls == 0` still holds, even from the most permissive
+  config this platform can construct.
+- `review/INTEGRATION_NOTICES.md`: new entry — `domain/enums.py` is
+  shared-contract territory again, and this specifically makes real the
+  exact marker Dev 2's `agent_gateway/contracts.py::ProposalWithdrawal`
+  already names by name as the withdrawal-cutoff boundary (ADR-005).
+  Confirmed via grep: no `agent_gateway/` code depends on the event
+  having actually fired yet, only a docstring names it.
+- `review/FEEDBACK.md`: F-049's row updated — no longer "still not
+  reachable," now records what actually happens when the gate opens.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 150 source files.
+- `uv run pytest tests/integration/test_execution_orchestrator.py -v`
+  — 12 passed.
+- Grepped the whole repo for `SUBMISSION_GATE_PASSED` and `order_send`
+  after implementing — confirmed no stray outcome-level assertions were
+  missed elsewhere, and every `order_send` mention in the diff is
+  prose/docstring, zero new call sites.
+- Full suite, solo, against `crumblr_test_dev1` — **1058 passed, 3
+  skipped**, zero failures — the exact same total as the last confirmed
+  run, confirming one test renamed, none added or removed, no
+  regressions.
+
+Problems found:
+- None in the shipped result. My own first-draft test payload assertion
+  guessed the wrong intent side (`SELL` instead of the fixture's actual
+  `BUY`) — caught by checking `tests/conftest.py::make_intent` directly
+  before finalizing rather than after a test failure. Recorded here per
+  this project's own "report evidence honestly" discipline, not because
+  it reached committed code.
+
+Risk impact:
+- None. `SUBMISSION_STARTED` remains unreachable in every shipped
+  config today, same as `SUBMISSION_GATE_PASSED` already was.
+  `order_send` is not called anywhere in this diff.
+
+Decision:
+- Entered plan mode before implementing (the task warranted it — a real
+  architectural scope decision existed, not an obvious single path).
+  Plan approved before any code was written.
+- Not yet committed — pending the usual per-turn approval, on a new
+  `core/submission-started`-prefixed branch.
+
+Next:
+- Rebase onto `origin/main` if it has moved, re-verify, commit, push,
+  fill in this entry's `main` HEAD via a follow-up commit.
+- Core critical path item 4: execution-event same-id/different-content
+  conflict hardening — not yet started, no plan drafted. Likely where
+  `ExecutionEventStore.append()`'s missing inserted-vs-duplicate return
+  value (flagged during this slice's research, ADR-003 §3) actually
+  needs closing.
 
 ---
 

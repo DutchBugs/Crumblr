@@ -351,18 +351,39 @@ class ExecutionEventType(StrEnum):
     immediately after a successful `order_check` — whether real submission
     would currently be authorized. Read-only and durable, same as
     `FINAL_RISK_PASSED`: recording that the gate opened is not itself an
-    attempt to submit anything, and nothing in this codebase acts on this
-    event to reach `order_send` — that stays a separate, later step
-    (`SUBMISSION_STARTED`, below, reserved for it)."""
+    attempt to submit anything. When it opens, `SUBMISSION_STARTED` (below)
+    follows as the platform's durable commitment to attempt one broker
+    submission — `order_send` itself is still not called; see that event's
+    own docstring."""
     SUBMISSION_GATE_BLOCKED = "SUBMISSION_GATE_BLOCKED"
     """Carries the gate's `reason_codes` and the complete serialized
 
     `SubmissionGateContext` in its payload — every shipped config today
     closes at least three of the nine legs, so this is the expected,
     honest outcome until an owner explicitly approves submission."""
+    SUBMISSION_STARTED = "SUBMISSION_STARTED"
+    """Core critical path item 3 (review 1.26 §6 / review 1.27 §8): the
+
+    durable pre-side-effect commitment point — ADR-003 §6's "write to the
+    journal before acting, acknowledge after" applied to the one action
+    this platform has never yet taken. Appended once, immediately after
+    `SUBMISSION_GATE_PASSED`, carrying the complete serialized
+    `ApprovedOrder` that was committed to. Reserved for exactly this
+    purpose since review 1.15 §14 first named it; ADR-005 already makes it
+    a cross-track contract — Dev 2's `agent_gateway/contracts.py
+    ::ProposalWithdrawal` treats this event as the withdrawal-cutoff
+    boundary (honoured strictly before it, refused at or after).
+
+    **Emitting this event is not calling `order_send`.**
+    `OrderCheckMt5Gateway.order_send` stays unconditionally disabled
+    regardless of this event's existence — wiring the caller
+    (this event) and wiring `order_send`'s real capability are separate,
+    later items (submission idempotence, ambiguous-outcome recovery), by
+    explicit reviewer instruction. No shipped config can reach
+    `SUBMISSION_GATE_PASSED` today, so this stays unreachable in every
+    real deployment exactly as that event already is."""
 
     # Reserved for M5. Never emitted by anything Phase 4 builds.
-    SUBMISSION_STARTED = "SUBMISSION_STARTED"
     SUBMITTED = "SUBMITTED"
     BROKER_ACK = "BROKER_ACK"
     FILLED = "FILLED"

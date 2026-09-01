@@ -472,12 +472,48 @@ class ExecutionOrchestrator:
             tick=tick,
             final_now=final_now,
         )
+        if gate_event_type is not ExecutionEventType.SUBMISSION_GATE_PASSED:
+            return ExecutionAttemptOutcome(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                event_type=gate_event_type,
+                reason_codes=gate_reason_codes,
+            )
+
+        # Core critical path item 3 (review 1.26 §6 / review 1.27 §8):
+        # the gate opened, so the platform now durably commits to
+        # attempting one broker submission. `order_send` is still not
+        # called — see `_start_submission`'s own docstring.
+        submission_event_type = self._start_submission(order_request_id, order, final_now)
         return ExecutionAttemptOutcome(
             order_request_id=order_request_id,
             capsule_id=capsule.capsule_id,
-            event_type=gate_event_type,
-            reason_codes=gate_reason_codes,
+            event_type=submission_event_type,
         )
+
+    def _start_submission(
+        self, order_request_id: UUID, order: ApprovedOrder, now: UtcDatetime
+    ) -> ExecutionEventType:
+        """Core critical path item 3 (review 1.26 §6 / review 1.27 §8):
+
+        `SUBMISSION_STARTED`, the durable pre-side-effect commitment
+        point — ADR-003 §6's "write to the journal before acting,
+        acknowledge after" rule, applied to the one action this platform
+        has never yet taken. Deliberately does not call `order_send`:
+        both reviews' explicit ordering rule is that completing this
+        item is not authorization to add a real `order_send` call.
+        `OrderCheckMt5Gateway.order_send` stays unconditionally disabled
+        regardless — building this caller and building `order_send`'s
+        real capability are separate, later items (submission
+        idempotence, ambiguous-outcome recovery).
+        """
+        self._append(
+            order_request_id,
+            ExecutionEventType.SUBMISSION_STARTED,
+            now,
+            payload=order.model_dump(mode="json"),
+        )
+        return ExecutionEventType.SUBMISSION_STARTED
 
     def _evaluate_submission_readiness(
         self,

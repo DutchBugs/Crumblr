@@ -105,13 +105,13 @@ gate does not quietly open in production today.
   finding's own text is explicit that this alone is not M5/submission
   readiness; `order_send` remains a separate, still-impossible act.
 - A future `SubmissionOrchestrator` (not built here) is what will
-  eventually call `evaluate_submission_gate()` before whatever future,
-  gated `order_send` call exists. Building that orchestrator, wiring
-  `SUBMISSION_STARTED` emission at the correct pre-side-effect point,
-  `order_send` idempotence, ambiguous-outcome recovery, automatic flatten
-  submission, post-fill reconciliation, and broker-side SL verification
-  are each their own separate, later item (review 1.24 §12.B / review
-  1.25 §4).
+  eventually call `order_send` once it exists. `SUBMISSION_STARTED`
+  emission at the correct pre-side-effect point is now built (§6,
+  2026-09-01) — `order_send` idempotence, ambiguous-outcome recovery,
+  automatic flatten submission, post-fill reconciliation, and
+  broker-side SL verification remain their own separate, later items
+  (review 1.24 §12.B / review 1.25 §4 / review 1.26 §6 / review 1.27
+  §8).
 - Setting `submission_enabled`/`feedback_2_0_approved`/
   `approved_config_version` to anything but their closed defaults is an
   owner decision, never an engineering one — this ADR does not authorize
@@ -158,3 +158,36 @@ Not a live-trading risk either way: `order_send` stays structurally
 unreachable regardless of this leg. But a CRITICAL-severity gate whose
 "owner approves" leg could never actually be satisfied is a real defect
 in what F-049 delivered, logged as `review/FEEDBACK.md` F-062.
+
+---
+
+## 6. Addendum 2026-09-01 — `SUBMISSION_STARTED` emission (core critical path item 3)
+
+`ExecutionOrchestrator._process()` now takes one further step when
+`SUBMISSION_GATE_PASSED`: it appends `ExecutionEventType
+.SUBMISSION_STARTED` (`application/execution.py::_start_submission`),
+carrying the complete serialized `ApprovedOrder` as its payload, and
+reports it as the run's outcome instead of `SUBMISSION_GATE_PASSED`.
+This is ADR-003 §6's "write to the journal before acting, acknowledge
+after" rule, applied for the first time on the execution path — the
+durable record that the platform has committed to attempting one broker
+submission.
+
+**This still does not make `order_send` reachable.** Reviews 1.26 §6
+and 1.27 §8 both instruct building this event now while explicitly
+warning that doing so is not authorization to add a real `order_send`
+call. `_start_submission` does not call `order_send` — it appends the
+event and returns.  `OrderCheckMt5Gateway.order_send` stays the same
+unconditional raise it has always been. The genuinely "immediately
+before the broker call" pairing this event's own semantics call for
+(review 1.23) only becomes literally true once `order_send` itself is
+being built — that remains a separate, later item alongside submission
+idempotence and ambiguous-outcome recovery, deliberately not this one.
+
+Cross-track note: `SUBMISSION_STARTED` is also a contract Dev 2's
+`agent_gateway/contracts.py::ProposalWithdrawal` already names as the
+withdrawal-cutoff boundary (ADR-005). This event was reserved-but-inert
+when that contract was written; it is real (though still unreachable in
+any shipped config — the same three closed approval fields still gate
+`SUBMISSION_GATE_PASSED`) as of this addendum. Logged in
+`review/INTEGRATION_NOTICES.md`.

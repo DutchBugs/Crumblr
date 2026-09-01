@@ -436,13 +436,21 @@ class TestEndToEnd:
         assert final_risk_event.payload["final_risk_decision"]["verdict"] == "PASS"
         assert final_risk_event.payload["order_fingerprint"]
 
-    def test_a_fully_approved_config_reaches_submission_gate_passed(self, engine: Engine) -> None:
-        """The gate genuinely can open: a test-only config with all three
+    def test_a_fully_approved_config_reaches_submission_started(self, engine: Engine) -> None:
+        """The gate genuinely can open, and opening it now durably commits
 
-        approval fields set (F-062 makes this achievable at all — see
-        `tests/unit/test_config.py::test_approving_this_exact_version_does_not_change_it`).
+        the platform to attempting one broker submission — core critical
+        path item 3 (review 1.26 §6 / review 1.27 §8), one step further
+        than `SUBMISSION_GATE_PASSED` alone. A test-only config with all
+        three approval fields set (F-062 makes this achievable at all —
+        see `tests/unit/test_config.py::test_approving_this_exact_version_does_not_change_it`).
         Never a shipped default; every real config leaves this BLOCKED, as
         `test_a_clean_eligible_capsule_reaches_order_checked` proves above.
+
+        The hard assertion this test exists for: even from the most
+        permissive config this platform can construct, `order_send` is
+        still never called — `_start_submission` appends an event and
+        stops, it does not call the adapter.
         """
         the_spec = spec()
         InstrumentSpecStore(engine).record(the_spec)
@@ -466,11 +474,20 @@ class TestEndToEnd:
 
         assert len(outcomes) == 1
         assert outcomes[0].capsule_id == capsule.capsule_id
-        assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_GATE_PASSED
+        assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_STARTED
         assert outcomes[0].reason_codes == ()
         assert fake.order_send_calls == 0
 
         events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        event_types = [event.event_type for event in events]
+        assert event_types == [
+            ExecutionEventType.REQUEST_CLAIMED,
+            ExecutionEventType.FINAL_RISK_PASSED,
+            ExecutionEventType.ORDER_CHECKED,
+            ExecutionEventType.SUBMISSION_GATE_PASSED,
+            ExecutionEventType.SUBMISSION_STARTED,
+        ]
+
         gate_event = next(
             e for e in events if e.event_type == ExecutionEventType.SUBMISSION_GATE_PASSED
         )
@@ -479,6 +496,15 @@ class TestEndToEnd:
         assert gate_event.payload["feedback_2_0_approved"] is True
         assert gate_event.payload["approved_risk_config_version"] == version
         assert gate_event.payload["risk_config_version"] == version
+
+        submission_event = next(
+            e for e in events if e.event_type == ExecutionEventType.SUBMISSION_STARTED
+        )
+        assert submission_event.payload is not None
+        assert submission_event.payload["order_request_id"] == str(outcomes[0].order_request_id)
+        assert submission_event.payload["broker_symbol"] == BROKER_SYMBOL
+        assert submission_event.payload["side"] == "BUY"
+        assert Decimal(submission_event.payload["volume"]) > 0
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine

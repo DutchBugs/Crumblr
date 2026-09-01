@@ -225,9 +225,12 @@ class ExecutionEventStore:
         `ExecutionEventType.SUBMISSION_STARTED` events — "the platform
         committed to attempting one broker submission" — not a count of
         claimed `execution_requests`, which includes every refusal outcome
-        along the way. Phase 4 never emits `SUBMISSION_STARTED`, so calling
-        this with that event type today returns an honest `0`, not a
-        placeholder.
+        along the way. `SUBMISSION_STARTED` is real and emitted now (core
+        critical path item 3), but only when `SubmissionGate` opens, and no
+        shipped config can open it — every three of its owner-approval
+        fields default closed. Calling this with that event type therefore
+        stays an honest `0` in every real deployment, not because the event
+        type is unemittable, but because nothing shipped can reach it.
         """
         from sqlalchemy import func
 

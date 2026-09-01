@@ -322,3 +322,36 @@ Relevant commit: this documentation commit; implements the owner-requested
 reviewer clarification following feedback.1.27, with no `order_send`
 authorization.
 ```
+
+---
+
+```text
+2026-09-01 — DEV1
+Changed: domain/enums.py::ExecutionEventType.SUBMISSION_STARTED moved
+out of the "Reserved for M5" block and is now real — emitted by
+application/execution.py::_start_submission() (new), called from
+_process() only when SUBMISSION_GATE_PASSED, carrying the complete
+serialized ApprovedOrder as its payload and becoming the run's reported
+outcome (core critical path item 3, review 1.26 SS6 / review 1.27 SS8).
+Impact: this is exactly the marker agent_gateway/contracts.py
+::ProposalWithdrawal already names by name as the withdrawal-cutoff
+boundary (ADR-005) - it was reserved-but-inert when that contract was
+written, and is real as of this commit. It remains unreachable in every
+shipped config today (the same three SubmissionGate approval fields
+still default closed - F-049/ADR-006 unchanged), so nothing in any real
+deployment changes. order_send is NOT called by this change - explicit
+ordering rule from both reviews, see review/adr/ADR-006-submission-gate.md
+SS6 for the full reasoning. Grep-confirmed: no agent_gateway/ code
+depends on SUBMISSION_STARTED having actually fired yet (only the one
+docstring reference).
+Action required: none expected today. If Dev 2's withdrawal-cutoff test
+suite wants to exercise a real fired SUBMISSION_STARTED event (rather
+than a fake/mocked one) for a genuine end-to-end proof, it can now do so
+against a test-only fully-approved config exactly like
+tests/integration/test_execution_orchestrator.py
+::test_a_fully_approved_config_reaches_submission_started does -
+never a shipped one. ExecutionEventStore.events_for(order_request_id)
+already exists as the query surface; ask if something narrower turns
+out to be needed.
+Relevant commit: (this commit)
+```
