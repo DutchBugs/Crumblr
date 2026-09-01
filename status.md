@@ -14,10 +14,10 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `cf17ccd` |
+| **`main` HEAD** | `(pending — see the fifty-ninth entry's follow-up commit for the exact SHA)` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` durable pre-side-effect emission built (core critical path item 3). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 4 (execution-event same-id/different-content conflict hardening). BLOCKED: hosted CI confirmation |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed, `TradeProposal → TradeIntent` mapping merged, AG-012 tracked. NEXT: shared no-MT5 Risk → Policy → capsule path, then the Static Agent bridge (review 1.27 §6 items A–J) — `StaticAgentContextPayload`, HTTP client, response translation, idempotent replay, failure-mode proofs, synthetic then live-shadow smoke tests. BLOCKED: none currently |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4, `ExecutionEventConflictError`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 5 (`order_send` idempotence). BLOCKED: hosted CI confirmation |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–012 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged (AG-014 found/fixed en route). NEXT: Static Agent bridge (review 1.27 §6 items B–J) — found a real vocabulary-mismatch gap along the way (AG-015: the fork's frozen strategy validates `reason_codes` against a closed, strategy-specific vocabulary `ict_v1` doesn't produce); proceeding via the honest `MARKET_DATA_STALE` degenerate path to prove the transport/auth/schema chain first, flagged as a possible review 1.27 §12 return-to-reviewer case. BLOCKED: none currently, AG-015's real resolution may need an owner/reviewer decision later |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
@@ -61,7 +61,7 @@ document you have that this repository doesn't yet.
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
 | 6 | Agent Integration track (Dev 2) — Step A + Step B **merged to `main`** (`bf18ec5`), a same-day self-review hardening pass **merged** (`d6a5361`, 3 real bugs found and fixed — AG-007/008/009), an HTTP transport for the Gateway **merged** (`a0e380a`, 2026-08-31). **No longer blocked** | Review 1.26 §5 resolved AG-006 directly: no standalone cross-strategy `compute_features()` needed after all — Dev 2 adds one platform-owned, deliberately-named evidence shape (`agent_context_v1`) reusing the existing generic `FeatureEvidence` persistence layer, entirely within Dev 2's own ownership. Dev 2 confirmed starting on this 2026-09-01. Full detail in `review/AGENT_STATUS.md`/`review/AGENT_FEEDBACK.md` and §13 fiftieth–fifty-fourth entries | `review/AGENT_STATUS.md`; `review/AGENT_FEEDBACK.md`; `feedback.1.26.md` §5/§7; commits `bf18ec5`, `d6a5361`, `a0e380a` on `main` |
-| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28** (F-062 fixed same day); `SUBMISSION_STARTED` durable pre-side-effect emission **done 2026-09-01**; five items remain | `SubmissionGate` is real, called by `ExecutionOrchestrator`, and now durably records its own commitment point when it opens. Still open: execution-event same-id/different-content conflict hardening, `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification | `review/adr/ADR-006-submission-gate.md`; §13 fifty-eighth entry; `feedback.1.26.md` §6; `feedback.1.27.md` §8 |
+| 7 | Core submission-safety phase — F-049 `SubmissionGate` **done 2026-08-28**; durable execution-activation wiring **done 2026-08-28**; `SUBMISSION_STARTED` emission **done 2026-09-01** (item 3); execution-event conflict hardening **done 2026-09-01** (item 4); four items remain | `SubmissionGate` is real, called by `ExecutionOrchestrator`, durably records its own commitment point, and the event log itself now fails closed on a same-id/different-content conflict (`ExecutionEventConflictError`, mirrors `ExecutionRequestConflictError` exactly). Still open: `order_send` idempotence, ambiguous-outcome recovery, automatic flatten submission, post-fill reconciliation, broker-side SL verification | `review/adr/ADR-006-submission-gate.md`; `src/crumblr/persistence/execution.py`; §13 fifty-ninth entry; `feedback.1.26.md` §6; `feedback.1.27.md` §8 |
 
 **Review cadence has changed (review 1.25 §9).** Don't request a formal
 reviewer artifact for documentation wording, one extra unit test, normal
@@ -7979,6 +7979,117 @@ Next:
   `ExecutionEventStore.append()`'s missing inserted-vs-duplicate return
   value (flagged during this slice's research, ADR-003 §3) actually
   needs closing.
+
+---
+
+## Update 2026-09-01 (fifty-ninth entry) — execution-event same-id/different-content conflict hardening (core critical path item 4)
+
+Component: `persistence/execution.py`, `review/adr/ADR-003-persistence-invariants.md`, `review/FEEDBACK.md`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1 core critical path item 4 (review 1.26 §6 / review 1.27 §8), planned via `EnterPlanMode` and approved before implementation
+Status before: `ExecutionEventStore.append()` derived `event_id` from `(order_request_id, event_type)` only and did `ON CONFLICT DO NOTHING` with no readback — a retried event with genuinely different `reason_codes`/`detail`/`payload` was silently swallowed, and the caller could not tell
+Status after: mirrors `ExecutionRequestStore._claim()`'s exact conflict pattern — a matching-content retry converges silently, different content raises a new `ExecutionEventConflictError`
+
+Completed:
+- Researched thoroughly before designing: read `ExecutionRequestStore
+  ._claim()` in full (the exact pattern to mirror — insert-on-conflict
+  with `.returning(...)`, readback on a loss, compare, raise on
+  mismatch), `journal.py::AppendResult` (the house "report inserted vs.
+  duplicate" idiom, confirmed unconsumed by any caller today — same as
+  this slice's own new return value), every existing `append()` call
+  site (six, covering nine event types via `_refuse()`), every existing
+  conflict test to mirror exactly, and `domain/hashing::fingerprint()`'s
+  canonicalization rules (confirmed the comparison is stable across the
+  JSONB round-trip as long as both sides compare already-JSON-shaped
+  values, not raw domain objects).
+- **Confirmed, before building, that this conflict cannot currently
+  occur through `run_once()`** — once an `order_request_id` is claimed,
+  `_process()` returns `None` immediately and never re-executes the
+  event-appending code. Same "build the approved shape before the
+  schedule pressure" discipline already used for `SubmissionGate`/
+  `SUBMISSION_STARTED`: real, tested, structurally inert until
+  "ambiguous-outcome recovery" (a separate, later item) introduces an
+  actual retry path.
+- **No schema/migration change** — deliberately. `execution_events` has
+  no fingerprint-shaped column (unlike `execution_requests`), and one
+  isn't needed: the row already stores everything the comparison needs,
+  so the fingerprint is computed on the fly on both sides at conflict
+  time rather than persisted, avoiding a migration and a backfill
+  problem the append-only grant would have made impossible anyway (the
+  app role can never `UPDATE` old rows to add a column value).
+- `persistence/execution.py`: new `ExecutionEventConflictError`
+  (bare-message shape, mirrors `ExecutionRequestConflictError` exactly).
+  `ExecutionEventStore.append()` now returns `journal.AppendResult`
+  (reused, not redefined) instead of `None`; split into `append()`
+  (connection routing) + `_append()` (logic), mirroring `claim`/`_claim`'s
+  own split. On an insert loss, reads back the existing row's
+  `reason_codes`/`detail`/`payload` on the *same connection* (always
+  sees the committed winner), fingerprints both sides, raises on
+  mismatch. `event_id_for()` unchanged.
+- `application/execution.py`: no change needed —
+  `ExecutionOrchestrator._append()` keeps its `-> None` signature and
+  simply doesn't consume the new return value yet; the conflict
+  exception is allowed to propagate uncaught, exactly like
+  `ExecutionRequestConflictError` already does.
+- Tests (`tests/integration/test_execution_persistence.py`): extended
+  `test_re_appending_the_same_transition_does_not_duplicate` with
+  `AppendResult` return-value assertions; three new tests mirroring
+  `TestClaim`'s conflict test 1:1 — different payload, different
+  `reason_codes`, different `detail` (review 1.23 §7 names all three
+  explicitly, not only payload) — each asserting
+  `pytest.raises(ExecutionEventConflictError, match=...)`.
+- `review/adr/ADR-003-persistence-invariants.md`: fixed a long-stale
+  "Status of implementation: Not started" line while touched (its own
+  §3 is exactly what this slice fulfills) — noted as a correction, not
+  silently edited.
+- `review/FEEDBACK.md`: recorded in the "Unreviewed work" table, not as
+  a new F-number — review 1.23 §7 itself explicitly declined to open a
+  standalone finding for this ("track it with Phase-6... work rather
+  than opening another standalone blocker"). Opportunistically fixed an
+  adjacent stale row (F-051 part 2 still listed as pending, already
+  closed).
+- `review/INTEGRATION_NOTICES.md`: no shared-contract file was touched,
+  but flagged a real finding surfaced as a byproduct of this research —
+  `persistence/agent_gateway.py::AgentDecisionEventStore.append_event()`
+  has the **identical unhardened gap** (Dev-2-owned, not fixed here,
+  the exact pattern to mirror pointed out).
+- Answered a substantive cross-session question from Dev 2 about
+  reusing `trading_agent/ict.py::evaluate()` for the Static Agent
+  bridge (confirmed it's already public/reusable, no new Core seam
+  needed) and flagged a real field-mapping gap found while checking
+  (`IctFeatureSnapshot`'s actual fields don't match the fork's wire
+  contract 1:1) before they built against a wrong assumption.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 152 source files.
+- `uv run pytest tests/integration/test_execution_persistence.py -v`
+  — 14 passed (4 new/extended). `tests/integration
+  /test_execution_orchestrator.py -v` — 12 passed, confirming zero
+  behavioural change on the orchestrator side, as predicted (no shipped
+  code path can trigger a real conflict today).
+- Grepped `agent_gateway/` for `AppendResult`/`ExecutionEventConflictError`
+  — zero references, confirming `IMPACT: NONE`.
+- Full suite, solo, against `crumblr_test_dev1` — **1077 passed, 3
+  skipped**, zero failures.
+
+Problems found:
+- None in the shipped result.
+
+Risk impact:
+- None. No shipped code path can reach the new conflict-detection logic
+  yet (the request-level claim gate prevents re-entry); this is
+  structural safety infrastructure for when ambiguous-outcome recovery
+  needs it, not a behavioural change today.
+
+Decision:
+- Entered plan mode before implementing; plan approved before any code
+  was written.
+- Not yet committed — pending the usual per-turn approval, on a new
+  `core/`-prefixed branch.
+
+Next:
+- Core critical path item 5: `order_send` idempotence — not yet
+  started, no plan drafted.
 
 ---
 

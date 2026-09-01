@@ -17,12 +17,13 @@ from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.models import DecisionCapsule
 from crumblr.persistence.execution import (
     ClaimResult,
+    ExecutionEventConflictError,
     ExecutionEventStore,
     ExecutionRequestConflictError,
     ExecutionRequestStore,
     event_id_for,
 )
-from crumblr.persistence.journal import CapsuleStore
+from crumblr.persistence.journal import AppendResult, CapsuleStore
 from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
 
 pytestmark = pytest.mark.integration
@@ -275,8 +276,81 @@ class TestExecutionEvents:
         """A retry after a crash re-logs the same logical event rather than
 
         appending a second row for it — the same idempotence discipline the
-        main journal uses.
+        main journal uses. Review 1.23 §7 (core critical path item 4): the
+        return value now reports which happened, mirroring
+        `ExecutionRequestStore.claim()`'s `ClaimResult`/journal's own
+        `AppendResult` — a matching-content retry is a harmless no-op, not
+        an error.
         """
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        ExecutionRequestStore(engine).claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        store = ExecutionEventStore(engine)
+
+        first = store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        second = store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        assert first == AppendResult(event_id=first.event_id, inserted=True)
+        assert second == AppendResult(event_id=first.event_id, inserted=False)
+        assert second.was_duplicate
+
+        events = store.events_for(order_request_id)
+        assert len(events) == 1
+
+    def test_a_second_append_with_a_different_payload_fails_closed(self, engine: Engine) -> None:
+        """Review 1.23 §7 / core critical path item 4: the same discipline
+
+        `ExecutionRequestStore._claim()` already enforces for requests, now
+        for events — a retried event identity with genuinely different
+        content is a conflict, never a silently dropped duplicate.
+        """
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        ExecutionRequestStore(engine).claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        store = ExecutionEventStore(engine)
+        event_id = event_id_for(
+            order_request_id=order_request_id, event_type=ExecutionEventType.ORDER_CHECKED
+        )
+
+        store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.ORDER_CHECKED,
+            occurred_at_utc=FIXED_NOW,
+            payload={"accepted": True},
+        )
+
+        with pytest.raises(ExecutionEventConflictError, match=str(event_id)):
+            store.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.ORDER_CHECKED,
+                occurred_at_utc=FIXED_NOW,
+                payload={"accepted": False},
+            )
+
+    def test_a_second_append_with_different_reason_codes_fails_closed(self, engine: Engine) -> None:
+        """Review 1.23 §7 names `reason_codes` explicitly, not only payload."""
         capsule = sealed_capsule(engine)
         order_request_id = uuid4()
         ExecutionRequestStore(engine).claim(
@@ -291,17 +365,47 @@ class TestExecutionEvents:
 
         store.append(
             order_request_id=order_request_id,
-            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            event_type=ExecutionEventType.FINAL_RISK_BLOCKED,
             occurred_at_utc=FIXED_NOW,
-        )
-        store.append(
-            order_request_id=order_request_id,
-            event_type=ExecutionEventType.REQUEST_CLAIMED,
-            occurred_at_utc=FIXED_NOW,
+            reason_codes=(ReasonCode.RISK_PER_TRADE_LIMIT,),
         )
 
-        events = store.events_for(order_request_id)
-        assert len(events) == 1
+        with pytest.raises(ExecutionEventConflictError):
+            store.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.FINAL_RISK_BLOCKED,
+                occurred_at_utc=FIXED_NOW,
+                reason_codes=(ReasonCode.EXECUTION_TIME_RISK_BLOCK,),
+            )
+
+    def test_a_second_append_with_different_detail_fails_closed(self, engine: Engine) -> None:
+        """Review 1.23 §7 names `detail` explicitly too."""
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        ExecutionRequestStore(engine).claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        store = ExecutionEventStore(engine)
+
+        store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.RECONCILIATION_BLOCKED,
+            occurred_at_utc=FIXED_NOW,
+            detail="first observation",
+        )
+
+        with pytest.raises(ExecutionEventConflictError):
+            store.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.RECONCILIATION_BLOCKED,
+                occurred_at_utc=FIXED_NOW,
+                detail="a different observation",
+            )
 
     def test_event_id_is_derived_not_random(self) -> None:
         order_request_id = uuid4()

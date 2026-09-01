@@ -20,6 +20,12 @@ RETURNING order_request_id` gives exactly one concurrent caller a returned
 row for a given key; everyone else gets none back and, on top of that, gets
 their fingerprint checked against what is already stored, so a genuine
 content conflict still raises rather than looking like a harmless retry.
+
+Review 1.23 §7 (core critical path item 4): the same discipline now covers
+`execution_events` too. A retried append for an `event_id` already on
+record converges silently only when its content genuinely matches;
+different `reason_codes`/`detail`/`payload` under the same identity raises
+rather than being dropped by a plain `ON CONFLICT DO NOTHING`.
 """
 
 from __future__ import annotations
@@ -33,7 +39,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from crumblr.domain.enums import ExecutionEventType, ReasonCode
+from crumblr.domain.hashing import fingerprint
 from crumblr.domain.timeutils import UtcDatetime
+from crumblr.persistence.journal import AppendResult
 from crumblr.persistence.schema import execution_events, execution_requests
 
 
@@ -43,6 +51,18 @@ class ExecutionRequestConflictError(RuntimeError):
     Never silently ignored: an idempotency key that could refer to two
     different orders is exactly the ambiguity idempotency exists to
     prevent.
+    """
+
+
+class ExecutionEventConflictError(RuntimeError):
+    """The same execution event identity was already recorded with
+
+    different content. Review 1.23 §7 (core critical path item 4): a
+    retried `SUBMISSION_STARTED`/`BROKER_ACK`/`FILLED`/`RECONCILED` (or
+    any other execution event) with different `reason_codes`/`detail`/
+    `payload` under the same `(order_request_id, event_type)` identity
+    cannot be treated as a harmless duplicate — mirrors
+    `ExecutionRequestConflictError` exactly, one level down the stack.
     """
 
 
@@ -175,26 +195,88 @@ class ExecutionEventStore:
         detail: str | None = None,
         payload: dict[str, Any] | None = None,
         connection: Connection | None = None,
-    ) -> None:
+    ) -> AppendResult:
+        if connection is not None:
+            return self._append(
+                connection,
+                order_request_id=order_request_id,
+                event_type=event_type,
+                occurred_at_utc=occurred_at_utc,
+                reason_codes=reason_codes,
+                detail=detail,
+                payload=payload,
+            )
+        with self._engine.begin() as own_connection:
+            return self._append(
+                own_connection,
+                order_request_id=order_request_id,
+                event_type=event_type,
+                occurred_at_utc=occurred_at_utc,
+                reason_codes=reason_codes,
+                detail=detail,
+                payload=payload,
+            )
+
+    def _append(
+        self,
+        connection: Connection,
+        *,
+        order_request_id: UUID,
+        event_type: ExecutionEventType,
+        occurred_at_utc: UtcDatetime,
+        reason_codes: tuple[ReasonCode, ...],
+        detail: str | None,
+        payload: dict[str, Any] | None,
+    ) -> AppendResult:
+        event_id = event_id_for(order_request_id=order_request_id, event_type=event_type)
+        reason_code_values = [code.value for code in reason_codes]
         statement = (
             pg_insert(execution_events)
             .values(
-                event_id=event_id_for(order_request_id=order_request_id, event_type=event_type),
+                event_id=event_id,
                 order_request_id=order_request_id,
                 event_type=event_type.value,
                 occurred_at_utc=occurred_at_utc,
-                reason_codes=[code.value for code in reason_codes],
+                reason_codes=reason_code_values,
                 detail=detail,
                 payload=payload,
                 schema_version=1,
             )
             .on_conflict_do_nothing(index_elements=["event_id"])
+            .returning(execution_events.c.event_id)
         )
-        if connection is not None:
-            connection.execute(statement)
-            return
-        with self._engine.begin() as own_connection:
-            own_connection.execute(statement)
+        won = connection.execute(statement).first() is not None
+        if won:
+            return AppendResult(event_id=event_id, inserted=True)
+
+        existing = (
+            connection.execute(
+                select(
+                    execution_events.c.reason_codes,
+                    execution_events.c.detail,
+                    execution_events.c.payload,
+                ).where(execution_events.c.event_id == event_id)
+            )
+            .mappings()
+            .one()
+        )
+        new_fingerprint = fingerprint(
+            {"reason_codes": reason_code_values, "detail": detail, "payload": payload}
+        )
+        existing_fingerprint = fingerprint(
+            {
+                "reason_codes": existing["reason_codes"],
+                "detail": existing["detail"],
+                "payload": existing["payload"],
+            }
+        )
+        if new_fingerprint != existing_fingerprint:
+            raise ExecutionEventConflictError(
+                f"execution event {event_id} (order_request_id={order_request_id}, "
+                f"event_type={event_type.value}) was already recorded with different "
+                "content -- the same event identity would refer to two different outcomes"
+            )
+        return AppendResult(event_id=event_id, inserted=False)
 
     def events_for(self, order_request_id: UUID) -> tuple[ExecutionEventRecord, ...]:
         statement = (

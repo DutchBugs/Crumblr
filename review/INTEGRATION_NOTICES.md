@@ -355,3 +355,35 @@ already exists as the query surface; ask if something narrower turns
 out to be needed.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-01 — DEV1
+Changed: No shared-contract file touched (persistence/execution.py and
+application/execution.py are Dev-1-only, not on the shared/handshake
+list) - this notice exists to flag a finding, not a change requiring
+action. Hardened ExecutionEventStore.append() against same-id/
+different-content conflicts (core critical path item 4, review 1.23 SS7
+/ review 1.26 SS6 / review 1.27 SS8): mirrors ExecutionRequestStore
+._claim()'s exact pattern - a retried event with matching content
+converges silently, different reason_codes/detail/payload raises a new
+ExecutionEventConflictError instead of being silently dropped by
+ON CONFLICT DO NOTHING.
+Impact: While researching this (to mirror the existing pattern
+faithfully), found src/crumblr/persistence/agent_gateway.py
+::AgentDecisionEventStore.append_event() (line 360) has the IDENTICAL
+unhardened gap: _event_id_for(outcome_id, event_type) derives from
+identity only, on_conflict_do_nothing, no .returning(...), no readback,
+-> None. Same class of gap this notice's own change just closed on the
+Core side, found as a direct byproduct of that research rather than a
+deliberate audit of agent_gateway/.
+Action required: none from Dev 1 - this is Dev-2-owned code, not touched
+here. Flagging only. The pattern to mirror, if useful:
+ExecutionEventStore.append()/ExecutionEventConflictError in
+persistence/execution.py (this commit) - add .returning(event_id) to
+the insert, read back reason_codes/detail/payload (or whatever
+AgentDecisionEventStore's own append_event carries) on a loss, compare
+via domain.hashing.fingerprint() on both sides, raise on mismatch.
+Relevant commit: (this commit)
+```

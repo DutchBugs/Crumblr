@@ -207,6 +207,10 @@ a run, it is storage rather than an audit trail.
 
 ## Status of implementation
 
-Not started. The domain contracts already satisfy most of these invariants at
-the type level; M2's job is to carry them across the boundary without loss.
-`status.md` tracks this as APP-005.
+Shipped. M2 passed; §3's "writer returns whether newly inserted or already
+present" invariant now covers both `execution_requests` (`ExecutionRequestStore
+._claim()`, Phase 4) and `execution_events` (`ExecutionEventStore.append()`,
+core critical path item 4, 2026-09-01) — see `persistence/execution.py` and
+`review/FEEDBACK.md`. This status line was stale for a long time; noted here
+rather than silently corrected, per this project's own documentation
+discipline.
