@@ -245,3 +245,31 @@ race-free without real DB-level locking, but avoids the worst
 staleness. No Dev-1 code change needed either way.
 Relevant commit: (this commit — documentation only)
 ```
+
+---
+
+```text
+2026-09-01 — DEV1
+Changed: pyproject.toml [tool.ruff] gained extend-exclude = ["review/"]
+and force-exclude = true (F-065, review/feedback.1.27.md SS3). Fixes
+hosted CI: ruff format --check was rewriting Python code fences inside
+immutable historical reviewer Markdown (feedback.1.22/23/24.md).
+Impact: pyproject.toml is shared/handshake territory per DEV1/DEV2
+instructions section 4. Formatter-scoping only, not a dependency change
+(uv sync --locked re-verified clean, no lockfile mismatch) and not a
+lint-rule change (ruff check .'s selected rules are unaffected; reviewer
+Markdown was never a lint target, only a format target, so nothing that
+was actually being checked is now skipped). Confirmed: agent_gateway/
+and its tests are untouched by this exclude (they live under src/tests,
+not review/), and ruff check ./mypy both still report the same file
+counts as before (150 source files).
+Action required: none expected. Note for accuracy: review/AGENT_STATUS.md
+and review/AGENT_FEEDBACK.md are also under review/, so this exclude
+covers them too — checked directly (grep), neither currently contains a
+```python fence, so nothing about their formatting actually changes
+today. If Dev 2 ever wants ruff to keep formatting Python examples
+inside those two specific files (unlike the immutable feedback.X.Y.md
+reviewer artifacts, they're Dev 2's own living documents), say so and a
+narrower exclude can replace the blanket review/ one.
+Relevant commit: (this commit)
+```

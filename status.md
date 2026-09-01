@@ -14,14 +14,31 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `f30004e` |
-| **Last hosted CI result** | Not confirmed green. F-063 (`UV_FROZEN=1` + `uv sync --locked` incompatible with current `uv`) fixed and pushed 2026-09-01 — no `gh`/Actions access in this environment to confirm the hosted run itself; needs a human or a session with GitHub access |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 CI fix pushed, F-051 part 2 CLOSED (real `baseline_v1` decision reached risk PASS/Supervisor APPROVE against real EUR/USD data, 2026-09-01). NEXT: confirm hosted CI green (needs a human), then core critical path items 3-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed (`agent_context_v1` evidence shape), `TradeProposal → TradeIntent` mapping merged. NEXT: wiring the constructed `TradeIntent` through intent-time Risk → deterministic Policy → capsule boundary (review 1.26 §7 item 3) — AG-012 (shared risk-evaluation authority, not yet settled architecturally) named as a thing to resolve before `feedback.2.0` could treat agent-driven submission as real, not a blocker for shadow work today. BLOCKED: none currently |
-| **F-051 state** | **Both parts CLOSED.** Part 1 PASSED 2026-08-26 (real-terminal). Part 2 CLOSED 2026-09-01 — restarted `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE. Reader left running (owner decision) to keep accumulating toward `ict_v1`'s 120-bar threshold; decision pipeline stopped and kill switch reverted to HALTED |
-| **Owner blockers** | Confirm next hosted CI run is green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
+| **`main` HEAD** | `(pending — see the fifty-seventh entry's follow-up commit for the exact SHA)` |
+| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, reformatting immutable reviewer Markdown) — fixed 2026-09-01 (`pyproject.toml` `extend-exclude`/`force-exclude`), pushed, hosted confirmation still pending — no `gh`/Actions access in this environment |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened. NEXT: confirm hosted CI fully green (needs a human), then core critical path items 2-9 (`SUBMISSION_STARTED` timing → final `feedback.2.0` evidence assembly). BLOCKED: hosted CI confirmation |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007/008/009 fixed, HTTP transport merged, AG-006 closed, `TradeProposal → TradeIntent` mapping merged, AG-012 tracked. NEXT: shared no-MT5 Risk → Policy → capsule path, then the Static Agent bridge (review 1.27 §6 items A–J) — `StaticAgentContextPayload`, HTTP client, response translation, idempotent replay, failure-mode proofs, synthetic then live-shadow smoke tests. BLOCKED: none currently |
+| **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
+| **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
-| **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md` (2026-09-01) was a deliberate owner-requested exception, not a change to that default |
+| **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md`/`feedback.1.27.md` (both 2026-09-01) were deliberate owner-requested checkpoints, not a change to that default |
+
+### Dev 1 ACK — feedback.1.27 (review 1.27 §1's required format)
+
+```text
+ACK feedback.1.27
+branch/worktree: core/execution-activation, .claude/worktrees/core
+main SHA fetched: fa0a6b3
+DONE since 1.26: F-063 fix confirmed by hosted run 60; F-051 part 2
+  CLOSED (real baseline_v1 decision, risk PASS/Supervisor APPROVE
+  against real EUR/USD data); F-065 fixed same day as opened
+  (pyproject.toml extend-exclude/force-exclude, review Markdown no
+  longer touched by ruff format)
+NEXT: confirm the next hosted CI run is fully green (needs a human/gh
+  access), then core critical path item 2 (SUBMISSION_STARTED timing)
+BLOCKED: hosted CI confirmation only
+Needs from Dev 2: nothing right now
+```
 
 ---
 
@@ -38,7 +55,7 @@ document you have that this repository doesn't yet.
 
 | # | What | Why it needs you | Where |
 |---|---|---|---|
-| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. The live blocker is now **F-063** (`UV_FROZEN=1` + `uv sync --locked` — current `uv` refuses the combination; fixed and pushed 2026-09-01), not the older F-056 numpy issue. "Local green" was never allowed to stand in for "hosted green" — a human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; §2 M0 acceptance below; `review/FEEDBACK.md` F-063 |
+| 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. Hosted run 60 already confirmed **F-063** genuinely fixed (dependency install/lint/Windows/secret-scan all PASS); the live blocker was **F-065** (`ruff format --check` rewriting immutable reviewer Markdown), fixed 2026-09-01. "Local green" was never allowed to stand in for "hosted green" — a human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job, Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; `pyproject.toml`; §2 M0 acceptance below; `review/FEEDBACK.md` F-065 |
 | 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
@@ -7753,6 +7770,96 @@ Decision:
 Next:
 - Core critical path item 3: `SUBMISSION_STARTED` timing at the correct
   pre-side-effect point — not yet started, no plan drafted.
+
+---
+
+## Update 2026-09-01 (fifty-seventh entry) — review 1.27 pulled and processed: F-065 (hosted CI) fixed same day, ACK written, Static Agent kickoff acknowledged
+
+Component: `pyproject.toml` (`[tool.ruff]` exclude), `review/FEEDBACK.md`, `status.md` (compact header, required ACK block)
+Milestone: Session-start protocol applied to the second review filed directly into the repository (the standing workflow since review 1.26)
+Status before: `main` at `ebf87e3`; hosted CI run 60 had confirmed F-063 fixed but failed on a new cause (`ruff format --check` rewriting reviewer Markdown, F-065)
+Status after: F-065 fixed and verified locally the same session; `main` at `ebf87e3` plus this slice; Static Agent integration kickoff read and acknowledged (Dev-2-owned, no Dev-1 action required beyond §8's existing priorities)
+
+Completed:
+- `git fetch` + fast-forward merge picked up `fa0a6b3`
+  (`feedback.1.27.md`) — clean, working tree was clean before pulling.
+- Read `feedback.1.27.md` in full. Confirms Phase 5 continues (not a
+  Phase-4 reopening, not an execution authorization) and opens Static
+  Agent integration work — entirely Dev-2-owned per §6/§8; §8 explicitly
+  keeps Dev 1 on the existing core critical path and tells Dev 1 not to
+  absorb the Static Agent build.
+- Registered the review in `review/FEEDBACK.md`'s "Reviews received"
+  table and opened **F-065** (MEDIUM now/HIGH before `feedback.2.0`,
+  Dev-1-owned — hosted CI's `ruff format --check` step rewriting
+  immutable historical reviewer Markdown).
+- **Fixed F-065 the same session.** Reproduced first, before touching
+  anything: `ruff format --check review/feedback.1.22.md` reformats
+  three embedded Python code fences — confirmed ruff 0.16.3 formats
+  Python code blocks inside Markdown by default, with no existing
+  `pyproject.toml` config addressing it. Fixed with two additions to
+  `[tool.ruff]`: `extend-exclude = ["review/"]` (so `ruff format
+  --check .`, CI's actual invocation, skips the whole directory rather
+  than only the three files hosted run 60 happened to hit — the same
+  failure can't recur from a new reviewer file) and `force-exclude =
+  true` (so an explicit `ruff format --check review/feedback.1.22.md`
+  invocation — e.g. a future targeted or pre-commit check — also
+  respects the exclude, not only directory-walk discovery, which is the
+  only case `extend-exclude` alone covers).
+- Confirmed the fix precisely matches what CI runs: `ruff format
+  --check .` → "162 files already formatted", exit 0. `ruff check .`
+  and `mypy` both still clean (150 source files) — the exclude does not
+  weaken lint coverage of anything that was actually a lint target,
+  since reviewer Markdown was never linted, only reformatted.
+- Updated the compact `status.md` header (main HEAD pending this
+  commit, hosted CI result narrative now cites F-065 not F-063, Dev 1/
+  Dev 2 DONE/NEXT lines) and the older "What's needed next" table's row
+  1, so neither contradicts what actually happened, per review 1.26
+  §3's own rule.
+- Wrote the required §1 ACK block in this document's own compact-header
+  section, in the exact terse format review 1.27 asked for (branch/
+  worktree, main SHA fetched, DONE since 1.26, NEXT, BLOCKED, what's
+  needed from Dev 2) — no essay, no new status family.
+
+Evidence:
+- Local reproduction of the exact CI failure (three reformatted code
+  fences), then confirmation of the fix, both shown above.
+- `uv sync --locked` re-run clean after the `pyproject.toml` edit — no
+  lockfile mismatch, since `extend-exclude`/`force-exclude` are
+  formatter-scoping settings, not dependency changes.
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — all clean (150 source files).
+- `uv run pytest -q` (full suite, `crumblr_test_dev1`) — **1058 passed,
+  3 skipped**, zero failures. No production code changed this entry, so
+  this run is a sanity check rather than new coverage.
+- Hosted CI itself: **not confirmed** — no `gh`/Actions access in this
+  environment. F-065 stays "gate pending hosted confirmation," the same
+  structure F-056/F-063 used before it, until a human or a session with
+  GitHub access reports the next run's result.
+
+Problems found:
+- None beyond F-065 itself (the actual subject of this entry).
+
+Risk impact:
+- None. CI-configuration and documentation changes only; no production
+  code touched.
+
+Decision:
+- F-065 is in scope for immediate action under review 1.27 §8's
+  explicit "priority 1" instruction — no separate approval needed to
+  start it, consistent with this session's standing practice for named
+  Dev-1 priorities.
+- Static Agent integration (§4–§7, §10) is Dev-2-owned; no Dev-1 code
+  change identified as needed from reading it. Will support with a
+  minimal read-only Core seam only if Dev 2 actually requests one
+  (§8's own instruction), not preemptively.
+- Not yet committed — pending the usual per-turn approval.
+
+Next:
+- Push, then fill in this entry's own `main` HEAD value into the
+  compact header via a small follow-up commit (same pattern as the
+  fifty-second/fifty-fifth entries).
+- Resume core critical path item 2, `SUBMISSION_STARTED` timing at the
+  correct pre-side-effect point — not yet started, no plan drafted.
 
 ---
 

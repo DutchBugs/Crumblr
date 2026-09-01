@@ -56,6 +56,18 @@ packages = ["src/crumblr"]
 line-length = 100
 src = ["src", "tests"]
 target-version = "py312"
+# `ruff format` reformats Python code fences inside Markdown by default
+# (review/feedback.1.27.md F-065) — that rewrites immutable historical
+# reviewer artifacts (feedback.1.22.md etc.) merely because their embedded
+# examples don't match today's style. Reviewer documents are a record of
+# what was actually reviewed and are never edited to satisfy a linter; this
+# excludes the whole directory rather than only the three files hosted CI
+# happened to hit, so the same failure can't recur from a new one.
+extend-exclude = ["review/"]
+# Without this, the exclude above only applies when ruff discovers files by
+# walking a directory (as CI's `ruff format --check .` does) — passing a
+# reviewer file explicitly on the command line would still rewrite it.
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
