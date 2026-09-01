@@ -526,6 +526,74 @@ decision") this may need to go to the reviewer if Dev 1 doesn't already
 know the answer — not escalating unilaterally before giving Dev 1 the
 chance to react first.
 
+**Update, same session: it went to the reviewer, and came back resolved.**
+`feedback.1.28.md` — "Strategy-neutral Core & external strategy ownership"
+— landed within the hour. Full architectural correction, GO verdict.
+Confirms AG-015 exactly and goes further: the mistake wasn't the reason-code
+vocabulary specifically, it was that "the strategy computation is on the
+wrong side of the interface" at all. All three mapping approaches AG-015's
+own resolution notes were weighing are explicitly rejected. New project-wide
+finding **F-066** ("External-agent production path must be strategy-neutral")
+tracks the correction from here; AG-015 is closed, superseded by F-066 (see
+`review/AGENT_FEEDBACK.md`).
+
+Revised Dev-2 work order (`feedback.1.28.md` §11): A (finish the
+unhealthy-market Static Agent NO_TRADE smoke proof, unaffected by any of
+this) — B (stop the `ict_v1`→Pivot-2-2 mapping entirely, confirmed rejected)
+— C (`AgentMarketContextV1`, strategy-neutral market data, replacing the
+`StaticAgentContextPayload` design that assumed a computed observation) — D
+(`DecisionContextBundle`/`content_hash` stays the trusted binding;
+`agent_context_v1` stays an audit anchor, not strategy analysis) — E (Gateway
+reason-code handling becomes structural/opaque, no global whitelist) — F
+(split the external-agent Policy path away from `Regime`/strategy-id/
+confidence assumptions) — G (coordinate fork-side strategy-runtime work with
+the external Agent Developer) — H (strategy-neutrality tests with two
+incompatible vocabularies) — I (first HEALTHY genuine Static Agent shadow
+decision, after G) — J (external Supervisor boundary).
+
+**Item F — done, same session.** `agent_gateway/decision_path.py`'s Policy
+Gate step no longer calls `evaluator.pretrade.evaluate()` for the
+external-agent path at all. New `_evaluate_platform_policy()`: checks only
+reconciliation and incident platform-safety health (mirroring
+`pretrade.evaluate()`'s own "safety state, checked before anything else"
+block), never reads `features`/`Regime`, no strategy-id/model-version
+whitelist, no confidence interpretation. Deliberately **not** togglable via
+`config.supervisor.enabled` — feedback.1.28 §7 calls these "hard checks" for
+the external-agent path, not part of a strategy-envelope switch (self-review
+finding, fixed same pass, see below). This directly closes **AG-013**
+(`review/AGENT_FEEDBACK.md`): a directional external-agent proposal built
+from real production evidence now reaches Supervisor `APPROVE`, proven
+against the real evidence builder, not a test double. Also added the F-066
+item 8 regression proof at this module's level: an intent with a completely
+unrelated `strategy_id` and an arbitrary, made-up reason-code vocabulary
+reaches the identical `APPROVE` outcome — nothing here is strategy-specific.
+
+Self-review (`/code-review medium`) on this refactor found one real,
+non-blocking issue: the first `_evaluate_platform_policy` docstring
+overclaimed exact parity with `pretrade.evaluate()`'s safety block (the
+incident check there is gated behind `policy.enabled`; this module's is not,
+deliberately). Fixed the docstring to state the divergence and why, and
+added a regression test proving `config.supervisor.enabled=False` has no
+effect on this path (it isn't even a parameter the function reads).
+
+Evidence: `intents_in_last_hour` parameter removed (no longer used —
+platform proposal/rate limits are already enforced upstream by
+`AgentGateway._evaluate_proposal` before this function ever sees an intent).
+18 tests in `tests/unit/test_agent_decision_path.py` (was 16 before this
+pass — `TestAG013RealAgentEvidenceRegimeIsAlwaysUnknown` replaced with
+`TestAG013Resolved`, new `TestStrategyNeutrality`, new
+`test_config_supervisor_enabled_false_does_not_bypass_platform_safety_checks`).
+ruff/ruff format/mypy clean; full gate (unit + integration against
+`crumblr_test_dev2`) **1076 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+**Not done yet:** items C (`AgentMarketContextV1` contract), E (opaque
+Gateway reason-code handling — `AgentGateway`'s own contracts/validation
+still need a look for any Core-side vocabulary assumptions), G (fork-side
+coordination — not this track's code to write), H (a full end-to-end
+strategy-neutrality proof through the Gateway/HTTP layer, not just this
+module), and A (the unhealthy-market smoke proof itself, still not started).
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)

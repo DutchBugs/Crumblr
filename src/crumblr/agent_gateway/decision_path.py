@@ -1,17 +1,38 @@
-"""TradeIntent -> intent-time Risk -> deterministic Policy -> DecisionCapsule.
+"""TradeIntent -> intent-time Risk -> strategy-neutral Policy -> DecisionCapsule.
 
 Review 1.26 section 7 item 3 / feedback.1.27 section 6.A -- the "shared
 no-MT5 integration path". A platform-owned `TradeIntent` the Agent Gateway
 already constructed (`agent_gateway/gateway.py::_build_trade_intent`) is
-evaluated through exactly the same Core Risk Engine
-(`risk.policies.evaluate`) and deterministic Policy Gate
-(`evaluator.pretrade.evaluate`) an internal strategy's intent goes through,
-and sealed into a `DecisionCapsule` the same way. Nothing past that
-boundary is reachable from here: no `ApprovedOrder`, no `order_check`, no
-`order_send`. A NO_TRADE outcome (`intent=None`) still seals a capsule,
-the same "every evaluated window is evidence" rule
-`application/orchestration.py` and `application/live_decision.py` already
-follow.
+evaluated through the same Core Risk Engine (`risk.policies.evaluate`) an
+internal strategy's intent goes through, then a strategy-neutral Policy
+Gate (`_evaluate_platform_policy` below, not `evaluator.pretrade.evaluate`
+-- see "Strategy-neutral Policy Gate" below), and sealed into a
+`DecisionCapsule` the same way. Nothing past that boundary is reachable
+from here: no `ApprovedOrder`, no `order_check`, no `order_send`. A
+NO_TRADE outcome (`intent=None`) still seals a capsule, the same "every
+evaluated window is evidence" rule `application/orchestration.py` and
+`application/live_decision.py` already follow.
+
+**Strategy-neutral Policy Gate (feedback.1.28, F-066).** AG-015 found that
+`evaluator.pretrade.SupervisorPolicy` bakes in internal-strategy
+assumptions -- a `Regime` the deterministic Policy Gate can veto on, a
+strategy-id whitelist, a globally-interpreted `confidence` -- that do not
+generalize to an external Trading Agent running a strategy Crumblr does
+not and must not understand (feedback.1.28 section 2's explicit rejection
+of "Crumblr maps its own strategy states/reason codes onto an external
+one" and section 7's direction: "Do not require a Crumblr-computed Regime
+for external-agent approval... do not globally interpret an agent's
+confidence"). `_evaluate_platform_policy` below checks only what is
+genuinely strategy-independent platform safety: reconciliation and
+incident health -- mirroring exactly the "Safety state, checked before
+anything else" block `pretrade.evaluate()` itself opens with, and nothing
+past it. Assignment authenticity, strategy-artifact provenance and
+proposal/rate limits are **not** re-checked here because they are already
+enforced upstream by `AgentGateway._evaluate_proposal` before this
+function is ever called with a non-`None` intent (AG-013, the
+`regime=UNKNOWN`-always-vetoes gap this replaces, is closed by this
+change: `SupervisorDecision.observed_regime` is left at its honest
+`Regime.UNKNOWN` default and never gates anything).
 
 **No MT5 anywhere in this module or this package.** Account/position
 state is never read directly here -- it is supplied by an injected
@@ -70,18 +91,18 @@ from crumblr.domain.models import (
     VersionTag,
 )
 from crumblr.domain.timeutils import UtcDatetime
-from crumblr.evaluator import pretrade
 from crumblr.risk import policies, trading_window
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import RiskSessionStore, recover_session
 from crumblr.trading_agent.base import FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
 
-_EXTERNAL_AGENT_STRATEGY_ID = "external_agent"
-"""Mirrors `agent_gateway.gateway._EXTERNAL_AGENT_STRATEGY_ID` -- every
-`TradeIntent` the Gateway constructs carries this as `strategy_id`, so the
-Policy Gate's `allowed_strategy_ids` must name the same constant rather
-than `config.trading_agent.strategy_id` (the *internal* strategy)."""
+POLICY_VERSION = "external-agent-policy-v1"
+"""Names what a `SupervisorDecision` sealed by this module actually means
+-- a strategy-neutral platform-safety gate, not
+`evaluator.pretrade.SupervisorPolicy`'s internal-strategy policy. A stored
+decision names the policy that made it (mirrors `pretrade.POLICY_VERSION`'s
+own reasoning); the name has to differ because the meaning does."""
 
 
 class PortfolioStateProvider(Protocol):
@@ -137,12 +158,11 @@ def evaluate_agent_trade_intent(
     now: UtcDatetime,
     seen_decision_hashes: frozenset[str] = frozenset(),
     orders_in_last_hour: int = 0,
-    intents_in_last_hour: int = 0,
     incident_status: IncidentStatus = IncidentStatus.UNKNOWN,
 ) -> AgentDecisionPathResult:
     """Evaluate one Gateway-constructed `TradeIntent` (or NO_TRADE,
-    `intent=None`) through intent-time Risk and the deterministic Policy
-    Gate, and seal the result into a `DecisionCapsule`.
+    `intent=None`) through intent-time Risk and the strategy-neutral
+    Policy Gate, and seal the result into a `DecisionCapsule`.
 
     `outcome_id` is the Gateway's own idempotency key for this outcome
     (`TradeProposal.proposal_id` / `NoTradeDecision.decision_id`) -- it is
@@ -154,10 +174,10 @@ def evaluate_agent_trade_intent(
     `application/live_decision.py` carries -- no order path is reachable
     from this function (or exists anywhere in the shadow-only agent path
     yet), so there is nothing to count. `incident_status` defaults to
-    `UNKNOWN`, not `CLEAR` -- the fail-closed default `SupervisorContext`
-    itself uses, so a caller that has not wired up a real incident read
-    gets a refusal rather than an unearned approval (review finding
-    F-002's rule, restated).
+    `UNKNOWN`, not `CLEAR` -- the same fail-closed convention
+    `evaluator.pretrade.SupervisorContext` uses, so a caller that has not
+    wired up a real incident read gets a refusal rather than an unearned
+    approval (review finding F-002's rule, restated).
     """
     portfolio = portfolio_state.current()
 
@@ -264,15 +284,10 @@ def evaluate_agent_trade_intent(
             capsule=capsule, risk_decision=risk_decision, supervisor_decision=None
         )
 
-    supervisor_decision = pretrade.evaluate(
+    supervisor_decision = _evaluate_platform_policy(
         intent,
-        features,
-        _supervisor_policy(config),
-        pretrade.SupervisorContext(
-            intents_in_last_hour=intents_in_last_hour,
-            incident_status=incident_status,
-            reconciliation_status=portfolio.reconciliation_status,
-        ),
+        incident_status=incident_status,
+        reconciliation_status=portfolio.reconciliation_status,
         now=now,
     )
     recorder.record(
@@ -376,17 +391,71 @@ def _risk_context(config: PlatformConfig) -> policies.RiskContext:
     )
 
 
-def _supervisor_policy(config: PlatformConfig) -> pretrade.SupervisorPolicy:
-    return pretrade.SupervisorPolicy(
-        enabled=config.supervisor.enabled,
-        veto_on_unknown_regime=config.supervisor.veto_on_unknown_regime,
-        allowed_strategy_ids=frozenset({_EXTERNAL_AGENT_STRATEGY_ID}),
-        # `_build_trade_intent` (agent_gateway/gateway.py) always sets
-        # `model_version=None` -- an external agent's own runtime/model
-        # version is not a Crumblr-approved model artifact, deliberately
-        # never forwarded onto the platform-owned TradeIntent (AG-010).
-        allowed_model_versions=None,
-        max_intents_per_hour=config.supervisor.max_intents_per_hour,
+def _evaluate_platform_policy(
+    intent: TradeIntent,
+    *,
+    incident_status: IncidentStatus,
+    reconciliation_status: ReconciliationStatus,
+    now: UtcDatetime,
+) -> SupervisorDecision:
+    """The strategy-neutral Policy Gate (feedback.1.28, F-066) -- see the
+    module docstring for why this replaces `evaluator.pretrade.evaluate()`
+    for the external-agent path.
+
+    Checks reconciliation and incident health exactly the way
+    `pretrade.evaluate()` reads them -- reconciliation MISMATCHED/UNKNOWN
+    is an immediate HALT (a system-wide question, not a per-proposal one),
+    incident ACTIVE/UNKNOWN is a VETO -- but **not** the same way `enabled`
+    interacts with them: `pretrade.SupervisorPolicy.enabled` is a
+    strategy-envelope switch (`config.supervisor.enabled=False` trivially
+    APPROVEs an internal-strategy intent, incident check included, before
+    that field is ever read). There is deliberately no equivalent switch
+    here. feedback.1.28 section 7 calls reconciliation/incident health
+    "hard checks" for the external-agent path, not a togglable policy
+    envelope -- an operator disabling the internal Supervisor for a
+    maintenance window must not also silently disable platform safety
+    health checks for external-agent proposals. No `Regime`, no
+    strategy-id/model-version whitelist, no confidence interpretation:
+    those *are* strategy semantics this policy must not own.
+    """
+    if reconciliation_status is ReconciliationStatus.MISMATCHED:
+        return _platform_policy_decision(
+            intent, SupervisorVerdict.HALT, (ReasonCode.RECONCILIATION_MISMATCH,), now
+        )
+    if reconciliation_status is ReconciliationStatus.UNKNOWN:
+        return _platform_policy_decision(
+            intent, SupervisorVerdict.HALT, (ReasonCode.RECONCILIATION_UNKNOWN,), now
+        )
+
+    reasons: list[ReasonCode] = []
+    if incident_status is IncidentStatus.ACTIVE:
+        reasons.append(ReasonCode.ACTIVE_INCIDENT)
+    elif incident_status is IncidentStatus.UNKNOWN:
+        reasons.append(ReasonCode.INCIDENT_STATE_UNKNOWN)
+
+    if reasons:
+        return _platform_policy_decision(intent, SupervisorVerdict.VETO, tuple(reasons), now)
+    return _platform_policy_decision(intent, SupervisorVerdict.APPROVE, (), now)
+
+
+def _platform_policy_decision(
+    intent: TradeIntent,
+    verdict: SupervisorVerdict,
+    reason_codes: tuple[ReasonCode, ...],
+    now: UtcDatetime,
+) -> SupervisorDecision:
+    return SupervisorDecision(
+        decision_id=uuid5(
+            NAMESPACE_URL, f"crumblr:agent-policy:{intent.decision_hash}:{verdict.value}"
+        ),
+        intent_id=intent.intent_id,
+        verdict=verdict,
+        reason_codes=reason_codes,
+        decided_at_utc=now,
+        policy_version=POLICY_VERSION,
+        # `observed_regime` left at its `Regime.UNKNOWN` default -- honest,
+        # not guessed (AG-006's own reasoning), and never gates anything
+        # here (that is the entire point of this function existing).
     )
 
 

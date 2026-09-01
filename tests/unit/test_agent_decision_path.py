@@ -20,7 +20,7 @@ from crumblr.agent_gateway.decision_path import (
     PortfolioSnapshot,
     evaluate_agent_trade_intent,
 )
-from crumblr.agent_gateway.evidence import AgentContextEvidence, build_agent_context_evidence
+from crumblr.agent_gateway.evidence import build_agent_context_evidence
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
     Environment,
@@ -101,37 +101,26 @@ class FakePortfolioStateProvider:
         )
 
 
-def config() -> PlatformConfig:
-    return PlatformConfig.model_validate(paper_config_payload())
+def config(**supervisor_overrides: Any) -> PlatformConfig:
+    payload = paper_config_payload()
+    if supervisor_overrides:
+        payload["supervisor"] = {**payload["supervisor"], **supervisor_overrides}
+    return PlatformConfig.model_validate(payload)
 
 
-def make_features(
-    *, snapshot: MarketSnapshot, spec: InstrumentSpec, regime: Regime = Regime.UNKNOWN
-) -> AgentContextEvidence:
-    """`regime` defaults to `UNKNOWN` -- `build_agent_context_evidence()`
-    never produces anything else (AG-006: no TA regime classification is
-    computed for this evidence shape). A non-default `regime` here
-    constructs the evidence directly rather than via the real production
-    builder, deliberately, to test the Risk/Policy wiring in isolation from
-    that separately-tracked gap (AG-013)."""
-    if regime is Regime.UNKNOWN:
-        return build_agent_context_evidence(
-            symbol=snapshot.symbol,
-            computed_at_utc=snapshot.event_time_utc,
-            market_snapshot_id=snapshot.snapshot_id,
-            instrument_spec_version=spec.spec_version,
-            session_state=snapshot.session_state,
-            data_quality=snapshot.data_quality,
-        )
-    return AgentContextEvidence(
-        feature_snapshot_id=uuid4(),
+def make_features(*, snapshot: MarketSnapshot, spec: InstrumentSpec) -> Any:
+    """Always the real production builder -- `regime` is always `UNKNOWN`
+    (AG-006: no TA regime classification is computed for this evidence
+    shape) and, since feedback.1.28/F-066's strategy-neutral Policy Gate,
+    that no longer matters to anything this module checks (AG-013,
+    resolved -- see `TestAG013Resolved` below)."""
+    return build_agent_context_evidence(
         symbol=snapshot.symbol,
         computed_at_utc=snapshot.event_time_utc,
         market_snapshot_id=snapshot.snapshot_id,
         instrument_spec_version=spec.spec_version,
         session_state=snapshot.session_state,
         data_quality=snapshot.data_quality,
-        regime=regime,
     )
 
 
@@ -145,7 +134,6 @@ class Fixture:
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     recorder: RecordingRunRecorder = field(default_factory=RecordingRunRecorder)
-    regime: Regime = Regime.TREND
     incident_status: IncidentStatus = IncidentStatus.CLEAR
 
     def __post_init__(self) -> None:
@@ -161,7 +149,7 @@ class Fixture:
             "strategy_version": "assignment-artifact-hash-v1",
             "snapshot": self.snapshot,
             "spec": self.spec,
-            "features": make_features(snapshot=self.snapshot, spec=self.spec, regime=self.regime),
+            "features": make_features(snapshot=self.snapshot, spec=self.spec),
             "config": config(),
             "portfolio_state": FakePortfolioStateProvider(
                 account=self.account,
@@ -421,26 +409,62 @@ class TestFailClosedDefaults:
         assert result.supervisor_decision.verdict is SupervisorVerdict.HALT
         assert ReasonCode.RECONCILIATION_UNKNOWN in result.supervisor_decision.reason_codes
 
+    def test_config_supervisor_enabled_false_does_not_bypass_platform_safety_checks(self) -> None:
+        """Self-review finding: unlike `evaluator.pretrade.SupervisorPolicy
+        .enabled` (a strategy-envelope switch that trivially APPROVEs an
+        internal-strategy intent), `config.supervisor.enabled` has no
+        effect at all on `_evaluate_platform_policy` -- it is not even a
+        parameter. feedback.1.28 section 7 calls reconciliation/incident
+        health "hard checks" for the external-agent path, not part of a
+        togglable policy envelope."""
+        fixture = Fixture(reconciliation_status=ReconciliationStatus.UNKNOWN)
+        result, _ = fixture.evaluate(agent_intent(), config=config(enabled=False))
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.HALT
+        assert ReasonCode.RECONCILIATION_UNKNOWN in result.supervisor_decision.reason_codes
 
-class TestAG013RealAgentEvidenceRegimeIsAlwaysUnknown:
-    """Not a test of `decision_path.py` in isolation -- a documented,
-    deliberate proof of a real cross-cutting gap (AG-013,
-    `review/AGENT_FEEDBACK.md`): `build_agent_context_evidence()`
-    (`agent_gateway/evidence.py`, AG-006) always sets `regime=UNKNOWN` by
-    design, and the shipped paper config's
-    `SupervisorPolicy.veto_on_unknown_regime=True` means a directional
-    external-agent proposal built from *real* production evidence can
-    never reach Supervisor APPROVE today -- only VETO on UNKNOWN_REGIME,
-    or NO_TRADE. Not a safety defect (fail-closed is the safe direction)
-    but a real product gap worth tracking openly rather than discovering
-    silently."""
 
-    def test_real_evidence_reaches_the_policy_gate_and_vetoes_on_unknown_regime(self) -> None:
-        fixture = Fixture(regime=Regime.UNKNOWN)  # build_agent_context_evidence()'s real default
+class TestAG013Resolved:
+    """AG-013 (`review/AGENT_FEEDBACK.md`) found that real `agent_context_v1`
+    evidence always carries `regime=UNKNOWN` (AG-006, by design), and the
+    old `evaluator.pretrade.SupervisorPolicy.veto_on_unknown_regime=True`
+    meant a directional external-agent proposal could reach Risk `PASS`
+    but never Supervisor `APPROVE` -- only `VETO` on `UNKNOWN_REGIME`.
+    feedback.1.28/F-066's strategy-neutral Policy Gate resolves this by
+    construction: `_evaluate_platform_policy` never reads `features` or
+    `Regime` at all. Proven here against the real production evidence
+    builder, not a test double, closing the loop AG-013 opened."""
+
+    def test_real_evidence_reaches_supervisor_approve(self) -> None:
+        fixture = Fixture()
         result, _ = fixture.evaluate(agent_intent())
 
         assert result.risk_decision is not None
         assert result.risk_decision.verdict is RiskVerdict.PASS
         assert result.supervisor_decision is not None
-        assert result.supervisor_decision.verdict is SupervisorVerdict.VETO
-        assert ReasonCode.UNKNOWN_REGIME in result.supervisor_decision.reason_codes
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+        assert result.supervisor_decision.observed_regime is Regime.UNKNOWN
+        assert result.supervisor_decision.reason_codes == ()
+
+
+class TestStrategyNeutrality:
+    """F-066 item 8 (`feedback.1.28.md` section 10): "a second toy/test
+    agent with a deliberately different reason-code vocabulary can use the
+    same Core path without Core code changes" -- the regression test that
+    proves a platform was built, not another single-strategy integration.
+    A completely different `strategy_id` and an arbitrary, made-up
+    `reason_codes` vocabulary reaches the identical outcome as
+    `agent_intent()`'s own -- this module does not special-case either."""
+
+    def test_an_unrelated_strategy_id_and_vocabulary_reaches_approve_identically(self) -> None:
+        fixture = Fixture()
+        intent = agent_intent(
+            strategy_id="totally_different_toy_agent",
+            reason_codes=("MADE_UP_CODE_ALPHA", "ANOTHER_UNRELATED_CODE"),
+        )
+        result, _ = fixture.evaluate(intent)
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
