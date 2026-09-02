@@ -1044,6 +1044,63 @@ This closes feedback.1.28 section 11 item E.
 
 ---
 
+## 0p. Exact open risk, not a count-based approximation — done 2026-09-02 (Owner Work Order D2.2)
+
+`review/OWNER_WORK_ORDERS_2026-09-02.md` (owner-authored, arrived via Dev 1's
+commit `0648e41`) landed with an explicit, prioritized Dev-2 work order,
+superseding the informal priority list this session had been working. Its
+first directly-actionable item, D2.2, is done: `decision_path.py` no longer
+models open risk as `max_risk_per_trade * len(open_positions)` — the owner's
+new Risk Policy v1 allows multiple, differently-sized open EUR/USD positions
+within one total open-risk budget (`max_open_risk=0.03`), so a count-based
+approximation is structurally wrong the moment two positions can carry
+different risk.
+
+`PortfolioSnapshot` gained a new **required** field, `open_risk_fraction:
+RiskFraction | None`. It must be the caller's own exact total open-risk
+figure — the Core-owned exact-open-risk seam D1.4 is supposed to build, once
+it exists; nothing under my ownership can honestly compute it (I do not own
+account/position state at all, by design — see the module docstring's
+"No MT5 anywhere in this module" section). `None` means the caller could not
+establish a trustworthy figure. Per D2.2's own instruction ("if exact open
+risk cannot be established from trusted state, fail closed"),
+`evaluate_agent_trade_intent` now checks this **before** Risk evaluation
+runs at all: `None` produces a directly-constructed `RiskDecision`
+(`verdict=HALT`, `reason_codes=(SAFETY_STATE_UNKNOWN,)`), trips the kill
+switch, seals a capsule with `supervisor_decision=None`, and returns —
+never reaching the Policy Gate. There is no silent zero anywhere on this
+path.
+
+**This is genuinely partial, not a full fix.** D1.4 (Dev 1's Core-owned
+exact-open-risk seam) does not exist yet, so today every real caller of this
+module still has nothing honest to pass but `None` — meaning the agent path
+is currently HALT-only for any directional intent until D1.4 lands. That is
+the correct fail-closed behaviour, not a bug: better an honest refusal than
+resurrecting the wrong approximation to keep the shadow path producing
+`PASS` verdicts. Flagged to Dev 1 (SendMessage) since `PortfolioSnapshot`
+is the `PortfolioStateProvider` Protocol's own return shape, and this add is
+a breaking field addition every future implementer (including D1.4 itself)
+must satisfy.
+
+Self-review (`/code-review medium`) found no issues — small, well-scoped
+change with dedicated fail-closed test coverage.
+
+Evidence: `tests/unit/test_agent_decision_path.py::TestOpenRiskFractionUnknown`
+(4 new tests — HALT before the Policy Gate, kill switch tripped, capsule
+still sealed, and a regression guard that `Decimal("0")` is *not* treated as
+`None`); full existing `FakePortfolioStateProvider`/`Fixture` call sites
+updated with a `Decimal("0")` default so prior behaviour is unchanged.
+`ruff check`/`ruff format --check`/`mypy` clean; `tests/unit` full suite
+**991 passed**, 1 skipped (pre-existing, unrelated MT5-import skip), 0
+failed. Full gate (unit + integration against `crumblr_test_dev2`) after:
+**1259 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+This is D2.2 done. D2.1 (consume Owner Policy v1 generally), D2.3
+(`AgentMarketContextV1` strategy-neutral — already true), D2.4-D2.7 remain
+open, per the work order's own numbering.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |

@@ -1146,6 +1146,50 @@ mean anything should start here.
   `feedback.2.0`'s submission authorization, gaps 1 and 3 are independent
   of any specific gate.
 
+### D-052 — Agent decision path fails closed (HALT-only) until D1.4's exact open-risk seam exists
+- **Status:** deliberate, interim — the correct behaviour under
+  `review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2 until D1.4 lands
+- **Spec:** Owner Work Order D2.2: "The current agent decision path must
+  not model open risk as `max_risk_per_trade * len(open_positions)`...
+  Consume the Core-owned exact open-risk seam/value from D1.4 (or another
+  reviewed equivalent). If exact open risk cannot be established from
+  trusted state, fail closed."
+- **Code:** `agent_gateway/decision_path.py::PortfolioSnapshot
+  .open_risk_fraction`, `evaluate_agent_trade_intent`'s new
+  `open_risk_fraction is None` branch
+- **Original gap:** the owner's Risk Policy v1 allows multiple,
+  differently-sized open EUR/USD positions within one total open-risk
+  budget (`max_open_risk=0.03`) — this module's own prior
+  `max_risk_per_trade * len(open_positions)` approximation is structurally
+  wrong the instant two open positions carry different risk.
+- **Current state:** `PortfolioSnapshot.open_risk_fraction` is now a
+  required `RiskFraction | None` the caller must supply. Nothing under
+  Dev 2's ownership can honestly compute it — this module never reads
+  account/position state itself, by design (see `decision_path.py`'s own
+  "No MT5 anywhere in this module" section) — so until Dev 1's D1.4
+  Core-owned exact-open-risk seam exists, every real `PortfolioStateProvider`
+  implementation has nothing trustworthy to pass but `None`. That makes
+  every directional external-agent intent evaluate to `RiskVerdict.HALT`
+  today, unconditionally, before Risk evaluation even runs — a correct,
+  intentional refusal per D2.2's own instruction, not a bug, but a real
+  behavioural gap: the agent path cannot produce a Risk `PASS` at all
+  until D1.4 lands.
+- **Remaining gap:** D1.4 (Dev 1's Core-owned exact-open-risk seam) —
+  flagged to Dev 1 via SendMessage, since `PortfolioSnapshot` is the
+  `PortfolioStateProvider` Protocol's own return shape and D1.4's eventual
+  implementation must satisfy this same required field.
+- **Watch for:** a future `PortfolioStateProvider` implementation must not
+  reach for the old `max_risk_per_trade * len(open_positions)` shape as a
+  stopgap to unblock testing — that is the exact approximation D2.2 named
+  as structurally wrong; a synthetic/replay fake may supply a deterministic
+  trustworthy value (see `FakePortfolioStateProvider` in
+  `tests/unit/test_agent_decision_path.py`), but nothing claiming genuine
+  LIVE_SHADOW evidence may.
+- **Gate affected:** blocks any real (non-synthetic) directional
+  external-agent decision from ever reaching Supervisor `APPROVE` until
+  D1.4 exists — not a gate in the CI sense, but a hard functional ceiling
+  on this track's own progress (Owner Work Order D2's "done condition").
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

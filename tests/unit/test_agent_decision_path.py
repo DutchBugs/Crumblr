@@ -92,12 +92,18 @@ class FakePortfolioStateProvider:
     account: AccountState
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
+    open_risk_fraction: Decimal | None = Decimal("0")
+    """Defaults to a trustworthy zero so existing fixtures keep exercising
+    the happy path -- Owner Work Order D2.2 (`decision_path.py`
+    `PortfolioSnapshot.open_risk_fraction`). Set to `None` to exercise the
+    fail-closed HALT path (`TestOpenRiskFractionUnknown` below)."""
 
     def current(self) -> PortfolioSnapshot:
         return PortfolioSnapshot(
             account=self.account,
             open_positions=self.open_positions,
             reconciliation_status=self.reconciliation_status,
+            open_risk_fraction=self.open_risk_fraction,
         )
 
 
@@ -131,6 +137,7 @@ class Fixture:
     account: AccountState = field(default_factory=make_account_state)
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
+    open_risk_fraction: Decimal | None = Decimal("0")
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     recorder: RecordingRunRecorder = field(default_factory=RecordingRunRecorder)
@@ -155,6 +162,7 @@ class Fixture:
                 account=self.account,
                 open_positions=self.open_positions,
                 reconciliation_status=self.reconciliation_status,
+                open_risk_fraction=self.open_risk_fraction,
             ),
             "session_store": self.session_store,
             "kill_switch": self.kill_switch,
@@ -306,6 +314,50 @@ class TestHaltVerdictsTripTheKillSwitch:
         assert not any(
             payload.__class__.__name__ == "SystemHalted" for payload, *_ in recorder.events
         )
+
+
+class TestOpenRiskFractionUnknown:
+    """Owner Work Order D2.2 (`review/OWNER_WORK_ORDERS_2026-09-02.md`):
+    the count-based `max_risk_per_trade * len(open_positions)`
+    approximation is gone -- `PortfolioSnapshot.open_risk_fraction` is now
+    the caller's own exact figure, and `None` (the caller could not
+    establish one) must fail closed, never fall back to a silent zero."""
+
+    def test_none_open_risk_fraction_halts_before_risk_ever_runs(self) -> None:
+        kill_switch = KillSwitch()
+        fixture = Fixture(open_risk_fraction=None, kill_switch=kill_switch)
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.HALT
+        assert ReasonCode.SAFETY_STATE_UNKNOWN in result.risk_decision.reason_codes
+        assert kill_switch.is_halted
+
+    def test_none_open_risk_fraction_never_reaches_the_policy_gate(self) -> None:
+        fixture = Fixture(open_risk_fraction=None)
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.supervisor_decision is None
+        assert result.capsule.supervisor_decision is None
+        assert not any(source == "supervisor" for _, _, _, source in recorder.events)
+
+    def test_none_open_risk_fraction_still_seals_a_capsule(self) -> None:
+        fixture = Fixture(open_risk_fraction=None)
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.capsule.risk_decision == result.risk_decision
+        assert recorder.sealed == [result.capsule]
+
+    def test_a_trustworthy_zero_still_reaches_approve(self) -> None:
+        """Regression guard: `open_risk_fraction=Decimal("0")` is not the
+        same value as `None` and must not be treated as unknown."""
+        fixture = Fixture(open_risk_fraction=Decimal("0"))
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
 
 
 class TestAG012FreshSessionRecoveryEveryCall:
