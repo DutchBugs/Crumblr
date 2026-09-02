@@ -882,6 +882,63 @@ untouched by this slice) and item G (fork-side coordination).
 
 ---
 
+## 0m. External Supervisor boundary, core evaluation — done 2026-09-02 (AG-003, partial)
+
+User-directed priority, next after §0l. `SupervisorReview`/
+`ExternalSupervisorVerdict` have existed since Step A —
+`ExternalSupervisorVerdict.UNKNOWN`'s own docstring already said "timeout,
+error, or an invalid response -- never approval" — but nothing evaluated a
+review against that rule. New `agent_gateway/supervisor_review.py::
+evaluate_supervisor_review()` is that missing enforcement: turns a
+`SupervisorReview | None` into a safe verdict, `UNKNOWN` with a named
+reason on every failure mode — no response at all (timeout/transport
+error/never requested), a `proposal_id`/`trade_intent_id`/
+`trade_intent_decision_hash` binding mismatch (including the adversarial
+case: an outright `APPROVE` for the wrong decision is still discarded, not
+downgraded), an expired review (refused exactly at the boundary, not only
+past it), or a review that already self-reports `UNKNOWN`. Matches
+`feedback.1.28.md` section 6 exactly: "does not replace Risk, does not
+size, does not modify the intent, and cannot waive a broker/safety rule" —
+this module constructs, sizes and seals nothing; it only ever answers one
+question.
+
+**No HTTP client built.** Unlike the Static Agent fork, there is no real,
+specified external Supervisor service to build and prove a transport
+client against yet — writing one against an unspecified target would be
+exactly the kind of speculative code this track's "narrow, real, proven"
+discipline (established across §0j's real fork round trip) exists to
+avoid. This module is the transport-agnostic evaluation core; wiring it
+into `decision_path.py`'s flow and building a real client both wait for
+either a concrete target service or an explicit decision to build one
+speculatively.
+
+Self-review (`/code-review medium`) ran clean this pass (the skill's
+session limit from §0l had reset) — no findings. One bug did surface, but
+in the *test fixture*, not the module: an expiry-boundary test tried to
+set `expires_at_utc == reviewed_at_utc`, which `SupervisorReview`'s own
+`_check_expiry` validator already correctly rejects — caught immediately
+by simply running the tests, fixed by backdating `reviewed_at_utc` instead.
+
+Evidence: 11 tests in new `tests/unit/test_supervisor_review.py` — no
+response, genuine approve/veto passthrough, all three binding mismatches
+individually (plus the adversarial mismatched-APPROVE case), exact-boundary
+and one-second-early expiry, self-reported `UNKNOWN`. ruff/ruff format/mypy
+clean; full gate (unit + integration against `crumblr_test_dev2`)
+**1163 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+**Not done yet:** wiring `evaluate_supervisor_review()` into
+`decision_path.py` (where in the Risk → Policy → capsule flow an external
+Supervisor's veto should sit is a real design question not yet answered —
+build.md's stage order names "Supervisor vetoes" after the deterministic
+Policy Gate, but §0f/item F already replaced the internal-strategy
+Supervisor with a strategy-neutral platform-safety gate for the external
+path, so an *external* Supervisor review needs its own explicit placement
+decision relative to that, not an assumed one), and the transport client
+once a target service exists. AG-003 stays OPEN, now with its core logic
+closed rather than fully open.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
