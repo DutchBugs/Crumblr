@@ -939,6 +939,58 @@ closed rather than fully open.
 
 ---
 
+## 0n. AG-012 (single Risk authority) — design analysis, not implemented, 2026-09-02
+
+User-directed priority, last on the current list. Deliberately **not**
+code this session — this is the one item on the list that genuinely
+cannot be closed unilaterally, and attempting a one-sided patch would be
+worse than the honest interim mitigation already in place.
+
+**Why it needs both sides, concretely.** AG-012's option 2 (implemented,
+`decision_path.py`) re-derives the ledger fresh from `risk_session_states`
+on every Gateway-driven call. `application/live_decision.py
+::LiveDecisionOrchestrator` does the opposite by design: it recovers the
+ledger *once* per process lifetime (or on a trading-day rollover) and
+holds/mutates it in memory across many `decide_once()` calls, persisting
+back only when a worst case changes (`_persist_session()`'s own comment:
+"a database call per bar for a value that mostly has not moved" is
+deliberately avoided). A Postgres advisory lock added only on the Gateway
+side would serialize against nothing — the internal orchestrator's
+long-lived in-memory ledger never re-reads the database mid-lifetime, so
+it cannot observe or respect a lock the Gateway path takes around its own
+read. **Real single-authority correctness requires the internal
+orchestrator to give up that caching optimization too** — re-deriving the
+ledger fresh under a shared lock on every decision, the same discipline
+the Gateway path already accepted. That is a real behavioural/performance
+change to a Phase-4-approved, already-reviewed component, not a small
+patch — exactly the kind of change this codebase's own process expects to
+go through review, not a unilateral fix from either track.
+
+**Proposed design, for Dev 1 / the reviewer to evaluate, not adopted:** a
+Postgres advisory transaction lock (`pg_advisory_xact_lock`, the same
+primitive `persistence/agent_gateway.py::lock_assignment()` already proves
+out for AG-007) keyed on something symbol/account-scoped (e.g.
+`hashtext('risk-ledger:' || canonical_symbol)`), held for the full
+recover→evaluate→persist critical section, by *both* pipelines:
+`LiveDecisionOrchestrator.decide_once()` (would need to stop caching
+`self._ledger` across calls and re-recover under the lock every time) and
+`agent_gateway/decision_path.py::evaluate_agent_trade_intent()` (already
+re-recovers every call; would only need the lock added around the
+existing recover-then-evaluate sequence). Whichever pipeline is mid-lock
+briefly blocks the other's evaluation rather than racing past it —
+narrower blast radius than merging the two into one process, and reuses
+an already-proven primitive rather than a new one.
+
+**Not sent to Dev 1 as an implementation request** — they are heads-down
+on core critical path item 7 (automatic flatten submission) as of this
+entry, and this genuinely is not urgent: AG-012 remains explicitly "not a
+shadow blocker" because `order_send` stays unreachable from both
+pipelines regardless, so neither can actually consume the real risk
+budget this race is about. This design is recorded here for when either
+track has bandwidth to take it to the reviewer, not queued as active work.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
