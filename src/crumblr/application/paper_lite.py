@@ -1,0 +1,783 @@
+"""PAPER_LITE application orchestration.
+
+This is a deliberately narrow product/integration path:
+
+    trusted read-only market snapshot -> neutral external-agent context
+    -> AgentGateway -> Core Risk -> strategy-neutral platform Policy
+    -> explicit external-Supervisor skip -> DurablePaperBroker
+
+The module never imports the real MT5 execution adapter. The concrete paper
+broker constructs :class:`SimulatedBroker` internally, so changing a flag or
+passing a different adapter cannot turn this path into broker submission.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, Literal, Protocol
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+import yaml
+from pydantic import Field, model_validator
+
+from crumblr.agent_gateway.contracts import (
+    NoTradeDecision,
+    PolicyHints,
+    TradeProposal,
+    TradingAssignment,
+)
+from crumblr.agent_gateway.decision_path import (
+    AgentDecisionPathResult,
+    PortfolioSnapshot,
+    evaluate_agent_trade_intent,
+)
+from crumblr.agent_gateway.evidence import build_agent_context_evidence
+from crumblr.agent_gateway.gateway import AgentDecisionOutcomeResult, AgentGateway
+from crumblr.agent_gateway.market_context import (
+    AgentMarketContextV1,
+    build_agent_market_context_v1,
+)
+from crumblr.application.recording import RunRecorder
+from crumblr.config import (
+    AccountGuardConfig,
+    ConfigSection,
+    IntradayConfig,
+    PlatformConfig,
+    RiskConfig,
+)
+from crumblr.domain.enums import (
+    EntryType,
+    Environment,
+    IncidentStatus,
+    ReasonCode,
+    ReconciliationStatus,
+    RiskVerdict,
+    SupervisorVerdict,
+)
+from crumblr.domain.events import SystemHalted
+from crumblr.domain.hashing import fingerprint
+from crumblr.domain.models import ApprovedOrder, ExecutionResult, InstrumentSpec, MarketSnapshot
+from crumblr.domain.money import ZERO, ExactDecimal
+from crumblr.domain.timeutils import UtcDatetime, utc_now
+from crumblr.mt5_gateway.simulated import ClosedTrade
+from crumblr.persistence.paper_lite import (
+    SUPERVISOR_SKIPPED_PAPER_MODE,
+    DurablePaperBroker,
+    PaperPortfolioView,
+)
+from crumblr.risk import session
+from crumblr.risk.kill_switch import EquityLedger, KillSwitch
+from crumblr.risk.session import RiskSessionStore
+from crumblr.trading_agent.sessions import (
+    NEW_YORK,
+    WEEK_CLOSE_HOUR_ET,
+    is_market_open,
+    trading_day,
+)
+
+PAPER_LITE_MODE: Literal["PAPER_LITE"] = "PAPER_LITE"
+PAPER_LITE_POLICY_VERSION = "owner-risk-policy-v1-paper-lite"
+
+OWNER_MAX_RISK_PER_TRADE = Decimal("0.02")
+OWNER_MAX_OPEN_RISK = Decimal("0.03")
+OWNER_MAX_DAILY_LOSS = Decimal("0.04")
+OWNER_MAX_DRAWDOWN = Decimal("0.08")
+
+
+class PaperLiteConfigurationError(ValueError):
+    """The runtime configuration would weaken or mislabel PAPER_LITE."""
+
+
+class PaperLiteSafetyError(RuntimeError):
+    """The paper portfolio cannot continue honestly without operator action."""
+
+
+class PaperLiteSettings(ConfigSection):
+    """Explicit, secret-free runtime settings loaded from ``paper_lite.yaml``."""
+
+    mode: Literal["PAPER_LITE"]
+    starting_balance: Annotated[ExactDecimal, Field(gt=ZERO)]
+    journal_path: Path
+    safety_latch_path: Path
+    account_currency: Annotated[str, Field(min_length=3, max_length=8)]
+    leverage: int = Field(gt=0)
+    operational_max_open_positions: int = Field(gt=1)
+    max_risk_per_trade: ExactDecimal
+    max_open_risk: ExactDecimal
+    max_daily_loss: ExactDecimal
+    max_drawdown: ExactDecimal
+    friday_last_entry_minutes_before_close: int = Field(ge=0)
+    friday_flatten_minutes_before_close: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _owner_policy_is_exact(self) -> PaperLiteSettings:
+        expected = (
+            OWNER_MAX_RISK_PER_TRADE,
+            OWNER_MAX_OPEN_RISK,
+            OWNER_MAX_DAILY_LOSS,
+            OWNER_MAX_DRAWDOWN,
+        )
+        actual = (
+            self.max_risk_per_trade,
+            self.max_open_risk,
+            self.max_daily_loss,
+            self.max_drawdown,
+        )
+        if actual != expected:
+            raise ValueError(f"PAPER_LITE must use Owner Risk Policy v1: {expected!r}")
+        if self.friday_last_entry_minutes_before_close != 15:
+            raise ValueError("PAPER_LITE Friday last-entry offset must be 15 minutes")
+        if self.friday_flatten_minutes_before_close != 5:
+            raise ValueError("PAPER_LITE Friday flatten offset must be 5 minutes")
+        return self
+
+    def platform_config(self, base: PlatformConfig) -> PlatformConfig:
+        """Apply Owner Policy v1 to a PAPER base without enabling submission.
+
+        Core's current ``IntradayPolicy`` means *every* daily rollover. Owner
+        Policy v1 means only the Friday/weekend boundary. It is disabled here
+        and the temporary PAPER_LITE-only weekend guard below enforces the
+        owner rule using Core's canonical New York market clock. PL-003 tracks
+        replacement by Dev 1's shared Core seam.
+        """
+
+        risk = RiskConfig(
+            max_risk_per_trade=self.max_risk_per_trade,
+            max_open_risk=self.max_open_risk,
+            max_daily_loss=self.max_daily_loss,
+            max_drawdown=self.max_drawdown,
+            max_orders_per_hour=base.risk.max_orders_per_hour,
+            max_open_positions=self.operational_max_open_positions,
+            min_stop_distance_points=base.risk.min_stop_distance_points,
+            approved_config_version=None,
+        )
+        execution = base.execution.model_copy(
+            update={
+                "submission_enabled": False,
+                "feedback_2_0_approved": False,
+                "flatten_submission_enabled": False,
+            }
+        )
+        account_guard = AccountGuardConfig(
+            expected_server="Crumblr-PAPER_LITE",
+            expected_login=None,
+            require_demo_account=True,
+            expected_currency=self.account_currency,
+            expected_leverage=self.leverage,
+        )
+        intraday = IntradayConfig(
+            enabled=False,
+            last_entry_minutes_before_close=self.friday_last_entry_minutes_before_close,
+            flatten_minutes_before_close=self.friday_flatten_minutes_before_close,
+        )
+        return base.model_copy(
+            update={
+                "environment": Environment.PAPER,
+                "risk": risk,
+                "execution": execution,
+                "account_guard": account_guard,
+                "intraday": intraday,
+                "live_trading_acknowledged": False,
+            }
+        )
+
+
+def load_paper_lite_settings(path: Path) -> PaperLiteSettings:
+    """Load a dedicated PAPER_LITE file; malformed/extra keys fail closed."""
+
+    with path.open(encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    if not isinstance(raw, dict):
+        raise PaperLiteConfigurationError(f"{path} must contain a YAML mapping")
+    return PaperLiteSettings.model_validate(raw)
+
+
+class PaperLiteSessionPhase(StrEnum):
+    OPEN = "OPEN"
+    NO_NEW_ENTRIES = "NO_NEW_ENTRIES"
+    FLATTEN_REQUIRED = "FLATTEN_REQUIRED"
+    CLOSED = "CLOSED"
+
+
+def paper_lite_session_phase(
+    moment: UtcDatetime,
+    *,
+    last_entry_offset: timedelta = timedelta(minutes=15),
+    flatten_offset: timedelta = timedelta(minutes=5),
+) -> PaperLiteSessionPhase:
+    """Owner Policy v1's weekday-overnight / Friday-only boundary.
+
+    ``NEW_YORK``, ``WEEK_CLOSE_HOUR_ET`` and ``is_market_open`` are Core's
+    canonical market facts. No UTC close hour is copied here, so DST remains
+    correct. This narrow guard is temporary integration code pending PL-003.
+    """
+
+    if last_entry_offset < flatten_offset:
+        raise ValueError("last-entry offset must not be closer than flatten offset")
+    if not is_market_open(moment):
+        return PaperLiteSessionPhase.CLOSED
+    local = moment.astimezone(NEW_YORK)
+    if local.weekday() != 4:
+        return PaperLiteSessionPhase.OPEN
+    close = datetime.combine(local.date(), time(WEEK_CLOSE_HOUR_ET, 0), tzinfo=NEW_YORK).astimezone(
+        moment.tzinfo
+    )
+    if moment >= close - flatten_offset:
+        return PaperLiteSessionPhase.FLATTEN_REQUIRED
+    if moment >= close - last_entry_offset:
+        return PaperLiteSessionPhase.NO_NEW_ENTRIES
+    return PaperLiteSessionPhase.OPEN
+
+
+class PaperLiteTradingAgent(Protocol):
+    """External/toy Agent adapter; it receives only neutral Crumblr context."""
+
+    @property
+    def agent_id(self) -> UUID: ...
+
+    @property
+    def credential_secret(self) -> str: ...
+
+    def decide(self, context: AgentMarketContextV1) -> TradeProposal | NoTradeDecision: ...
+
+
+@dataclass(frozen=True)
+class PaperLitePortfolioProvider:
+    broker: DurablePaperBroker
+
+    def current(self) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            account=self.broker.account(),
+            open_positions=self.broker.positions(),
+            reconciliation_status=ReconciliationStatus.MATCHED,
+        )
+
+
+class PaperLiteOutcomeType(StrEnum):
+    ALREADY_PROCESSED = "ALREADY_PROCESSED"
+    NO_TRADE = "NO_TRADE"
+    GATEWAY_REJECTED = "GATEWAY_REJECTED"
+    SESSION_BLOCKED = "SESSION_BLOCKED"
+    EXACT_OPEN_RISK_UNAVAILABLE = "EXACT_OPEN_RISK_UNAVAILABLE"
+    RISK_BLOCKED = "RISK_BLOCKED"
+    POLICY_BLOCKED = "POLICY_BLOCKED"
+    PAPER_ORDER_CHECK_BLOCKED = "PAPER_ORDER_CHECK_BLOCKED"
+    PAPER_FILLED = "PAPER_FILLED"
+
+
+@dataclass(frozen=True)
+class PaperLiteOutcome:
+    outcome_type: PaperLiteOutcomeType
+    context: AgentMarketContextV1 | None
+    gateway_result: AgentDecisionOutcomeResult | None
+    portfolio: PaperPortfolioView
+    decision_path: AgentDecisionPathResult | None = None
+    execution_result: ExecutionResult | None = None
+    closed_trades: tuple[ClosedTrade, ...] = ()
+    detail: str | None = None
+
+
+class PaperLiteOrchestrator:
+    """One PAPER_LITE market observation and external-agent decision at a time."""
+
+    def __init__(
+        self,
+        config: PlatformConfig,
+        *,
+        settings: PaperLiteSettings,
+        assignment: TradingAssignment,
+        agent: PaperLiteTradingAgent,
+        gateway: AgentGateway,
+        broker: DurablePaperBroker,
+        recorder: RunRecorder,
+        session_store: RiskSessionStore,
+        kill_switch: KillSwitch,
+        code_commit: str,
+        clock: Callable[[], UtcDatetime] = utc_now,
+    ) -> None:
+        _validate_paper_lite_platform_config(config, settings)
+        if assignment.environment is not Environment.PAPER:
+            raise PaperLiteConfigurationError("PAPER_LITE assignment must target PAPER")
+        if assignment.allowed_agent_id != agent.agent_id:
+            raise PaperLiteConfigurationError("PAPER_LITE Agent does not own the assignment")
+        self._config = config
+        self._settings = settings
+        self._assignment = assignment
+        self._agent = agent
+        self._gateway = gateway
+        self._broker = broker
+        self._recorder = recorder
+        self._session_store = session_store
+        self._kill_switch = kill_switch
+        self._code_commit = code_commit
+        self._clock = clock
+        self._risk_ledger: EquityLedger | None = None
+        self._risk_trading_day: date | None = None
+        self._risk_recorded_at: UtcDatetime | None = None
+
+    def process(
+        self,
+        snapshot: MarketSnapshot,
+        spec: InstrumentSpec,
+        *,
+        incident_status: IncidentStatus = IncidentStatus.UNKNOWN,
+    ) -> PaperLiteOutcome:
+        """Advance paper state, obtain an Agent decision and evaluate it."""
+
+        if spec.canonical_symbol != self._assignment.canonical_symbol:
+            raise PaperLiteSafetyError("instrument spec does not match the assignment symbol")
+        if snapshot.symbol != self._assignment.canonical_symbol:
+            raise PaperLiteSafetyError("market snapshot does not match the assignment symbol")
+        if snapshot.timeframe != self._assignment.timeframe:
+            raise PaperLiteSafetyError("market snapshot timeframe does not match the assignment")
+        if snapshot.symbol_spec_version != spec.spec_version:
+            raise PaperLiteSafetyError("market snapshot and instrument spec versions disagree")
+
+        if self._broker.has_market_observation:
+            self._recover_risk_session(snapshot)
+        closed_trades = self._broker.advance_snapshot(snapshot)
+        if self._risk_ledger is None:
+            self._recover_risk_session(snapshot)
+        now = self._clock()
+        self._risk_recorded_at = snapshot.received_time_utc
+        session_phase = paper_lite_session_phase(
+            now,
+            last_entry_offset=timedelta(
+                minutes=self._settings.friday_last_entry_minutes_before_close
+            ),
+            flatten_offset=timedelta(minutes=self._settings.friday_flatten_minutes_before_close),
+        )
+        if session_phase is PaperLiteSessionPhase.FLATTEN_REQUIRED and self._broker.positions():
+            flatten_id = uuid5(
+                NAMESPACE_URL,
+                f"crumblr:paper-lite:friday-flatten:{now.astimezone(NEW_YORK).date()}",
+            )
+            self._broker.flatten_all(
+                flatten_request_id=flatten_id,
+                reason="owner_policy_v1_friday_flatten",
+            )
+        elif session_phase is PaperLiteSessionPhase.CLOSED and self._broker.positions():
+            self._trip_risk_session(
+                (ReasonCode.OVERNIGHT_EXPOSURE,),
+                snapshot,
+                "paper exposure reached a closed weekend without a confirmed Friday flatten",
+            )
+            self._persist_risk_session()
+            raise PaperLiteSafetyError(
+                "paper exposure reached a closed weekend without a confirmed Friday flatten"
+            )
+        self._persist_risk_session()
+
+        latest_bar = snapshot.bars[-1]
+        window_id = uuid5(
+            NAMESPACE_URL,
+            "crumblr:paper-lite:decision-window:"
+            f"{self._assignment.assignment_id}:{snapshot.symbol}:{snapshot.timeframe}:"
+            f"{latest_bar.open_time_utc.isoformat()}",
+        )
+        claimed = self._broker.record_audit_fact(
+            "PAPER_LITE_DECISION_WINDOW_CLAIMED",
+            correlation_id=window_id,
+            detail=latest_bar.open_time_utc.isoformat(),
+        )
+        if not claimed:
+            return PaperLiteOutcome(
+                outcome_type=PaperLiteOutcomeType.ALREADY_PROCESSED,
+                context=None,
+                gateway_result=None,
+                portfolio=self._broker.portfolio_view(),
+                closed_trades=closed_trades,
+                detail="this assignment/bar decision window was already claimed",
+            )
+
+        account = self._broker.account()
+        positions = self._broker.positions()
+        portfolio_summary_hash = fingerprint(
+            {
+                "account": account.model_dump(mode="json"),
+                "positions": [position.model_dump(mode="json") for position in positions],
+            }
+        )
+        bundle = self._gateway.publish_context(
+            assignment_id=self._assignment.assignment_id,
+            symbol=snapshot.symbol,
+            market_snapshot_id=snapshot.snapshot_id,
+            instrument_spec_version=spec.spec_version,
+            portfolio_summary_hash=portfolio_summary_hash,
+            session_state=snapshot.session_state,
+            data_quality=snapshot.data_quality,
+            now=now,
+            policy_hints=PolicyHints(
+                max_intents_per_hour_hint=self._assignment.max_proposals_per_hour,
+                min_stop_distance_points_hint=self._config.risk.min_stop_distance_points,
+                session_blackout_active=session_phase is not PaperLiteSessionPhase.OPEN,
+                notes=PAPER_LITE_POLICY_VERSION,
+            ),
+        )
+        context = build_agent_market_context_v1(
+            context_id=bundle.context_id,
+            content_hash=bundle.content_hash,
+            assignment_id=self._assignment.assignment_id,
+            strategy_artifact_id=self._assignment.strategy_artifact_id,
+            strategy_artifact_hash=self._assignment.strategy_artifact_hash,
+            issued_at_utc=bundle.issued_at_utc,
+            expires_at_utc=bundle.expires_at_utc,
+            snapshot=snapshot,
+            spec=spec,
+            session_state=snapshot.session_state,
+            safety_state=self._kill_switch.state,
+            reconciliation_status=ReconciliationStatus.MATCHED,
+            feature_snapshot_id=bundle.feature_snapshot_id,
+            open_position_count=len(positions),
+            # PL-001: no guessed value crosses this boundary.
+            open_risk_fraction=None,
+            policy_hints=bundle.policy_hints,
+        )
+        decision = self._agent.decide(context)
+        gateway_result = self._submit_to_gateway(decision, now=now)
+
+        if not gateway_result.accepted:
+            return self._outcome(
+                PaperLiteOutcomeType.GATEWAY_REJECTED,
+                context,
+                gateway_result,
+                closed_trades=closed_trades,
+                detail=(gateway_result.reason.value if gateway_result.reason is not None else None),
+            )
+
+        features = build_agent_context_evidence(
+            symbol=snapshot.symbol,
+            computed_at_utc=bundle.issued_at_utc,
+            market_snapshot_id=snapshot.snapshot_id,
+            instrument_spec_version=spec.spec_version,
+            session_state=snapshot.session_state,
+            data_quality=snapshot.data_quality,
+        )
+        if isinstance(decision, NoTradeDecision):
+            decision_path = evaluate_agent_trade_intent(
+                None,
+                outcome_id=gateway_result.outcome_id,
+                strategy_version=self._assignment.strategy_artifact_hash,
+                snapshot=snapshot,
+                spec=spec,
+                features=features,
+                config=self._config,
+                portfolio_state=PaperLitePortfolioProvider(self._broker),
+                session_store=self._session_store,
+                kill_switch=self._kill_switch,
+                recorder=self._recorder,
+                environment=Environment.PAPER,
+                code_commit=self._code_commit,
+                now=now,
+                incident_status=incident_status,
+            )
+            return self._outcome(
+                PaperLiteOutcomeType.NO_TRADE,
+                context,
+                gateway_result,
+                decision_path=decision_path,
+                closed_trades=closed_trades,
+            )
+
+        if self._kill_switch.is_halted:
+            detail = ",".join(reason.value for reason in self._kill_switch.active_reasons)
+            self._broker.record_audit_fact(
+                "PAPER_LITE_SAFETY_HALTED",
+                correlation_id=gateway_result.outcome_id,
+                detail=detail,
+            )
+            return self._outcome(
+                PaperLiteOutcomeType.RISK_BLOCKED,
+                context,
+                gateway_result,
+                closed_trades=closed_trades,
+                detail=detail,
+            )
+
+        if session_phase is not PaperLiteSessionPhase.OPEN:
+            self._broker.record_audit_fact(
+                "PAPER_LITE_SESSION_BLOCKED",
+                correlation_id=gateway_result.outcome_id,
+                detail=session_phase.value,
+            )
+            return self._outcome(
+                PaperLiteOutcomeType.SESSION_BLOCKED,
+                context,
+                gateway_result,
+                closed_trades=closed_trades,
+                detail=session_phase.value,
+            )
+
+        # PL-001/PL-002: the shared path still guesses total open risk and
+        # enforces one exposure. Never route a second paper proposal through
+        # that misleading approximation; refuse until the Core seam lands.
+        if positions:
+            self._broker.record_audit_fact(
+                "PAPER_LITE_EXACT_OPEN_RISK_UNAVAILABLE",
+                correlation_id=gateway_result.outcome_id,
+                detail="shared Core exact-open-risk seam has not landed",
+            )
+            return self._outcome(
+                PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE,
+                context,
+                gateway_result,
+                closed_trades=closed_trades,
+                detail="shared Core exact-open-risk seam has not landed",
+            )
+
+        assert gateway_result.trade_intent is not None
+        decision_path = evaluate_agent_trade_intent(
+            gateway_result.trade_intent,
+            outcome_id=gateway_result.outcome_id,
+            strategy_version=self._assignment.strategy_artifact_hash,
+            snapshot=snapshot,
+            spec=spec,
+            features=features,
+            config=self._config,
+            portfolio_state=PaperLitePortfolioProvider(self._broker),
+            session_store=self._session_store,
+            kill_switch=self._kill_switch,
+            recorder=self._recorder,
+            environment=Environment.PAPER,
+            code_commit=self._code_commit,
+            now=now,
+            incident_status=incident_status,
+        )
+        risk = decision_path.risk_decision
+        if risk is None or risk.verdict is not RiskVerdict.PASS:
+            return self._outcome(
+                PaperLiteOutcomeType.RISK_BLOCKED,
+                context,
+                gateway_result,
+                decision_path=decision_path,
+                closed_trades=closed_trades,
+            )
+        policy = decision_path.supervisor_decision
+        if policy is None or policy.verdict is not SupervisorVerdict.APPROVE:
+            return self._outcome(
+                PaperLiteOutcomeType.POLICY_BLOCKED,
+                context,
+                gateway_result,
+                decision_path=decision_path,
+                closed_trades=closed_trades,
+            )
+
+        self._broker.record_audit_fact(
+            SUPERVISOR_SKIPPED_PAPER_MODE,
+            correlation_id=gateway_result.outcome_id,
+            detail="external Supervisor omitted; Core Risk and platform Policy approved",
+        )
+        intent = gateway_result.trade_intent
+        assert risk.approved_volume is not None
+        assert risk.risk_amount is not None
+        assert intent.stop_loss_price is not None
+        order = ApprovedOrder(
+            order_request_id=uuid5(
+                NAMESPACE_URL, f"crumblr:paper-lite:order:{intent.decision_hash}"
+            ),
+            intent_id=intent.intent_id,
+            intent_risk_decision_id=risk.decision_id,
+            final_risk_decision_id=None,
+            supervisor_decision_id=policy.decision_id,
+            broker_symbol=spec.broker_symbol,
+            side=intent.side,
+            entry_type=intent.entry_type,
+            volume=risk.approved_volume,
+            price=None if intent.entry_type is EntryType.MARKET else intent.reference_price,
+            stop_loss_price=intent.stop_loss_price,
+            take_profit_price=intent.take_profit_price,
+            max_slippage_points=self._config.execution.max_slippage_points,
+            created_at_utc=now,
+            expires_at_utc=intent.expires_at_utc,
+            environment=Environment.PAPER,
+        )
+        check = self._broker.order_check(order)
+        if not check.accepted:
+            self._broker.record_audit_fact(
+                "PAPER_LITE_ORDER_CHECK_BLOCKED",
+                correlation_id=gateway_result.outcome_id,
+                detail=check.comment,
+            )
+            return self._outcome(
+                PaperLiteOutcomeType.PAPER_ORDER_CHECK_BLOCKED,
+                context,
+                gateway_result,
+                decision_path=decision_path,
+                closed_trades=closed_trades,
+                detail=check.comment,
+            )
+        execution = self._broker.submit(order, authorized_risk_amount=risk.risk_amount)
+        return self._outcome(
+            PaperLiteOutcomeType.PAPER_FILLED,
+            context,
+            gateway_result,
+            decision_path=decision_path,
+            execution_result=execution,
+            closed_trades=closed_trades,
+        )
+
+    def _submit_to_gateway(
+        self, decision: TradeProposal | NoTradeDecision, *, now: UtcDatetime
+    ) -> AgentDecisionOutcomeResult:
+        if isinstance(decision, TradeProposal):
+            return self._gateway.submit_trade_proposal(
+                agent_id=self._agent.agent_id,
+                credential_secret=self._agent.credential_secret,
+                proposal=decision,
+                now=now,
+            )
+        return self._gateway.submit_no_trade(
+            agent_id=self._agent.agent_id,
+            credential_secret=self._agent.credential_secret,
+            decision=decision,
+            now=now,
+        )
+
+    def _outcome(
+        self,
+        outcome_type: PaperLiteOutcomeType,
+        context: AgentMarketContextV1,
+        gateway_result: AgentDecisionOutcomeResult,
+        *,
+        decision_path: AgentDecisionPathResult | None = None,
+        execution_result: ExecutionResult | None = None,
+        closed_trades: tuple[ClosedTrade, ...] = (),
+        detail: str | None = None,
+    ) -> PaperLiteOutcome:
+        self._persist_risk_session()
+        return PaperLiteOutcome(
+            outcome_type=outcome_type,
+            context=context,
+            gateway_result=gateway_result,
+            portfolio=self._broker.portfolio_view(),
+            decision_path=decision_path,
+            execution_result=execution_result,
+            closed_trades=closed_trades,
+            detail=detail,
+        )
+
+    def _recover_risk_session(self, snapshot: MarketSnapshot) -> None:
+        account = self._broker.account()
+        positions = self._broker.positions()
+        record = self._session_store.load_latest()
+        market_day = trading_day(snapshot.event_time_utc)
+
+        if record.is_known and record.state is None and positions:
+            self._risk_ledger = EquityLedger(starting_equity=account.equity)
+            self._risk_trading_day = market_day
+            self._trip_risk_session(
+                (ReasonCode.SAFETY_STATE_UNKNOWN,),
+                snapshot,
+                "paper journal contains exposure but the durable risk session is absent",
+            )
+            return
+
+        recovery = session.recover_session(
+            record,
+            live_equity=account.equity,
+            live_open_positions=len(positions),
+            market_day=market_day,
+        )
+        self._risk_ledger = recovery.ledger
+        self._risk_trading_day = recovery.trading_day
+        if recovery.must_halt:
+            self._trip_risk_session(recovery.reason_codes, snapshot, recovery.detail)
+            return
+
+        exhausted: list[ReasonCode] = []
+        if recovery.ledger.max_session_loss_fraction >= self._config.risk.max_daily_loss:
+            exhausted.append(ReasonCode.DAILY_LOSS_LIMIT)
+        if recovery.ledger.max_drawdown_fraction >= self._config.risk.max_drawdown:
+            exhausted.append(ReasonCode.MAX_DRAWDOWN)
+        if exhausted:
+            self._trip_risk_session(
+                tuple(exhausted),
+                snapshot,
+                "persisted PAPER_LITE risk-session maximum reached an Owner Policy limit",
+            )
+
+    def _persist_risk_session(self) -> None:
+        if (
+            self._risk_ledger is None
+            or self._risk_trading_day is None
+            or self._risk_recorded_at is None
+        ):
+            return
+        account = self._broker.account()
+        positions = self._broker.positions()
+        self._risk_ledger.update(account.equity)
+        self._session_store.save(
+            session.snapshot(
+                self._risk_ledger,
+                trading_day=self._risk_trading_day,
+                realized_pnl=self._broker.portfolio_view().realized_profit,
+                open_risk_fraction=self._broker.exact_open_risk_fraction(),
+                open_position_count=len(positions),
+                recorded_at_utc=self._risk_recorded_at,
+            )
+        )
+
+    def _trip_risk_session(
+        self,
+        reason_codes: tuple[ReasonCode, ...],
+        snapshot: MarketSnapshot,
+        detail: str | None,
+    ) -> None:
+        if self._kill_switch.is_halted:
+            return
+        state_before = self._kill_switch.state
+        self._kill_switch.trip(
+            reason_codes=reason_codes,
+            tripped_by="paper_lite_risk_session_recovery",
+            occurred_at_utc=snapshot.received_time_utc,
+            detail=detail,
+        )
+        self._recorder.record(
+            SystemHalted(
+                state_before=state_before,
+                state_after=self._kill_switch.state,
+                reason_codes=reason_codes,
+                tripped_by="paper_lite_risk_session_recovery",
+                detail=detail,
+            ),
+            correlation_id=snapshot.snapshot_id,
+            occurred_at_utc=snapshot.received_time_utc,
+            source="paper_lite",
+        )
+        self._recorder.flush()
+
+
+def _validate_paper_lite_platform_config(
+    config: PlatformConfig, settings: PaperLiteSettings
+) -> None:
+    if settings.mode != PAPER_LITE_MODE:
+        raise PaperLiteConfigurationError("mode must be PAPER_LITE")
+    if config.environment is not Environment.PAPER:
+        raise PaperLiteConfigurationError("PAPER_LITE requires Environment.PAPER")
+    if config.live_trading_acknowledged:
+        raise PaperLiteConfigurationError("PAPER_LITE cannot acknowledge live trading")
+    if (
+        config.execution.submission_enabled
+        or config.execution.feedback_2_0_approved
+        or config.execution.flatten_submission_enabled
+    ):
+        raise PaperLiteConfigurationError("every real/flatten submission flag must remain false")
+    limits = (
+        config.risk.max_risk_per_trade,
+        config.risk.max_open_risk,
+        config.risk.max_daily_loss,
+        config.risk.max_drawdown,
+    )
+    expected = (
+        OWNER_MAX_RISK_PER_TRADE,
+        OWNER_MAX_OPEN_RISK,
+        OWNER_MAX_DAILY_LOSS,
+        OWNER_MAX_DRAWDOWN,
+    )
+    if limits != expected:
+        raise PaperLiteConfigurationError("platform config does not match Owner Risk Policy v1")
