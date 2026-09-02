@@ -14,7 +14,7 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `ea80f05` (pending — see the sixty-fifth entry's follow-up commit for the exact SHA once item 8 merges) |
+| **`main` HEAD** | `53dbccc` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
 | **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`), automatic flatten submission (item 7, `ADR-009`), post-fill reconciliation (item 8, `ADR-010`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 9 (broker-side SL verification) — the last item on the owner's punch list. BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
@@ -8802,8 +8802,8 @@ Decision:
   approved before any code was written.
 - Coordinated the migration with Dev 2 before creating it, per
   instruction §8.
-- Not yet committed — pending the usual per-turn approval and full-suite
-  confirmation, on a new `core/`-prefixed branch.
+- Committed and pushed after per-turn approval: `53dbccc` on
+  `core/post-fill-reconciliation` → `main`.
 
 Next:
 - Confirm hosted CI is genuinely fully green (still needs a human or a
