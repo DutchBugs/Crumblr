@@ -991,6 +991,59 @@ track has bandwidth to take it to the reviewer, not queued as active work.
 
 ---
 
+## 0o. Gateway reason-code handling made structural/opaque — done 2026-09-02 (feedback.1.28 §11 item E)
+
+Continued autonomously after Dev 1 wrapped their session — the next item
+still open from feedback.1.28's own Dev-2 work order, unblocked and not
+waiting on anything. New `agent_gateway/contracts.py::ReasonCodeToken`/
+`ReasonCodes`: applied to `TradeProposal.reason_codes`,
+`NoTradeDecision.reason_codes` and `SupervisorReview.reason_codes` alike.
+Exactly the structural rules `feedback.1.28.md` section 5 authorizes —
+non-empty per code, a count ceiling (20), a length ceiling (128 chars),
+safe printable-ASCII-only characters (no control characters, no
+newlines) — and nothing beyond that: no casing requirement, no known-token
+list, no whitelist anywhere. Deliberately **no** tuple-level `min_length`:
+an *empty* `reason_codes` must still construct successfully on
+`TradeProposal`/`NoTradeDecision` — the Gateway's own
+`AgentRejectionReason.MISSING_REASON_CODES` rejection (already built, an
+audited outcome) handles that case, not a `pydantic.ValidationError` at
+the contract boundary.
+
+Also checked whether "proposal binds to the assigned strategy artifact
+hash" (the same section 5 sentence's other named rule) was missing —
+it is not: `AgentGateway._build_trade_intent` already sources
+`TradeIntent.strategy_version` exclusively from the trusted
+`assignment.strategy_artifact_hash`, never from
+`TradeProposal.strategy_artifact_hash`'s own (unverified) claim, so the
+proposal's claim is already structurally inert regardless of whether it
+agrees. Confirmed by re-reading `gateway.py`, not assumed.
+
+Self-review (`/code-review medium`) before commit found one real
+cross-module ripple, fixed same pass — tracked as **AG-020** (closed):
+adding these bounds meant `static_agent_translate.py
+::translate_no_trade_response()`'s final `NoTradeDecision(...)`
+construction could now raise a raw `pydantic.ValidationError` for a
+response that passed that module's own coarser `isinstance` checks but
+violated one of the new contract bounds — contradicting that module's own
+documented "always raises `StaticAgentResponseRejectedError`" contract and
+every existing test asserting that exact type. Fixed by wrapping the
+construction and re-raising as `StaticAgentResponseRejectedError`;
+regression-tested with a non-ASCII reason code.
+
+Evidence: 10 new tests in `tests/unit/test_agent_gateway_contracts.py
+::TestReasonCodesAreStructurallyBoundedNotWhitelisted` (empty tuple still
+constructs, two wildly different made-up vocabularies both accepted,
+count/length boundaries on both sides, empty string rejected, a control
+character and a newline each rejected, the bound applies to
+`SupervisorReview` too), plus the AG-020 regression test in
+`tests/unit/test_static_agent_translate.py`. ruff/ruff format/mypy clean;
+full gate (unit + integration against `crumblr_test_dev2`)
+**1255 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+This closes feedback.1.28 section 11 item E.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
