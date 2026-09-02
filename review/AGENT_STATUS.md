@@ -824,6 +824,64 @@ identity/assignment and a script driving `static_agent_client.evaluate()`
 
 ---
 
+## 0l. `AgentMarketContextV1` — strategy-neutral outbound context — done 2026-09-02
+
+User-directed priority, next after §0k. New `agent_gateway/market_context.py`:
+`AgentMarketContextV1` + `build_agent_market_context_v1()`, implementing
+`feedback.1.28.md` section 3's architectural correction to review 1.27's
+original context-payload wording. Four categories exactly as that review
+names them — BINDING/PROVENANCE, MARKET (platform-owned, strategy-neutral:
+current bid/ask/spread, a bounded window of confirmed closed bars with
+exact source identities, freshness/quality), INSTRUMENT (read-only broker
+facts), PLATFORM STATE (session/safety/reconciliation health,
+fail-closed-by-construction — no permissive defaults) — and deliberately
+none of section 3's negative list (no `liquidity_sweep_detected`,
+`FVG_CONFIRMED`, `WAITING_FOR_MSS`, `PIVOT_2_2_CONFIRMED`, OTE, strategy
+regime, or strategy reason code anywhere in the schema).
+
+**A Crumblr-owned artifact, not a wire format.** This is not the Static
+Agent fork's `TraderContext 1.0` shape — `static_agent_transport.py`
+stays the fork-specific adapter (still narrowly scoped to the
+unhealthy-market case). A future adapter, for the Static Agent fork or a
+second, differently-shaped toy/test agent (F-066 item 8's own regression
+proof), consumes this contract; this module knows nothing about any
+specific fork.
+
+**No automated self-review this pass — the `/code-review` skill hit a
+session usage limit and could not run.** Rather than skip the discipline
+this track has relied on all session, did a deliberate manual re-read
+instead and found one real bug before committing, tracked as **AG-019**
+(closed): the bar-bounding slice `snapshot.bars[-max_bars:]` returns *all*
+bars for `max_bars=0`, not zero (`-0 == 0` in Python slicing) — silently
+contradicting the "bounded window" requirement `feedback.1.28.md` section
+3 names twice. Fixed with an explicit `max_bars > 0` guard and a
+negative-value refusal; regression-tested. Noting the gap in the process
+plainly rather than presenting this as equivalently reviewed to the other
+slices this session, per this project's "report failures plainly" rule.
+
+Evidence: 14 tests in new `tests/unit/test_agent_market_context.py` —
+binding/market/instrument/platform-state fields forwarded correctly, bar
+bounding (including the AG-019 zero/negative cases), source-bar-id
+derivation, a structural strategy-neutrality test (asserts no field name
+anywhere in the schema contains any of section 3's forbidden tokens —
+fails immediately if a future edit reintroduces a strategy-specific
+concept, rather than depending on a reviewer noticing), `extra="forbid"`
+and frozen-immutability proofs. ruff/ruff format/mypy clean; full gate
+(unit + integration against `crumblr_test_dev2`) **1152 passed**,
+3 skipped (pre-existing, unrelated), 0 failed.
+
+**Not done yet:** nothing yet consumes `AgentMarketContextV1` to actually
+build a fork-specific wire payload from it (today's `static_agent_transport
+.build_unhealthy_market_context()` still constructs its own market/
+instrument blocks inline, since the unhealthy-market smoke case does not
+need real bar/quote data) — wiring the two together is natural follow-up
+once a real driving process exists (§0j/§0k's own "not done yet" note).
+Also not done: item E (opaque Gateway reason-code handling — this
+contract carries no reason codes at all, so item E's own scope is
+untouched by this slice) and item G (fork-side coordination).
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
