@@ -329,3 +329,23 @@ class TestConfigVersioning:
 
         assert approved.config_version == version
         assert approved.risk.approved_config_version == approved.config_version
+
+    def test_enabling_the_flatten_submission_does_not_change_config_version(self) -> None:
+        """Core critical path item 7: `flatten_submission_enabled` is a
+
+        fourth governance/approval flag (`risk/flatten_gate.py` condition
+        10), added to the same exclusion set for the identical reason
+        F-062 fixed for the first three — a governance flag hashed into
+        the version it is compared against is self-referential."""
+        baseline = PlatformConfig.model_validate(paper_config_payload())
+        version = baseline.config_version
+
+        enabled = baseline.model_copy(
+            update={
+                "execution": baseline.execution.model_copy(
+                    update={"flatten_submission_enabled": True}
+                ),
+            }
+        )
+
+        assert enabled.config_version == version

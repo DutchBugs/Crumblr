@@ -387,3 +387,52 @@ AgentDecisionEventStore's own append_event carries) on a loss, compare
 via domain.hashing.fingerprint() on both sides, raise on mismatch.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-02 — DEV1
+Changed: New Alembic migration, migrations/versions/20260902_cc35e55b3f92
+_flatten_requests_and_events.py, revises d4b6e2f81a37 (the current head at
+the time this was created - confirmed via `alembic heads`). Adds two new
+tables, flatten_requests/flatten_events (core critical path item 7,
+automatic flatten submission, review/adr/ADR-009-automatic-flatten
+-submission.md) - structurally parallel to execution_requests/
+execution_events but with no FK into decision_capsules: a flatten is
+policy-driven, not proposal-driven. Confirmed with Dev 2 before creating
+the revision (no migration in flight on their side).
+Impact: persistence/schema.py is shared/cross-cutting infrastructure.
+This addition is purely additive - two new tables, no existing table
+touched, no existing FK or index changed. Confirmed via
+tests/integration/test_migrations.py (all 8 tests pass, including
+schema/migration-agreement) and a full-suite run.
+Action required: current Alembic head is now cc35e55b3f92 - the next
+migration on either side must chain from there.
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-09-02 — DEV1
+Changed: domain/models.py gains two new contracts, FlattenInstruction and
+FlattenPlan (core critical path item 7, ADR-009 SS2.5) - the flatten
+analogue of ApprovedOrder, deliberately not ApprovedOrder itself (that
+type rejects Side.FLAT and requires intent/risk-decision/supervisor-
+decision ids a policy-driven close has no honest value for). Also two
+new ReasonCode members (POSITION_BOOK_INCOMPLETE, FLATTEN_NOT_REQUIRED,
+FLATTEN_SUBMISSION_NOT_ENABLED - three, not two) and a new FlattenEventType
+enum, both in domain/enums.py.
+Impact: domain/enums.py and domain/models.py are shared-contract
+territory per DEV1/DEV2 instructions section 4. Both additions are
+purely additive - no existing model's shape changed, no existing enum
+member renamed or removed. Confirmed via grep: zero references to any
+of FlattenInstruction/FlattenPlan/FlattenEventType/the three new
+ReasonCode members anywhere in src/crumblr/agent_gateway/.
+Action required: none expected. If external-agent-driven flatten
+handling is ever needed (not currently planned - a flatten stays a
+Core-internal, policy-driven action per ADR-004 SS5.1, never agent-
+proposed), these are the contracts to reuse rather than inventing
+parallel ones.
+Relevant commit: (this commit)
+```

@@ -63,6 +63,7 @@ from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, DEFAULT_TEST_URL
 from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
+from crumblr.persistence.flatten import FlattenEventStore, FlattenRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
 from crumblr.risk.trading_window import permits_new_entry, policy_from_config
@@ -261,6 +262,8 @@ def main() -> int:
 
     requests = ExecutionRequestStore(runtime.engine)
     events = ExecutionEventStore(runtime.engine)
+    flatten_requests = FlattenRequestStore(runtime.engine)
+    flatten_events = FlattenEventStore(runtime.engine)
     broker_state = BrokerStateStore(runtime.engine)
     CapsuleStore(runtime.engine).seal(capsule)
     assert capsule.trade_intent is not None
@@ -273,6 +276,8 @@ def main() -> int:
         capsules=_SingleCapsuleSource(capsule),
         requests=requests,
         events=events,
+        flatten_requests=flatten_requests,
+        flatten_events=flatten_events,
         broker_state=broker_state,
         instrument_specs=instrument_specs,
         session_store=runtime.session_store,

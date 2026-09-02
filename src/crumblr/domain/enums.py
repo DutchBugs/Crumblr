@@ -258,6 +258,31 @@ class ReasonCode(StrEnum):
 
     is `False` — `feedback.2.0.md` has not given its GO yet."""
 
+    # Core critical path item 7 — `risk/flatten_gate.py`.
+    POSITION_BOOK_INCOMPLETE = "POSITION_BOOK_INCOMPLETE"
+    """`FlattenGate`: the position snapshot this pass observed is not
+
+    `SnapshotCompleteness.COMPLETE`. Distinct from `RECONCILIATION_UNKNOWN`
+    below — a book can be internally complete and freshly read while
+    reconciliation itself is unknown for an unrelated reason (a missing
+    account snapshot, say). Either alone is sufficient reason not to close
+    a position book this platform cannot currently see in full."""
+
+    FLATTEN_NOT_REQUIRED = "FLATTEN_NOT_REQUIRED"
+    """`FlattenGate`: neither `trading_window.requires_flat` nor
+
+    `has_crossed_rollover` currently holds. Names the precondition the
+    gate exists to check, so a context built with a stale or wrong clock
+    fails with a legible reason rather than silently doing nothing."""
+
+    FLATTEN_SUBMISSION_NOT_ENABLED = "FLATTEN_SUBMISSION_NOT_ENABLED"
+    """`FlattenGate`: `config.ExecutionConfig.flatten_submission_enabled`
+
+    is `False` — the default, and the value in every shipped config.
+    Deliberately a fourth, separate flag from `submission_enabled`
+    (ADR-004 §5.1, ADR-009 §2): enabling order submission must not
+    silently also enable automatic liquidation."""
+
     # Operator action.
     MANUAL_HALT = "MANUAL_HALT"
 
@@ -413,6 +438,81 @@ class ExecutionEventType(StrEnum):
     FILLED = "FILLED"
     RECONCILED = "RECONCILED"
     CLOSED = "CLOSED"
+
+
+class FlattenEventType(StrEnum):
+    """Core critical path item 7 (ADR-009) — the append-only log of what
+
+    happened to one flatten occurrence
+    (`persistence/flatten.py::FlattenEventStore`). A **separate** vocabulary
+    from `ExecutionEventType` above, on purpose: a flatten has no
+    `DecisionCapsule` and no `TradeIntent` (it is policy-driven, not
+    proposal-driven — see `persistence/flatten.py`'s module docstring for
+    why it lives in its own table pair), so sharing one event enum across
+    both identity spaces would let a flatten event carry an order-only
+    name, or vice versa, silently.
+    """
+
+    FLATTEN_REQUEST_CLAIMED = "FLATTEN_REQUEST_CLAIMED"
+    """This pass's claim on today's flatten occurrence for this symbol won
+
+    — the `persistence/flatten.py::FlattenRequestStore.claim()` analogue
+    of `REQUEST_CLAIMED` above."""
+
+    FLATTEN_GATE_BLOCKED = "FLATTEN_GATE_BLOCKED"
+    """`risk/flatten_gate.py::evaluate_flatten_gate()` closed. Carries the
+
+    gate's `reason_codes` and the complete serialized `FlattenGateContext`
+    in its payload — the same shape as `SUBMISSION_GATE_BLOCKED`, and, for
+    the same reason, the expected, honest outcome against every shipped
+    config today."""
+
+    FLATTEN_GATE_PASSED = "FLATTEN_GATE_PASSED"
+    """The gate opened. `FLATTEN_SUBMISSION_STARTED` follows immediately —
+
+    recording that the gate opened is not itself an attempt to close
+    anything, mirroring `SUBMISSION_GATE_PASSED`."""
+
+    FLATTEN_SUBMISSION_STARTED = "FLATTEN_SUBMISSION_STARTED"
+    """The durable pre-side-effect commitment point for a flatten —
+
+    ADR-003 §6 applied to the one close this platform has never yet made.
+    Appended once, carrying the complete serialized `FlattenPlan` (every
+    target ticket, side, and the broker-reported volume to be closed) that
+    was committed to.
+
+    **Not `CLOSED`** (reserved for M5 below): `CLOSED` answers "this
+    position's lifecycle ended", which is post-fill closure and item 8's
+    territory (ADR-008 §2 already set this precedent for `RECONCILED`;
+    the same reasoning applies here). **Not `RECONCILED`** — item 8's,
+    for the same reason. **Not `SUBMISSION_STARTED`** — two concrete
+    reasons, not merely a naming preference: (1) `agent_gateway
+    ::ProposalWithdrawal` treats `SUBMISSION_STARTED` as the withdrawal-
+    cutoff boundary for an agent-proposed order; a policy-driven flatten
+    is not a proposal and must never be agent-withdrawable. (2)
+    `ExecutionEventStore.count_events_since(SUBMISSION_STARTED, ...)` is
+    FINAL Risk's durable order-frequency budget; a flatten is not a new
+    order and must not consume it.
+
+    **Emitting this event is not calling `close_all_positions` or
+    `order_send`.** Both stay unconditionally disabled regardless of this
+    event's existence — see `mt5_gateway/execution.py
+    ::OrderCheckMt5Gateway`."""
+
+    FLATTEN_OUTCOME_RESOLVED = "FLATTEN_OUTCOME_RESOLVED"
+    """The item-6-shaped idempotent recovery for a flatten: appended when
+
+    a claimed flatten occurrence's last durable event is
+    `FLATTEN_SUBMISSION_STARTED` with nothing after it. Unlike
+    `AMBIGUOUS_OUTCOME_RESOLVED` (which searches broker positions by
+    `mt5_magic_number`), this reads the target tickets recorded in the
+    commitment event's own payload and checks which are still open — a
+    simpler, more direct determination, since the targets were already
+    named. Because `close_all_positions` stays unreachable, this will
+    provably always conclude every target is still open today — the same
+    honest inertness ADR-008 documents for its own positive branch.
+    Idempotent by construction: once appended, `events[-1]` is no longer
+    `FLATTEN_SUBMISSION_STARTED`, so recovery never re-runs."""
 
 
 class SnapshotCompleteness(StrEnum):

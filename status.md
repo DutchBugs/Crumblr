@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `b052459` |
+| **`main` HEAD** | `b052459` (pending — see the sixty-fourth entry's follow-up commit for the exact SHA once item 7 merges) |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 7 (automatic flatten submission). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`), automatic flatten submission (item 7, `ADR-009`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 8 (post-fill reconciliation). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
@@ -8459,15 +8459,191 @@ Risk impact:
 Decision:
 - Entered plan mode before implementing; plan approved before any code
   was written.
-- Not yet committed — pending the usual per-turn approval, on
-  `core/ambiguous-recovery` (rebased onto current `origin/main`).
+- Committed and pushed after per-turn approval: `b052459` (substantive
+  slice), `74e55f1` (SHA-fill follow-up) on `core/ambiguous-recovery` →
+  `main`.
 
 Next:
 - Confirm hosted CI is genuinely fully green (still needs a human or a
   session with GitHub access — no `gh` access here); unchanged from the
   prior entry.
-- Core critical path item 7: automatic flatten submission — not yet
-  started, no plan drafted. Next item on the owner's punch list.
+- Core critical path item 7: automatic flatten submission — see the
+  sixty-fourth entry below.
+
+---
+
+## Update 2026-09-02 (sixty-fourth entry) — automatic flatten submission (core critical path item 7)
+
+Component: `application/execution.py`, `risk/flatten_gate.py`, `persistence/flatten.py`, `application/flatten_plan.py`, `domain/models.py`, `domain/enums.py`, `config.py`, new migration, `review/adr/ADR-009-automatic-flatten-submission.md`, `review/DEVIATIONS.md`
+Milestone: Dev-1 core critical path item 7 (ADR-004 §5, review 1.24 §12.B, reviews 1.25/1.26 §6/1.27 §8), planned via `EnterPlanMode` (with a `Plan` sub-agent pass) and approved before implementation; third item of the owner's punch list after items 5/6
+Status before: `risk/trading_window.py` detected an intraday flatten deadline breach and a rollover crossing and could only halt — `review/DEVIATIONS.md` D-033: "the halt is the whole safety story today"; no mechanism recorded what a close would have done
+Status after: `ExecutionOrchestrator.flatten_once()` durably commits to a flatten (real gate, real request/event log, a real `FlattenPlan` naming exactly what would be closed) whenever a position survives the deadline or crosses a rollover, then stops — `close_all_positions`/`order_send` remain completely unreachable
+
+Completed:
+- Researched via `Agent`/`Explore` (`model: opus`), then a `Plan` sub-agent
+  pass to validate the design against the actual current source before
+  committing to it — this item's scope turned out substantially larger
+  than items 3-6: confirmed by direct schema read that
+  `execution_requests.capsule_id` is `nullable=False`, and a flatten has
+  no `DecisionCapsule`/`TradeIntent` behind it (policy-driven, not
+  proposal-driven), which forced a genuinely new persistence design
+  rather than a small extension of the existing one.
+- Coordinated with Dev 2 before creating a migration, per instruction
+  §8's traffic-control rule — confirmed no migration in flight on their
+  side, proceeded once acknowledged.
+- `persistence/schema.py` + new migration (`cc35e55b3f92`, off head
+  `d4b6e2f81a37`): `flatten_requests`/`flatten_events`, structurally
+  parallel to `execution_requests`/`execution_events` but with no
+  capsule/intent FK at all — the absence is the honest statement that a
+  flatten has no proposal. Added to `APPEND_ONLY_TABLES` and the
+  sequence-grant list.
+- `persistence/flatten.py` (new): near-mechanical mirror of
+  `persistence/execution.py` — claim-is-the-insert, content-conflict
+  hardening (item 4's discipline, copied not re-derived). Idempotency
+  key is `(environment, canonical_symbol, trading_day)` — one commitment
+  per trading day per symbol, ever; keying on the observed book instead
+  would mint a new key every time volume changed between passes, which
+  ADR-003 §6 forbids.
+- `domain/enums.py`: new `FlattenEventType` (separate from
+  `ExecutionEventType` — different tables, different identity spaces).
+  `FLATTEN_SUBMISSION_STARTED` is deliberately not `CLOSED` (item 8's
+  territory), not `RECONCILED` (item 8's), and specifically not
+  `SUBMISSION_STARTED` (that event is `agent_gateway`'s withdrawal-cutoff
+  boundary and FINAL Risk's order-frequency-budget authority — a flatten
+  is neither an agent proposal nor a new order). Three new `ReasonCode`s,
+  deliberately excluded from `HALT_REASONS`.
+- `domain/models.py`: new `FlattenInstruction`/`FlattenPlan` — not
+  `ApprovedOrder` (which rejects `Side.FLAT` and requires
+  intent/risk-decision/supervisor-decision ids a policy-driven close has
+  no honest value for). `volume` is always the broker's own reported
+  size, never risk-sized — stated explicitly as the largest semantic
+  difference from an entry order.
+- `application/flatten_plan.py` (new, pure): `build_flatten_plan()` —
+  derives `close_side` as the genuine inverse of each position's side,
+  marks `crossed_rollover` per position and in aggregate.
+- `risk/flatten_gate.py` (new): eleven legs, modelled on
+  `submission_gate.py`, eight reused. Two subtle legs, each with its own
+  guard test: reconciliation requires "not `UNKNOWN`", never "`MATCHED`"
+  (a flatten is *triggered by* an open position, so `MATCHED` would close
+  the gate exactly when a flatten is needed — the naive copy of
+  `submission_gate.py`'s leg was caught before shipping, not after); an
+  `OVERNIGHT_EXPOSURE`-only halt does not close the gate (the existing
+  detection path already trips it on the identical condition this gate
+  exists to resolve — becoming flat is that halt's own safe resolution).
+- `config.py`: new `ExecutionConfig.flatten_submission_enabled` — a
+  fourth, separate governance flag (ADR-004 §5.1's decoupling
+  requirement), added to `config_version`'s exclusion set alongside the
+  other three (F-062's lesson, applied proactively this time).
+- `application/execution.py::flatten_once()`: called from the top of
+  `run_once()`, independent of the capsule loop; its outcome type
+  (`FlattenAttemptOutcome`) deliberately not merged into `run_once()`'s
+  return tuple. **Durable state checked before any broker read** — a
+  restructure made mid-implementation after a test caught the first
+  draft always reading positions every pass regardless of resolution
+  state (see Problems found). `intraday.enabled=False` (every shipped
+  config's default, every existing test config) short-circuits before
+  any of this.
+- Two construction-site updates for the new required constructor args:
+  `scripts/run_execution_preflight_evidence.py`,
+  `tests/integration/test_execution_orchestrator.py`.
+- Mechanical prerequisite: extracted `FakeMt5`/`platform_config`/
+  `orchestrator`/etc. from `test_execution_orchestrator.py` into
+  `tests/integration/_execution_fixtures.py` — verified 14/14 identical
+  before/after.
+- `review/adr/ADR-009-automatic-flatten-submission.md` (new): the gap,
+  seven named design decisions (table-pair choice, event-name choice,
+  the two subtle gate legs, why not `ApprovedOrder`, why not
+  `OperatorControls`, why keyed on policy not book), explicit scope
+  against ADR-004 §5's four sub-items.
+- `review/DEVIATIONS.md`: D-033 updated in place to `PARTIALLY RESOLVED`
+  (D-035's precedent for in-place revision); new D-050 records the three
+  explicitly deferred pieces (retry-then-HALT on a failed flatten, a
+  pre-deadline connectivity watch, ADR-004 §7's two open owner
+  questions) — none silently absorbed.
+- `review/FEEDBACK.md`: completion row, same structure as items 4/5/6,
+  no new F-number.
+- `review/INTEGRATION_NOTICES.md`: two entries — the new Alembic head,
+  and the additive domain-model/enum change.
+- Also fixed, in passing: the sixty-third entry's own "Decision"/"Next"
+  section still said "not yet committed" for item 6, which had in fact
+  been committed and pushed (`b052459`/`74e55f1`) earlier this session —
+  corrected while touching this file for item 7's own entry.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 163 source files.
+- `uv run alembic heads` — confirmed single head before and after
+  creating the migration (`d4b6e2f81a37` → `cc35e55b3f92`).
+- `uv run pytest tests/integration/test_migrations.py -v` — 8 passed,
+  run immediately after creating the migration, before writing anything
+  else, per that file's own established discipline (F-067's lesson).
+- `uv run pytest tests/unit/test_flatten_gate.py
+  tests/unit/test_flatten_plan.py tests/integration/test_flatten_persistence.py
+  tests/integration/test_execution_flatten.py tests/integration/test_execution_orchestrator.py
+  tests/unit/test_config.py -v` — **115 passed** (18 gate + 7 plan + 11
+  persistence + 9 flatten-integration + 14 pre-existing execution-orchestrator
+  unchanged + 48 pre-existing config unchanged + 1 new config, + zero
+  failures).
+- `test_execution_orchestrator.py`'s all 14 pre-existing tests confirmed
+  unchanged after the fixture extraction and the constructor change.
+- Full suite, solo, against `crumblr_test_dev1` — **1157 passed, 3
+  skipped** (1111 + 46 new item-7 tests exactly: 18+7+11+9+1), zero
+  failures.
+- Grepped the diff for any new `.order_send(`/`.close_all_positions(`
+  call site (excluding definitions, the existing unconditional refuses,
+  and test-double assertions) — zero. Grepped `src/crumblr/agent_gateway/`
+  for every new flatten symbol (`FLATTEN_`, `flatten_gate`,
+  `flatten_plan`, `persistence.flatten`, `FlattenInstruction`,
+  `FlattenPlan`, `flatten_once`) — zero references, confirming
+  `IMPACT: NONE` behaviourally (the migration/shared-contract additions
+  were separately communicated to Dev 2 in advance, per
+  `INTEGRATION_NOTICES.md`).
+
+Problems found:
+- One real design gap self-caught via a failing test, not by reasoning
+  ahead of time: the first draft of `flatten_once()` always read broker
+  positions on every pass, even for an already-resolved or
+  already-blocked occurrence — contradicting this item's own documented
+  claim (mirroring ADR-008's) that recovery "never re-reads the broker
+  for an already-resolved request." `test_a_second_pass_does_not_re_commit_a_flatten`'s
+  third-pass assertion caught it directly:
+  `fake.positions_get_calls` kept incrementing on a third call that
+  should have been a pure no-op. Fixed by restructuring `flatten_once()`
+  to check durable state (via `flatten_request_id`, derivable from the
+  clock and config alone, no broker read needed) *before* any broker
+  read — now genuinely mirrors item 6's "query durable request state ->
+  reconcile broker state" ordering rather than only claiming to. Also
+  added a `positions`-empty guard to `_trip_overnight_exposure()` while
+  fixing this, since the restructure surfaced a related case (resolving
+  a stale commitment against a now-genuinely-flat book, e.g. after an
+  operator's manual flatten, must not trip a fresh halt).
+
+Risk impact:
+- None. `close_all_positions`/`order_send` remain completely unreachable
+  through every path this item added — the gate opening only appends a
+  durable event and stops; nothing here closes a position for real or
+  decides to attempt one.
+
+Decision:
+- Entered plan mode before implementing; a `Plan` sub-agent pass
+  validated the design against real source before finalizing it; plan
+  approved before any code was written.
+- Coordinated the migration with Dev 2 before creating it, per
+  instruction §8.
+- Not yet committed — pending the usual per-turn approval, on a new
+  `core/`-prefixed branch.
+
+Next:
+- Confirm hosted CI is genuinely fully green (still needs a human or a
+  session with GitHub access — no `gh` access here); unchanged from
+  prior entries.
+- Named but not done this item, to keep scope honest: two small tests
+  closing a pre-existing coverage gap (`ReplayOrchestrator`/
+  `LiveDecisionOrchestrator._check_session_boundary` have no direct
+  test today, only indirect coverage via `policies.evaluate()`) —
+  deferred, not claimed as part of this item's own work.
+- Continue down the owner's punch list: core critical path item 8,
+  post-fill reconciliation.
 
 ---
 

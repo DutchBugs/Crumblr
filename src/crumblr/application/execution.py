@@ -56,12 +56,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
+from crumblr.application.flatten_plan import build_flatten_plan
 from crumblr.application.reconciliation import (
     BrokerStateSource,
     ExpectedState,
@@ -72,14 +73,22 @@ from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
     Environment,
     ExecutionEventType,
+    FlattenEventType,
     ReasonCode,
     ReconciliationStatus,
     RiskVerdict,
     SessionState,
+    SnapshotCompleteness,
     SupervisorVerdict,
 )
 from crumblr.domain.hashing import fingerprint, mt5_magic_number
-from crumblr.domain.models import ApprovedOrder, DecisionCapsule, MarketSnapshot, MarketTick
+from crumblr.domain.models import (
+    ApprovedOrder,
+    DecisionCapsule,
+    MarketSnapshot,
+    MarketTick,
+    PositionState,
+)
 from crumblr.domain.money import price_to_points
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
@@ -90,9 +99,17 @@ from crumblr.persistence.execution import (
     ExecutionRequestConflictError,
     ExecutionRequestStore,
 )
+from crumblr.persistence.flatten import (
+    FlattenEventRecord,
+    FlattenEventStore,
+    FlattenRequestConflictError,
+    FlattenRequestStore,
+    flatten_request_id_for,
+)
 from crumblr.risk import policies, trading_window
 from crumblr.risk.execution_eligibility import evaluate_execution_eligibility
 from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
+from crumblr.risk.flatten_gate import FlattenGateContext, evaluate_flatten_gate
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
@@ -136,6 +153,21 @@ class ExecutionAttemptOutcome:
     reason_codes: tuple[ReasonCode, ...] = ()
 
 
+@dataclass(frozen=True)
+class FlattenAttemptOutcome:
+    """What happened to one flatten occurrence during one `flatten_once()`
+
+    pass (core critical path item 7). Deliberately not
+    `ExecutionAttemptOutcome`: that type's `capsule_id` is non-optional,
+    and a flatten has no capsule — see `persistence/flatten.py`'s module
+    docstring."""
+
+    flatten_request_id: UUID
+    event_type: FlattenEventType
+    reason_codes: tuple[ReasonCode, ...] = ()
+    target_count: int = 0
+
+
 class ExecutionOrchestrator:
     """Runs the non-sending preflight chain against every claimable, eligible
 
@@ -151,6 +183,8 @@ class ExecutionOrchestrator:
         capsules: CapsuleSource,
         requests: ExecutionRequestStore,
         events: ExecutionEventStore,
+        flatten_requests: FlattenRequestStore,
+        flatten_events: FlattenEventStore,
         broker_state: BrokerStateSink,
         instrument_specs: InstrumentSpecSource,
         session_store: RiskSessionStore,
@@ -165,6 +199,8 @@ class ExecutionOrchestrator:
         self._capsules = capsules
         self._requests = requests
         self._events = events
+        self._flatten_requests = flatten_requests
+        self._flatten_events = flatten_events
         self._broker_state = broker_state
         self._instrument_specs = instrument_specs
         self._session_store = session_store
@@ -176,6 +212,16 @@ class ExecutionOrchestrator:
         self._clock = clock
 
     def run_once(self) -> tuple[ExecutionAttemptOutcome, ...]:
+        # Core critical path item 7: a flatten is policy-driven (a
+        # deadline plus observed exposure), not proposal-driven, so it
+        # must fire every cycle independent of whether any capsule
+        # exists — the loop below does nothing when there are none.
+        # `flatten_once()`'s own outcome type (`FlattenAttemptOutcome`)
+        # is deliberately not merged into this method's return value: a
+        # flatten has no `capsule_id`, and every existing assertion on
+        # `run_once()`'s return tuple stays untouched by this call.
+        self.flatten_once()
+
         now = self._clock()
         outcomes: list[ExecutionAttemptOutcome] = []
         for capsule in self._capsules.read_all(environment=self._config.environment):
@@ -572,6 +618,352 @@ class ExecutionOrchestrator:
             order_request_id=order_request_id,
             capsule_id=capsule.capsule_id,
             event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+        )
+
+    def flatten_once(self) -> FlattenAttemptOutcome | None:
+        """Core critical path item 7 (ADR-009): the durable
+
+        commitment/record half of the automatic intraday flatten. Called
+        from the top of `run_once()`, independent of the capsule loop —
+        see that call site's own comment for why.
+
+        Early-returns before any broker read when the intraday policy is
+        disabled (`intraday.enabled=False` — every test config, and every
+        shipped config's default), which is what keeps this change
+        provably inert for the existing capsule-focused test suite: no
+        extra broker read, no extra table row, for any of them.
+
+        Never calls `close_all_positions` or `order_send` — the gate
+        opening only appends `FLATTEN_SUBMISSION_STARTED` and stops. The
+        `OVERNIGHT_EXPOSURE` halt trip happens *after* the gate decision
+        on every path, so a halt this very pass causes can never be the
+        halt that tolerates itself on `risk/flatten_gate.py`'s own
+        `SYSTEM_HALTED` leg — that tolerance only ever applies starting
+        the *next* pass.
+
+        Durable state is checked *before* any broker read, exactly the
+        order item 6's own docstring names ("query durable request state
+        -> reconcile broker state"): today's flatten occurrence's
+        identity is fully determined by the clock and config alone (no
+        broker read needed to derive it), so a pass that already reached
+        a terminal outcome for it — blocked, or resolved — returns
+        immediately without touching the broker at all. Only a still-open
+        `FLATTEN_SUBMISSION_STARTED` commitment, or no occurrence claimed
+        yet, needs one.
+        """
+        now = self._clock()
+        policy = trading_window.policy_from_config(self._config.intraday)
+        if not policy.enabled:
+            return None
+
+        day = trading_day(now)
+        session_close_utc = trading_window.session_close(now)
+        flatten_deadline_utc = session_close_utc - policy.flatten_offset
+        flatten_request_id = flatten_request_id_for(
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+            trading_day=day,
+        )
+
+        prior_events = self._flatten_events.events_for(flatten_request_id)
+        if prior_events:
+            if prior_events[-1].event_type is not FlattenEventType.FLATTEN_SUBMISSION_STARTED:
+                # Already blocked or resolved for today's occurrence —
+                # nothing to recover, no broker read needed.
+                return None
+            observation = capture_broker_state(
+                self._adapter.reader,
+                environment=self._config.environment,
+                canonical_symbol=self._canonical_symbol,
+                clock=self._clock,
+            )
+            self._broker_state.record(observation)
+            positions = observation.position_states
+            outcome = self._resolve_flatten_outcome(
+                flatten_request_id, positions, prior_events, now
+            )
+            self._trip_overnight_exposure(positions, now)
+            return outcome
+
+        # No occurrence claimed yet today — observe the broker and decide
+        # whether one is needed. Same coherent-observation reasoning as
+        # `_process()`'s own broker read (review 1.22 F-058).
+        observation = capture_broker_state(
+            self._adapter.reader,
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+            clock=self._clock,
+        )
+        self._broker_state.record(observation)
+        positions = observation.position_states
+        if not positions:
+            return None
+
+        past_deadline = trading_window.requires_flat(now, policy)
+        crossed_rollover = any(
+            trading_window.has_crossed_rollover(position.opened_at_utc, now)
+            for position in positions
+        )
+        if not (past_deadline or crossed_rollover):
+            return None
+
+        request_fingerprint = fingerprint(
+            {
+                "environment": self._config.environment.value,
+                "canonical_symbol": self._canonical_symbol,
+                "trading_day": day.isoformat(),
+                "session_close_utc": session_close_utc.isoformat(),
+                "flatten_deadline_utc": flatten_deadline_utc.isoformat(),
+                "intraday_policy": {
+                    "enabled": policy.enabled,
+                    "last_entry_offset_seconds": int(policy.last_entry_offset.total_seconds()),
+                    "flatten_offset_seconds": int(policy.flatten_offset.total_seconds()),
+                },
+            }
+        )
+
+        try:
+            claim = self._flatten_requests.claim(
+                flatten_request_id=flatten_request_id,
+                environment=self._config.environment,
+                canonical_symbol=self._canonical_symbol,
+                trading_day=day,
+                session_close_utc=session_close_utc,
+                flatten_deadline_utc=flatten_deadline_utc,
+                fingerprint=request_fingerprint,
+                claimed_by=self._worker_id,
+                now=now,
+            )
+        except FlattenRequestConflictError:
+            _log.error("flatten.claim_conflict", flatten_request_id=str(flatten_request_id))
+            raise
+
+        if not claim.claimed:
+            # Lost a race against another worker between the events_for()
+            # read above and this claim — recover from whatever it
+            # committed, exactly like the fresh-read path above.
+            outcome = self._resolve_flatten_outcome(
+                flatten_request_id,
+                positions,
+                self._flatten_events.events_for(flatten_request_id),
+                now,
+            )
+        else:
+            outcome = self._commit_flatten(
+                flatten_request_id,
+                positions=positions,
+                observation=observation,
+                day=day,
+                session_close_utc=session_close_utc,
+                flatten_deadline_utc=flatten_deadline_utc,
+                past_deadline=past_deadline,
+                crossed_rollover=crossed_rollover,
+                now=now,
+            )
+
+        self._trip_overnight_exposure(positions, now)
+        return outcome
+
+    def _commit_flatten(
+        self,
+        flatten_request_id: UUID,
+        *,
+        positions: tuple[PositionState, ...],
+        observation: BrokerStateObservation,
+        day: date,
+        session_close_utc: UtcDatetime,
+        flatten_deadline_utc: UtcDatetime,
+        past_deadline: bool,
+        crossed_rollover: bool,
+        now: UtcDatetime,
+    ) -> FlattenAttemptOutcome:
+        """The just-claimed branch: gate, then commit or refuse. Never
+
+        reached for an already-claimed occurrence — see
+        `_resolve_flatten_outcome` for that path.
+        """
+        self._append_flatten(flatten_request_id, FlattenEventType.FLATTEN_REQUEST_CLAIMED, now)
+
+        assert observation.account_state is not None
+        market = self._config.market_for(self._canonical_symbol)
+        expectation = ExpectedState.flat(
+            self._config.account_guard,
+            canonical_symbol=self._canonical_symbol,
+            expected_spec_version=market.expected_spec_version if market is not None else None,
+        )
+        reconciliation = reconcile(
+            self._broker_state, expectation, instrument_specs=self._instrument_specs, now=now
+        )
+
+        context = FlattenGateContext(
+            environment=self._config.environment,
+            account=observation.account_state,
+            terminal_trade_allowed=bool(observation.account.terminal_trade_allowed),
+            position_book_complete=observation.account.position_set_state
+            is SnapshotCompleteness.COMPLETE,
+            reconciliation_status=reconciliation.status,
+            kill_switch=self._kill_switch,
+            flatten_required=past_deadline or crossed_rollover,
+            risk_config_version=self._config.config_version,
+            approved_risk_config_version=self._config.risk.approved_config_version,
+            flatten_submission_enabled=self._config.execution.flatten_submission_enabled,
+            feedback_2_0_approved=self._config.execution.feedback_2_0_approved,
+            now=now,
+        )
+        decision = evaluate_flatten_gate(context)
+        context_payload: dict[str, object] = {
+            "environment": context.environment.value,
+            "terminal_trade_allowed": context.terminal_trade_allowed,
+            "position_book_complete": context.position_book_complete,
+            "reconciliation_status": context.reconciliation_status.value,
+            "flatten_required": context.flatten_required,
+            "risk_config_version": context.risk_config_version,
+            "approved_risk_config_version": context.approved_risk_config_version,
+            "flatten_submission_enabled": context.flatten_submission_enabled,
+            "feedback_2_0_approved": context.feedback_2_0_approved,
+        }
+
+        if not decision.open:
+            self._append_flatten(
+                flatten_request_id,
+                FlattenEventType.FLATTEN_GATE_BLOCKED,
+                now,
+                reason_codes=decision.reason_codes,
+                payload=context_payload,
+            )
+            return FlattenAttemptOutcome(
+                flatten_request_id=flatten_request_id,
+                event_type=FlattenEventType.FLATTEN_GATE_BLOCKED,
+                reason_codes=decision.reason_codes,
+            )
+
+        self._append_flatten(
+            flatten_request_id, FlattenEventType.FLATTEN_GATE_PASSED, now, payload=context_payload
+        )
+
+        plan = build_flatten_plan(
+            positions,
+            flatten_request_id=flatten_request_id,
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+            trading_day=day,
+            session_close_utc=session_close_utc,
+            flatten_deadline_utc=flatten_deadline_utc,
+            past_deadline=past_deadline,
+            broker_state_snapshot_id=observation.account.snapshot_id,
+            now=now,
+        )
+        self._append_flatten(
+            flatten_request_id,
+            FlattenEventType.FLATTEN_SUBMISSION_STARTED,
+            now,
+            payload=plan.model_dump(mode="json"),
+        )
+        return FlattenAttemptOutcome(
+            flatten_request_id=flatten_request_id,
+            event_type=FlattenEventType.FLATTEN_SUBMISSION_STARTED,
+            target_count=len(plan.instructions),
+        )
+
+    def _resolve_flatten_outcome(
+        self,
+        flatten_request_id: UUID,
+        positions: tuple[PositionState, ...],
+        events: tuple[FlattenEventRecord, ...],
+        now: UtcDatetime,
+    ) -> FlattenAttemptOutcome | None:
+        """The item-6-shaped idempotent recovery for a flatten (ADR-009 §2).
+
+        `events` is passed in rather than re-read here: both call sites in
+        `flatten_once()` already have it (one from the durable-state-first
+        check, one from the post-claim-loss re-read), and re-fetching a
+        third time would be a redundant query with no new information.
+
+        Runs only when the occurrence's last durable event is
+        `FLATTEN_SUBMISSION_STARTED` with nothing after it. Unlike
+        `_recover_ambiguous_submission` (which searches broker positions
+        by `mt5_magic_number`), this reads the target tickets recorded in
+        the commitment event's own payload and checks which are still
+        open — a simpler, more direct determination, since the targets
+        were already named. Because `close_all_positions` stays
+        unreachable, this will provably always conclude every target is
+        still open today — the same honest inertness ADR-008 documents
+        for its own positive branch.
+        """
+        if not events or events[-1].event_type is not FlattenEventType.FLATTEN_SUBMISSION_STARTED:
+            return None
+
+        commitment_payload = events[-1].payload or {}
+        target_tickets = [
+            instruction["ticket"] for instruction in commitment_payload.get("instructions", [])
+        ]
+        open_tickets = {position.ticket for position in positions}
+        still_open = [ticket for ticket in target_tickets if ticket in open_tickets]
+        closed = [ticket for ticket in target_tickets if ticket not in open_tickets]
+
+        self._append_flatten(
+            flatten_request_id,
+            FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
+            now,
+            payload={
+                "target_tickets": target_tickets,
+                "still_open_tickets": still_open,
+                "closed_tickets": closed,
+                "flattened": len(still_open) == 0,
+            },
+        )
+        return FlattenAttemptOutcome(
+            flatten_request_id=flatten_request_id,
+            event_type=FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
+        )
+
+    def _trip_overnight_exposure(
+        self, positions: tuple[PositionState, ...], now: UtcDatetime
+    ) -> None:
+        """Same halt `_check_session_boundary` already trips in the
+
+        decision tier (`application/orchestration.py`/`live_decision.py`)
+        — a fourth producer, in the one tier that can actually see the
+        broker. `KillSwitch.trip` is idempotent, so a double-trip across
+        tiers is harmless. `tripped_by="flatten_driver"` distinguishes
+        this producer from `"risk_engine"` in the audit log. Nothing here
+        clears, downgrades, or shortens any halt — it stays in force
+        until an operator resets it, exactly as before this item. A
+        no-op when `positions` is empty: this is called from the
+        already-committed resolution path too, where the position(s) may
+        have genuinely closed between passes (an operator's manual
+        flatten, say) — that is not a fresh breach to trip on.
+        """
+        if not positions:
+            return
+        if not self._kill_switch.is_halted:
+            self._kill_switch.trip(
+                reason_codes=(ReasonCode.OVERNIGHT_EXPOSURE,),
+                tripped_by="flatten_driver",
+                occurred_at_utc=now,
+                detail=(
+                    f"{len(positions)} position(s) still open past the flatten "
+                    "deadline or a rollover"
+                ),
+            )
+
+    def _append_flatten(
+        self,
+        flatten_request_id: UUID,
+        event_type: FlattenEventType,
+        now: UtcDatetime,
+        *,
+        reason_codes: tuple[ReasonCode, ...] = (),
+        detail: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        self._flatten_events.append(
+            flatten_request_id=flatten_request_id,
+            event_type=event_type,
+            occurred_at_utc=now,
+            reason_codes=reason_codes,
+            detail=detail,
+            payload=payload,
         )
 
     def _evaluate_submission_readiness(

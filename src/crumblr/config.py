@@ -129,6 +129,18 @@ class ExecutionConfig(ConfigSection):
     that review, and setting it to `True` without `feedback.2.0.md`
     actually having done so defeats the entire point of the gate."""
 
+    flatten_submission_enabled: bool = False
+    """Whether the automatic intraday flatten is explicitly enabled to
+
+    submit — `risk/flatten_gate.py`'s own required condition (core
+    critical path item 7, ADR-009 §2), never inferred from
+    `submission_enabled`. Deliberately a fourth, separate flag: ADR-004
+    §5.1 requires the automatic flatten to stay distinct from ordinary
+    order submission, and build.md §8.2's decoupling rule means "I
+    enabled order submission" must not silently also mean "I enabled
+    automatic liquidation." Defaults to `False`; no shipped config sets
+    it to `True`."""
+
 
 class TradingAgentConfig(ConfigSection):
     strategy_id: VersionTag
@@ -258,25 +270,32 @@ class PlatformConfig(ConfigSection):
         decision capsule and `SubmissionGate` condition 6
         (`RiskConfig.approved_config_version`, F-049/ADR-006).
 
-        Excludes the three governance/approval fields
+        Excludes the four governance/approval fields
         (`risk.approved_config_version`, `execution.submission_enabled`,
-        `execution.feedback_2_0_approved`) deliberately: this hash is what an
-        owner reviews and approves ("the actual numbers this `RiskConfig`
-        carries" — `RiskConfig.approved_config_version`'s own docstring), and
-        an approval field is not itself one of those numbers. Hashing it
-        anyway would make it self-referential — writing the approved hash
-        into the file changes the file, which changes the hash the write was
-        supposed to match, which can never converge (found while adding the
-        wiring in `application/execution.py` that actually evaluates this
-        condition; empirically confirmed unsatisfiable before this fix, see
-        F-062, `review/FEEDBACK.md`). Any other field change still produces a
-        new version, unchanged from before this fix
-        (`tests/unit/test_config.py::TestConfigVersioning`)."""
+        `execution.feedback_2_0_approved`, `execution.flatten_submission_enabled`)
+        deliberately: this hash is what an owner reviews and approves ("the
+        actual numbers this `RiskConfig` carries" — `RiskConfig
+        .approved_config_version`'s own docstring), and an approval field is
+        not itself one of those numbers. Hashing it anyway would make it
+        self-referential — writing the approved hash into the file changes
+        the file, which changes the hash the write was supposed to match,
+        which can never converge (found while adding the wiring in
+        `application/execution.py` that actually evaluates this condition;
+        empirically confirmed unsatisfiable before this fix, see F-062,
+        `review/FEEDBACK.md`). `flatten_submission_enabled` (core critical
+        path item 7) joined the exclusion set for the identical reason the
+        day it was added, rather than repeating F-062's mistake a second
+        time. Any other field change still produces a new version, unchanged
+        from before this fix (`tests/unit/test_config.py::TestConfigVersioning`)."""
         payload = self.model_dump(
             mode="json",
             exclude={
                 "risk": {"approved_config_version"},
-                "execution": {"submission_enabled", "feedback_2_0_approved"},
+                "execution": {
+                    "submission_enabled",
+                    "feedback_2_0_approved",
+                    "flatten_submission_enabled",
+                },
             },
         )
         return fingerprint(payload)

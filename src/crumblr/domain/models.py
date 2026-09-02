@@ -10,7 +10,7 @@ actually immutable all the way down.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 from uuid import UUID
@@ -594,6 +594,87 @@ class ExecutionResult(Contract):
     order_send_payload: dict[str, Any] | None = None
     request_payload: dict[str, Any] | None = None
     error_detail: str | None = Field(default=None, max_length=2000)
+
+
+class FlattenInstruction(Contract):
+    """What a future policy-driven close would act on, for exactly one open
+
+    position — the flatten's analogue of `ApprovedOrder`, and deliberately
+    not `ApprovedOrder` itself (core critical path item 7, ADR-009 §2).
+    `ApprovedOrder` cannot express this: it raises on `Side.FLAT` ("FLAT is
+    a close instruction") and requires `intent_id`/`intent_risk_decision_id`/
+    `supervisor_decision_id`/`stop_loss_price`/`expires_at_utc` — none of
+    which a policy-driven close has an honest value for, since there was no
+    proposal behind it. This carries no stop loss (a close does not need
+    one) and no expiry (the deadline has already passed).
+
+    `volume` is always the broker's own reported position size, never
+    risk-sized — the single largest semantic difference from an entry
+    order, worth stating explicitly rather than leaving implicit."""
+
+    flatten_request_id: UUID
+    ticket: int
+    broker_symbol: Symbol
+    position_side: Side
+    close_side: Side
+    volume: Volume
+    open_price: Price
+    opened_at_utc: UtcDatetime
+    magic: int | None = None
+    crossed_rollover: bool
+    observed_at_utc: UtcDatetime
+
+    @model_validator(mode="after")
+    def _check_close(self) -> Self:
+        if self.position_side is Side.FLAT:
+            raise ValueError(
+                "a flatten instruction must target a directional position; "
+                "FLAT cannot itself be closed"
+            )
+        expected_close = Side.SELL if self.position_side is Side.BUY else Side.BUY
+        if self.close_side is not expected_close:
+            raise ValueError(
+                f"close_side must be the inverse of position_side ({expected_close!r}), "
+                f"got {self.close_side!r} -- a close that does not invert the position "
+                "would add to it instead of closing it"
+            )
+        return self
+
+
+class FlattenPlan(Contract):
+    """One flatten occurrence's complete commitment — one `FlattenInstruction`
+
+    per open position this occurrence targets. Per-position instructions
+    under a per-book request is deliberate: ADR-004 §7 defers "per-position
+    vs per-book deadline, once several instruments exist" as an open owner
+    question, and this shape keeps both answers reachable without a future
+    schema change."""
+
+    flatten_request_id: UUID
+    environment: Environment
+    canonical_symbol: Symbol
+    trading_day: date
+    session_close_utc: UtcDatetime
+    flatten_deadline_utc: UtcDatetime
+    past_deadline: bool
+    crossed_rollover: bool
+    observed_at_utc: UtcDatetime
+    broker_state_snapshot_id: UUID
+    """Ties this commitment to the exact durable `BrokerAccountSnapshot`/
+
+    `BrokerPositionSnapshot` rows it was decided on, so an auditor can
+    reproduce the observation, not merely read a summary of it."""
+    instructions: tuple[FlattenInstruction, ...]
+
+    @model_validator(mode="after")
+    def _check_plan(self) -> Self:
+        if not self.instructions:
+            raise ValueError("a flatten plan must target at least one position")
+        if not (self.past_deadline or self.crossed_rollover):
+            raise ValueError(
+                "a flatten plan must have a real trigger: past_deadline or crossed_rollover"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- #

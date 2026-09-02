@@ -11,11 +11,13 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-09-01 — D-049 added: ambiguous-outcome recovery (core
-critical path item 6, ADR-008) only covers open positions, not pending
-orders. D-047's second gap (two separate live MT5 reads) closed
-2026-08-27 per review 1.22 F-058; its first gap (capsule-table full
-scan) remains open.
+Last updated 2026-09-02 — D-050 added: automatic flatten submission
+(core critical path item 7, ADR-009) commits and records a flatten but
+does not perform one; D-033 updated to PARTIALLY RESOLVED to match. D-049
+added 2026-09-01: ambiguous-outcome recovery (item 6, ADR-008) only
+covers open positions, not pending orders. D-047's second gap (two
+separate live MT5 reads) closed 2026-08-27 per review 1.22 F-058; its
+first gap (capsule-table full scan) remains open.
 
 ---
 
@@ -416,21 +418,34 @@ mean anything should start here.
 - **Gate affected:** M5.
 
 ### D-033 — The intraday flatten is detected, not performed
-- **Status:** provisional — must close before M5
+- **Status:** PARTIALLY RESOLVED 2026-09-02 — the commitment/record half is
+  built (core critical path item 7, `review/adr/ADR-009-automatic-flatten-
+  submission.md`). **Still open:** the close itself, and two of ADR-004
+  §5's four sub-items — see D-050
 - **Spec:** owner decision O-003; review 1.6 F-025; `ADR-004`
-- **Gap:** the system refuses new entries outside the trading window and halts
-  when exposure survives the flatten deadline, but it does not *close* the
-  position. Closing needs the execution path, which is M5.
+- **Original gap:** the system refuses new entries outside the trading window
+  and halts when exposure survives the flatten deadline, but it does not
+  *close* the position. Closing needs the execution path, which is M5.
+- **Current state:** `application/execution.py::ExecutionOrchestrator
+  .flatten_once()` now durably commits to a flatten (real gate,
+  `risk/flatten_gate.py`; real durable request/event log,
+  `persistence/flatten.py`; a real `FlattenPlan` naming exactly which
+  positions and volumes would be closed) whenever a position survives the
+  deadline or crosses a rollover — and stops there. `close_all_positions`/
+  `order_send` remain unconditionally disabled, same as before this item;
+  nothing here closes a position for real.
 - **Why it is shaped this way:** refusing to open is safe and can ship now;
   promising to close is a promise this system cannot yet keep. A policy that
   claimed otherwise would read as though positions were being managed out when
-  nothing was managing them.
-- **Watch for:** the halt is the whole safety story today. If someone reads
-  "intraday-only" as "the platform closes positions at the boundary", they are
-  reading something that is not there yet. ADR-004 §5 lists what M5 must add,
-  including the behaviour when a flatten fails and when the broker is
-  unreachable near the deadline.
-- **Gate affected:** M5.
+  nothing was managing them. Recording the commitment (this item) is a real,
+  separate improvement over the halt alone — an auditor can now see exactly
+  what a future close would have done — without pretending the close itself
+  exists.
+- **Watch for:** `FLATTEN_SUBMISSION_STARTED` in the event log records a
+  *commitment*, not an outcome. Reading it as "the position was closed" is
+  reading something that is not there — see D-050 for the remaining gap.
+- **Gate affected:** M5 for the close itself; this item's own scope is
+  closed.
 
 ### D-035 — The MT5 gateway is written but has never met a terminal
 - **Status:** PARTIALLY RESOLVED 2026-08-24 — one real connection made (account
@@ -1034,6 +1049,40 @@ mean anything should start here.
   unreachable through every path this item added. A prerequisite for
   full-coverage recovery once LIMIT entries and `order_send` both
   exist.
+
+### D-050 — The automatic flatten is committed and recorded, not performed
+- **Status:** deliberate, with three named remaining gaps
+- **Spec:** `review/adr/ADR-004-intraday-session-boundary.md` §5
+- **Code:** `application/execution.py::ExecutionOrchestrator
+  .flatten_once()`, `risk/flatten_gate.py`, `review/adr/ADR-009
+  -automatic-flatten-submission.md`
+- **Original gap / current state:** core critical path item 7 closes the
+  commitment/record half of ADR-004 §5 — a position past its deadline or
+  a rollover now reaches a durable `FLATTEN_SUBMISSION_STARTED` event
+  naming exactly what would be closed (see D-033, now partially
+  resolved). `close_all_positions`/`order_send` remain unconditionally
+  disabled; nothing built by this item closes a position for real.
+- **Remaining gap, three pieces, all ADR-004 §5's own language:**
+  1. **§5.2 — retry-then-HALT on a failed flatten.** There is no way to
+     make a flatten fail while there is no way to make one succeed; a
+     retry mechanism exercisable only against a fake broker would not be
+     real. Deferred until `close_all_positions` exists.
+  2. **§5.3b — HALT *before* the deadline if the broker is unavailable.**
+     Needs a periodic pre-deadline connectivity watch — a different kind
+     of mechanism than a gate evaluated at the deadline, closer to
+     `LiveReader`'s read cadence. What this item ships instead: broker
+     unavailability *at* the deadline still closes the gate
+     (`POSITION_BOOK_INCOMPLETE`) and halts — the "after it" half of
+     §5.3, not the "before it" half.
+  3. Per-position vs per-book deadline, and a longer Friday cutoff
+     (ADR-004 §7's own two open owner questions) — untouched, not
+     answered by this item either way.
+- **Watch for:** `FLATTEN_SUBMISSION_STARTED` in the event log records a
+  commitment, not an outcome. A reader treating it as "the position was
+  closed" is reading something that is not there.
+- **Gate affected:** none directly today; a prerequisite for a real
+  automatic flatten once `close_all_positions` exists, not itself
+  claiming to be one.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

@@ -485,6 +485,69 @@ same logical event rather than duplicating it — the same idempotence
 discipline `domain/events.py::build_event` documents for the main journal."""
 
 
+flatten_requests = Table(
+    "flatten_requests",
+    metadata,
+    # The idempotency key is one flatten occurrence: a given environment,
+    # symbol and trading day, ever — deliberately *not* FK'd to
+    # `decision_capsules` (contrast `execution_requests.capsule_id`
+    # above). A flatten is policy-driven, not proposal-driven: there is
+    # no `TradeIntent`, no intent-time `RiskDecision`, no
+    # `SupervisorDecision` behind it, and fabricating one to satisfy an
+    # FK would put a false approval chain in the one table whose whole
+    # purpose is auditable provenance. Core critical path item 7,
+    # `review/adr/ADR-009-automatic-flatten-submission.md`.
+    Column("flatten_request_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("environment", String(16), nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    Column("trading_day", Date, nullable=False),
+    _utc_column("session_close_utc", nullable=False),
+    _utc_column("flatten_deadline_utc", nullable=False),
+    # Fingerprint over the *policy occurrence* (offsets, deadline), never
+    # the observed position book — the book goes in the commitment
+    # event's payload instead. Keying on book contents would mint a new
+    # idempotency key every time a position's volume changed between
+    # passes, which is a resubmission mechanism ADR-003 §6 forbids.
+    Column("fingerprint", Text, nullable=False),
+    Column("claimed_by", String(128), nullable=False),
+    _utc_column("claimed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("schema_version", Integer, nullable=False),
+    Index("ix_flatten_requests_day", "environment", "canonical_symbol", "trading_day"),
+)
+"""One immutable row per (environment, canonical_symbol, trading_day),
+ever (core critical path item 7). The row's existence *is* the claim on
+that trading day's flatten occurrence — same pattern as
+`execution_requests`, see `persistence/flatten.py`'s module docstring."""
+
+
+flatten_events = Table(
+    "flatten_events",
+    metadata,
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column(
+        "flatten_request_id",
+        UUID(as_uuid=True),
+        ForeignKey("flatten_requests.flatten_request_id"),
+        nullable=False,
+    ),
+    Column("event_type", String(64), nullable=False),
+    _utc_column("occurred_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("reason_codes", JSONB, nullable=False),
+    Column("detail", Text, nullable=True),
+    Column("payload", JSONB, nullable=True),
+    Column("schema_version", Integer, nullable=False),
+    Index("ix_flatten_events_request", "flatten_request_id", "sequence"),
+)
+"""Append-only lifecycle log for one flatten occurrence (core critical
+path item 7): claimed, gated, committed (or blocked), resolved — one row
+each. `event_id` is content-derived from `(flatten_request_id,
+event_type)`, same idempotence discipline as `execution_events`."""
+
+
 agent_identities = Table(
     "agent_identities",
     metadata,
@@ -659,6 +722,8 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "feature_snapshots",
     "execution_requests",
     "execution_events",
+    "flatten_requests",
+    "flatten_events",
     "agent_identities",
     "agent_credentials",
     "agent_trading_assignments",
@@ -694,6 +759,8 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "feature_snapshots",
             "execution_requests",
             "execution_events",
+            "flatten_requests",
+            "flatten_events",
             "agent_identities",
             "agent_credentials",
             "agent_trading_assignments",
