@@ -1095,9 +1095,36 @@ updated with a `Decimal("0")` default so prior behaviour is unchanged.
 failed. Full gate (unit + integration against `crumblr_test_dev2`) after:
 **1259 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
 
-This is D2.2 done. D2.1 (consume Owner Policy v1 generally), D2.3
-(`AgentMarketContextV1` strategy-neutral — already true), D2.4-D2.7 remain
-open, per the work order's own numbering.
+This is D2.2 done. Checked the rest of the Dev-2 priority order against
+current code before moving on:
+
+- **D2.1** ("consume Owner Policy v1; do not duplicate it") — already
+  satisfied, verified by grep: no numeric risk limit (`0.02`/`0.03`/`0.04`/
+  `0.08` or any `max_*` assignment) appears anywhere under
+  `agent_gateway/`. `decision_path.py::_risk_context` forwards
+  `PlatformConfig.risk` straight into `risk.policies.evaluate()` — the
+  same Core-authoritative function and config object the internal-strategy
+  path uses, never an agent-local copy. Note: `config/paper.yaml` itself
+  still carries the *old* pre-Owner-Policy-v1 numbers
+  (`max_risk_per_trade=0.005`, not `0.02`, etc.) — that is Dev 1's D1.2
+  ("implement Owner Risk Policy v1 as versioned configuration"), not a
+  Dev-2 gap; this module will pick up the correct values automatically
+  once D1.2 updates the config, with no code change needed here.
+- **D2.3** ("keep `AgentMarketContextV1` strategy-neutral") — already true,
+  done under §0l; no Pivot/FVG/MSS/ICT semantics are computed in
+  `market_context.py`.
+- **D2.4** (genuine HEALTHY Static Agent path) — blocked on the external
+  Agent/strategy-runtime developer turning neutral context into its own
+  Pivot-2.2 observation; nothing further to do from this side alone.
+- **D2.5** (external Supervisor, full production path) — core evaluation
+  logic done (§0m, AG-003 partial); HTTP client and wiring into
+  `decision_path.py` still open.
+- **D2.6** (AG-012 single Risk authority) — design proposed, not
+  implemented (§0n); cross-track, needs Dev 1 agreement.
+- **D2.7** (support Dev 3's PAPER_LITE via narrow seams only) —
+  informational; no Dev 3 request has arrived yet, no action taken.
+
+D2.5 (wiring) is the next concrete, unblocked Dev-2 item.
 
 ---
 
