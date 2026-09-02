@@ -62,6 +62,7 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
+from crumblr.application.expected_state import derive_expected_exposure
 from crumblr.application.flatten_plan import build_flatten_plan
 from crumblr.application.reconciliation import (
     BrokerStateSource,
@@ -168,6 +169,22 @@ class FlattenAttemptOutcome:
     target_count: int = 0
 
 
+@dataclass(frozen=True)
+class ReconciliationAttemptOutcome:
+    """What happened to one request during one `reconcile_once()` pass
+
+    (core critical path item 8). Deliberately not
+    `ExecutionAttemptOutcome`: `reconcile_once()` never reads
+    `CapsuleStore` at all (it walks requests, not capsules — see
+    `_evaluate_reconciliation_candidates`'s own docstring), so there is
+    no `capsule_id` to carry."""
+
+    order_request_id: UUID
+    event_type: ExecutionEventType = ExecutionEventType.RECONCILED
+    book_status: ReconciliationStatus = ReconciliationStatus.UNKNOWN
+    accounted_ticket_count: int = 0
+
+
 class ExecutionOrchestrator:
     """Runs the non-sending preflight chain against every claimable, eligible
 
@@ -230,6 +247,20 @@ class ExecutionOrchestrator:
             outcome = self._process(capsule, now)
             if outcome is not None:
                 outcomes.append(outcome)
+
+        # Core critical path item 8 (ADR-010): reconciliation is the last
+        # stage of build.md's pipeline ("Execution service executes.
+        # Reconciliation verifies."). Running it *after* the capsule loop
+        # — not at the top, unlike `flatten_once()` — lets
+        # `_recover_ambiguous_submission` (which runs inside the loop
+        # above) resolve a `SUBMISSION_STARTED` ambiguity in the same
+        # pass before reconciliation asks about it; running it first
+        # would report a request as undetermined that this very pass was
+        # about to resolve. Its own outcome type
+        # (`ReconciliationAttemptOutcome`) is deliberately not merged
+        # into this method's return value, same reasoning as
+        # `flatten_once()`'s.
+        self.reconcile_once()
         return tuple(outcomes)
 
     def _process(
@@ -965,6 +996,132 @@ class ExecutionOrchestrator:
             detail=detail,
             payload=payload,
         )
+
+    def reconcile_once(self) -> tuple[ReconciliationAttemptOutcome, ...]:
+        """Core critical path item 8 (ADR-010): "derive post-fill expected
+
+        state from durable platform execution history and reconcile it
+        against broker truth" (review 1.26 §6 item 8). Walks requests, not
+        capsules — see `ReconciliationAttemptOutcome`'s own docstring for
+        why its outcome type has no `capsule_id`.
+
+        Durable state is checked *before* any broker read, the same
+        ordering ADR-008 established: `request_ids_with_event
+        (SUBMISSION_STARTED)` is the complete, exhaustively-proven
+        candidate set (`application/expected_state.py`'s own mapping over
+        every `ExecutionEventType`) — provably empty in every shipped
+        config today, so this returns before touching the broker in every
+        real deployment and the entire pre-existing test suite. A second,
+        narrower check follows the same discipline one step further: if
+        every candidate already carries a `RECONCILED` event, there is
+        nothing left this pass could possibly determine, and this returns
+        before reading the broker for that reason too — mirroring
+        `flatten_once()`'s own "already resolved, no broker read" branch.
+
+        `RECONCILED` is appended at most once per request, ever
+        (`event_id_for` derives from `(order_request_id, event_type)`
+        alone) — a terminal determination, not a per-pass heartbeat.
+        Appended only when: the request has no `RECONCILED` yet; its own
+        exposure is durably `DETERMINED` (never for a request still
+        `UNDETERMINED`); the whole-book verdict is not `UNKNOWN`; and
+        every one of its attributed tickets is individually accounted for
+        (observed open at the broker, or already removed by a resolved
+        flatten). A request failing any of these stays unreconciled and
+        is re-examined next pass.
+        """
+        candidates = self._events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED)
+        if not candidates:
+            return ()
+
+        request_histories = tuple((rid, self._events.events_for(rid)) for rid in candidates)
+        pending_ids = frozenset(
+            rid
+            for rid, events in request_histories
+            if not any(event.event_type is ExecutionEventType.RECONCILED for event in events)
+        )
+        if not pending_ids:
+            return ()
+
+        # Full history feeds the derivation — including already-reconciled
+        # requests — because reconciling one request does not remove its
+        # exposure; the whole-book expectation must still account for it.
+        # `pending_ids` alone decides which requests may *receive* a new
+        # `RECONCILED` this pass.
+        flatten_histories = self._flatten_events.occurrence_histories(
+            environment=self._config.environment, canonical_symbol=self._canonical_symbol
+        )
+        exposure = derive_expected_exposure(request_histories, flatten_histories=flatten_histories)
+
+        market = self._config.market_for(self._canonical_symbol)
+        expectation = ExpectedState.from_durable_exposure(
+            self._config.account_guard,
+            exposure,
+            canonical_symbol=self._canonical_symbol,
+            expected_spec_version=market.expected_spec_version if market is not None else None,
+        )
+
+        now = self._clock()
+        observation = capture_broker_state(
+            self._adapter.reader,
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+            clock=self._clock,
+        )
+        self._broker_state.record(observation)
+
+        result = reconcile(
+            self._broker_state, expectation, instrument_specs=self._instrument_specs, now=now
+        )
+        if result.status is ReconciliationStatus.UNKNOWN:
+            return ()
+
+        open_tickets = {position.ticket for position in observation.position_states}
+        outcomes: list[ReconciliationAttemptOutcome] = []
+        for order_request_id, events in request_histories:
+            if order_request_id not in pending_ids:
+                continue
+            if order_request_id not in exposure.determined_request_ids:
+                continue
+            attributed = exposure.tickets_by_request.get(order_request_id, frozenset())
+            if attributed - open_tickets:
+                # A ticket the platform believes is still its own is not
+                # currently observed open, and no resolved flatten
+                # already accounted for its closure — this request stays
+                # unreconciled rather than recording a false "accounted
+                # for" verdict. The whole-book `result.status` above
+                # already independently surfaces this as MISMATCHED.
+                continue
+
+            raw_matching: frozenset[int] = frozenset()
+            for event in events:
+                if event.event_type is ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED and (
+                    event.payload
+                ):
+                    raw_matching = frozenset(
+                        int(ticket) for ticket in event.payload.get("matching_tickets", [])
+                    )
+            closed_by_flatten = raw_matching - attributed
+
+            self._append(
+                order_request_id,
+                ExecutionEventType.RECONCILED,
+                now,
+                payload={
+                    "expected_position_tickets": sorted(attributed),
+                    "observed_open_tickets": sorted(attributed & open_tickets),
+                    "closed_tickets": sorted(closed_by_flatten),
+                    "expected_pending_order_ids": [],
+                    "book_status": result.status.value,
+                },
+            )
+            outcomes.append(
+                ReconciliationAttemptOutcome(
+                    order_request_id=order_request_id,
+                    book_status=result.status,
+                    accounted_ticket_count=len(attributed),
+                )
+            )
+        return tuple(outcomes)
 
     def _evaluate_submission_readiness(
         self,

@@ -262,6 +262,56 @@ class TestMismatched:
         assert any("symbol" in reason for reason in result.reasons)
 
 
+class TestUnknownWhenTheExpectedSideCannotBeFormed:
+    """Core critical path item 8 (ADR-010): `undetermined_reasons` is a
+
+    second expected-side unknown, sibling to `expected_spec_version is
+    None` (F-055) — an incomplete expectation is not the same as
+    disagreeing with one.
+    """
+
+    def test_undetermined_reasons_are_unknown_even_against_a_perfect_observation(self) -> None:
+        """A twin of
+
+        `test_no_pinned_baseline_is_unknown_even_with_a_matching_observation`
+        — the observed side being perfect does not rescue an incomplete
+        expectation."""
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(undetermined_reasons=("a request's outcome is not yet known",)),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.UNKNOWN
+
+    def test_undetermined_reasons_appear_in_the_result_reasons(self) -> None:
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account),
+            expectation(undetermined_reasons=("request abc123 is stuck",)),
+            now=FIXED_NOW,
+        )
+        assert any("request abc123 is stuck" in reason for reason in result.reasons)
+
+    def test_undetermined_reasons_beat_a_would_be_mismatch(self) -> None:
+        """An undetermined expectation plus an unexpected position is
+
+        UNKNOWN, not MISMATCHED — absence of expectation is not
+        disagreement."""
+        account = make_broker_account_snapshot(observed_at_utc=FIXED_NOW)
+        position = make_broker_position_snapshot(ticket=1)
+        result = reconcile_with(
+            FakeBrokerStateSource(account=account, positions=(position,)),
+            expectation(undetermined_reasons=("a request's outcome is not yet known",)),
+            now=FIXED_NOW,
+        )
+        assert result.status is ReconciliationStatus.UNKNOWN
+
+    def test_flat_never_sets_undetermined_reasons(self) -> None:
+        """Proves the new leg is unreachable for every pre-item-8 caller."""
+        assert ExpectedState.flat(GUARD).undetermined_reasons == ()
+
+
 class TestInstrumentSpecReconciliation:
     """Review 1.17 §7 / F-053: the semantic contract spec is part of what
 

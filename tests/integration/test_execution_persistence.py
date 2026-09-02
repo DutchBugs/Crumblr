@@ -212,6 +212,109 @@ class TestCountEventsSince:
         )
 
 
+class TestRequestIdsWithEvent:
+    """Core critical path item 8 (ADR-010): the read seam
+
+    `reconcile_once()` needs — "which requests could possibly imply live
+    exposure" — that `events_for()` (per-request) and
+    `count_events_since()` (a scalar count) do not provide.
+    """
+
+    def test_empty_on_a_fresh_database(self, engine: Engine) -> None:
+        store = ExecutionEventStore(engine)
+        assert store.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED) == ()
+
+    def test_returns_only_requests_that_reached_the_event(self, engine: Engine) -> None:
+        capsule = sealed_capsule(engine)
+        requests = ExecutionRequestStore(engine)
+        events = ExecutionEventStore(engine)
+
+        with_it = uuid4()
+        requests.claim(
+            order_request_id=with_it,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-with",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        events.append(
+            order_request_id=with_it,
+            event_type=ExecutionEventType.SUBMISSION_STARTED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        without_it = uuid4()
+        requests.claim(
+            order_request_id=without_it,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-without",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        events.append(
+            order_request_id=without_it,
+            event_type=ExecutionEventType.INELIGIBLE,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        assert events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED) == (with_it,)
+
+    def test_a_request_is_returned_once_however_many_times_the_event_appears(
+        self, engine: Engine
+    ) -> None:
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        ExecutionRequestStore(engine).claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        events = ExecutionEventStore(engine)
+        events.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.SUBMISSION_STARTED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        # A retried append with identical content converges (item 4) —
+        # confirm the seam still returns exactly one row.
+        events.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.SUBMISSION_STARTED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        assert events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED) == (
+            order_request_id,
+        )
+
+    def test_ordered_by_first_occurrence(self, engine: Engine) -> None:
+        capsule = sealed_capsule(engine)
+        requests = ExecutionRequestStore(engine)
+        events = ExecutionEventStore(engine)
+        ids = [uuid4(), uuid4(), uuid4()]
+        for i, order_request_id in enumerate(ids):
+            requests.claim(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+                fingerprint=f"fp-{i}",
+                claimed_by="test-worker",
+                now=FIXED_NOW,
+            )
+            events.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.SUBMISSION_STARTED,
+                occurred_at_utc=FIXED_NOW,
+            )
+
+        assert events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED) == tuple(ids)
+
+
 class TestExecutionEvents:
     def test_events_read_back_in_order(self, engine: Engine) -> None:
         capsule = sealed_capsule(engine)

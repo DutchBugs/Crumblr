@@ -326,3 +326,41 @@ class ExecutionEventStore:
         )
         with self._engine.connect() as connection:
             return int(connection.execute(statement).scalar_one())
+
+    def request_ids_with_event(
+        self, event_type: ExecutionEventType, *, since: UtcDatetime | None = None
+    ) -> tuple[UUID, ...]:
+        """Every distinct `order_request_id` that has at least one
+
+        `event_type` event, oldest commitment first (core critical path
+        item 8, ADR-010). The read seam `events_for()` (per-request) and
+        `count_events_since()` (a scalar count) do not provide: "which
+        requests could possibly imply live exposure".
+
+        Called with `SUBMISSION_STARTED`, this is not a heuristic
+        shortcut — `application/expected_state.py`'s exhaustive mapping
+        over `ExecutionEventType` proves every *other* durable state a
+        request can be in contributes no exposure, so this is the
+        complete candidate set for post-fill reconciliation, which
+        happens also to be bounded (provably empty in every shipped
+        config today — no config can open `SubmissionGate`) rather than a
+        "read every event ever" scan.
+
+        `since` exists for a future narrower caller; the reconciliation
+        driver deliberately passes `None` — bounding by time would defeat
+        the mechanism's purpose (a position lost track of weeks ago is
+        exactly the drift item 8 exists to catch).
+        """
+        from sqlalchemy import func
+
+        statement = (
+            select(execution_events.c.order_request_id)
+            .where(execution_events.c.event_type == event_type.value)
+            .group_by(execution_events.c.order_request_id)
+            .order_by(func.min(execution_events.c.sequence))
+        )
+        if since is not None:
+            statement = statement.where(execution_events.c.occurred_at_utc >= since)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).scalars().all()
+        return tuple(rows)

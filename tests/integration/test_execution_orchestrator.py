@@ -214,6 +214,14 @@ class TestEndToEnd:
         response could leave behind) is recovered on the next
         `run_once()` pass, not silently ignored forever — but recovery
         never resubmits, and never re-reads the broker once resolved.
+
+        Core critical path item 8: the same pass that recovers the
+        ambiguity also reconciles it — `reconcile_once()` runs after the
+        capsule loop, so a request resolved by `_recover_ambiguous_
+        submission` earlier in this same pass is already `DETERMINED`
+        by the time reconciliation looks at it (`RECONCILED` follows
+        `AMBIGUOUS_OUTCOME_RESOLVED` in the same `run_once()` call, not a
+        pass later) — see ADR-010 §2.6.
         """
         the_spec = spec()
         InstrumentSpecStore(engine).record(the_spec)
@@ -247,22 +255,40 @@ class TestEndToEnd:
         assert second[0].capsule_id == capsule.capsule_id
         assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
         assert fake.order_send_calls == 0
-        assert fake.positions_get_calls == positions_read_before_recovery + 1
+        # +2, not +1: `_recover_ambiguous_submission`'s own magic search
+        # (item 6), plus `reconcile_once()`'s own broker observation
+        # (item 8) — both run in this same pass, since reconciliation
+        # runs after the capsule loop and this request is now
+        # DETERMINED (submitted=False -> empty exposure) by the time it
+        # gets there.
+        assert fake.positions_get_calls == positions_read_before_recovery + 2
 
         events = ExecutionEventStore(engine).events_for(request_id)
-        assert [event.event_type for event in events][-2:] == [
+        assert [event.event_type for event in events][-3:] == [
             ExecutionEventType.SUBMISSION_STARTED,
             ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+            ExecutionEventType.RECONCILED,
         ]
-        recovery_event = events[-1]
+        recovery_event = events[-2]
         assert recovery_event.payload is not None
         assert recovery_event.payload["magic_number"] == mt5_magic_number(request_id)
         assert recovery_event.payload["submitted"] is False
         assert recovery_event.payload["matching_position_count"] == 0
         assert recovery_event.payload["matching_tickets"] == []
 
-        # A third pass must not re-run recovery or re-read the broker —
-        # the request is already resolved.
+        reconciled_event = events[-1]
+        assert reconciled_event.payload is not None
+        assert reconciled_event.payload["expected_position_tickets"] == []
+        assert reconciled_event.payload["observed_open_tickets"] == []
+        assert reconciled_event.payload["closed_tickets"] == []
+        assert reconciled_event.payload["book_status"] == "MATCHED"
+
+        # A third pass must not re-run recovery, re-run reconciliation, or
+        # re-read the broker for either — the request is already fully
+        # resolved (`_recover_ambiguous_submission` sees `RECONCILED`,
+        # not `SUBMISSION_STARTED`, as the last event and returns
+        # immediately; `reconcile_once()` finds no pending candidate and
+        # does the same).
         positions_read_after_recovery = fake.positions_get_calls
         third = orch.run_once()
         assert third == ()
@@ -302,11 +328,23 @@ class TestEndToEnd:
         assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
         assert fake.order_send_calls == 0
 
-        recovery_event = ExecutionEventStore(engine).events_for(request_id)[-1]
+        events = ExecutionEventStore(engine).events_for(request_id)
+        # Core critical path item 8: since the exposure is now DETERMINED
+        # with a ticket that is genuinely observed open, `reconcile_once()`
+        # (running after the capsule loop, same pass) reconciles it
+        # immediately too — see ADR-010 §2.6.
+        recovery_event = events[-2]
         assert recovery_event.payload is not None
         assert recovery_event.payload["submitted"] is True
         assert recovery_event.payload["matching_position_count"] == 1
         assert recovery_event.payload["matching_tickets"] == [900042]
+
+        reconciled_event = events[-1]
+        assert reconciled_event.event_type == ExecutionEventType.RECONCILED
+        assert reconciled_event.payload is not None
+        assert reconciled_event.payload["expected_position_tickets"] == [900042]
+        assert reconciled_event.payload["observed_open_tickets"] == [900042]
+        assert reconciled_event.payload["book_status"] == "MATCHED"
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine

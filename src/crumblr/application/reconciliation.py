@@ -8,12 +8,13 @@ Review 1.15 §14, review 1.16 §7-8:
              |
     Observed Broker Snapshot
 
-Before an execution path exists, "expected" is trivially flat: build.md's
-M1/M2 scope never creates a position or a pending order, so the only correct
-expectation today is zero of each — see `ExpectedState.flat()`. Once
-execution exists, expected state must come from the platform's own durable
-order/position history, never from the latest MT5 snapshot itself — that
-would compare MT5 to MT5 and detect nothing (review 1.16 §8).
+Before durable execution history exists, "expected" is trivially flat: the
+only correct expectation is zero positions and zero pending orders — see
+`ExpectedState.flat()`. Once durable history exists, expected state comes
+from the platform's own durable order/position history instead, never from
+the latest MT5 snapshot itself — that would compare MT5 to MT5 and detect
+nothing (review 1.16 §8) — see `ExpectedState.from_durable_exposure()`
+(core critical path item 8, `review/adr/ADR-010-post-fill-reconciliation.md`).
 
 Fail-closed, not merely fail-cautious: `ReconciliationStatus.UNKNOWN` is the
 result whenever the observed side cannot be trusted — missing, stale, or an
@@ -48,11 +49,12 @@ No pin yet means `UNKNOWN`, never `MATCHED`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Protocol
 from uuid import UUID
 
+from crumblr.application.expected_state import DerivedExposure
 from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import ReconciliationStatus, SnapshotCompleteness
 from crumblr.domain.hashing import fingerprint
@@ -92,6 +94,17 @@ class ExpectedState:
     as `UNKNOWN` for the instrument-spec dimension, never inferred from
     whichever observation happened to be recorded first. See
     `config.MarketConfig.expected_spec_version` for how this is set."""
+    undetermined_reasons: tuple[str, ...] = ()
+    """Why the platform could not fully determine what it expects (core
+
+    critical path item 8, `review/adr/ADR-010-post-fill-reconciliation.md`).
+    Non-empty means `reconcile()` returns `UNKNOWN` — never `MATCHED`, and
+    never `MISMATCHED` either: a comparison against a half-formed
+    expectation is not a disagreement, it is an absence of evidence.
+    Symmetric with `expected_spec_version=None` above (review 1.19 §4,
+    F-055): the fact that an expectation is incomplete lives on the
+    expectation itself, so no caller can hold one and still get `MATCHED`
+    out of `reconcile()`. `flat()` never sets this."""
 
     @classmethod
     def flat(
@@ -101,12 +114,13 @@ class ExpectedState:
         canonical_symbol: str = "EUR/USD",
         expected_spec_version: str | None = None,
     ) -> ExpectedState:
-        """The only correct expectation before an execution path exists
+        """The only correct expectation before any execution history
 
-        (review 1.16 §8): no open positions, no pending orders. Once
-        `order_send` exists, build the expectation from the platform's own
-        durable order/position history instead — never from the latest MT5
-        snapshot, which is the observed side, not the expected one.
+        exists (review 1.16 §8): no open positions, no pending orders.
+        Once a caller has durable execution history to read, build the
+        expectation from that instead — never from the latest MT5
+        snapshot, which is the observed side, not the expected one. See
+        `from_durable_exposure()`, core critical path item 8.
         """
         expected_account_ref = (
             fingerprint({"login": guard.expected_login, "server": guard.expected_server})[:16]
@@ -120,6 +134,39 @@ class ExpectedState:
             canonical_symbol=canonical_symbol,
             expected_account_ref=expected_account_ref,
             expected_spec_version=expected_spec_version,
+        )
+
+    @classmethod
+    def from_durable_exposure(
+        cls,
+        guard: AccountGuardConfig,
+        exposure: DerivedExposure,
+        *,
+        canonical_symbol: str = "EUR/USD",
+        expected_spec_version: str | None = None,
+    ) -> ExpectedState:
+        """The expectation `flat()`'s own docstring has always pointed at:
+
+        built from the platform's durable order/position history (core
+        critical path item 8), never from the latest MT5 snapshot (review
+        1.16 §8 — that would compare MT5 to MT5 and detect nothing).
+
+        `flat()` is not removed and not reimplemented in terms of this —
+        it is still the correct expectation for a caller with no
+        execution history to read (`_process()`'s own pre-submission
+        eligibility check; the decision tier). `from_durable_exposure(
+        guard, DerivedExposure.empty())` is exactly equal to `flat(guard)`
+        — asserted directly in
+        `tests/unit/test_expected_state.py::test_an_empty_history_is_exactly_flat`.
+        """
+        base = cls.flat(
+            guard, canonical_symbol=canonical_symbol, expected_spec_version=expected_spec_version
+        )
+        return replace(
+            base,
+            expected_position_tickets=exposure.expected_position_tickets,
+            expected_pending_order_ids=exposure.expected_pending_order_ids,
+            undetermined_reasons=exposure.undetermined_reasons,
         )
 
 
@@ -225,6 +272,14 @@ def reconcile(
     if snapshot.pending_order_set_state is not SnapshotCompleteness.COMPLETE:
         return _unknown(
             f"pending-order set is {snapshot.pending_order_set_state.value}, not COMPLETE",
+            now=now,
+            snapshot_id=snapshot.snapshot_id,
+        )
+
+    if expectation.undetermined_reasons:
+        return _unknown(
+            "the platform's expected state could not be fully determined: "
+            + "; ".join(expectation.undetermined_reasons),
             now=now,
             snapshot_id=snapshot.snapshot_id,
         )

@@ -28,18 +28,39 @@ legs, reused because the same environment/account/AlgoTrading/risk-config/
     10. flatten submission is explicitly enabled
     11. `feedback.2.0` has given its GO
 
-**Condition 6 is "not UNKNOWN", deliberately never "MATCHED".** The only
-expectation this platform can currently form is `ExpectedState.flat()`
-(`application/reconciliation.py`) — every observed open position reports
-as "unexpected". A flatten is *triggered by* an open position, so
-reconciliation is *always* `MISMATCHED` at the moment a flatten is needed;
-requiring `MATCHED` (the naive copy of `submission_gate.py`'s leg) would
-make this gate unconditionally closed exactly when a flatten is needed.
-ADR-004 §5.3's real safety property is *observability* — "flattening what
-you cannot see is how a hedge becomes a naked position" — not agreement,
-and `UNKNOWN` is precisely the codified "cannot see" (a missing, stale, or
-incomplete snapshot). `MISMATCHED`-because-a-position-genuinely-exists is
-the expected, informative state and must not close this gate.
+**Condition 6 is "not UNKNOWN", deliberately never "MATCHED" — and this
+
+holds regardless of which expectation reconciliation is given.** A
+flatten is *triggered by* an open position; under *any* expectation the
+platform can form, that position is either one the platform attributed
+to itself (`MATCHED`) or one it did not (`MISMATCHED`). Requiring
+`MATCHED` would refuse to flatten precisely the positions the platform
+did *not* put there — opened by hand, by another EA, by an earlier
+deployment — and an unattributable position past the deadline is
+strictly *more* alarming than an attributed one, not less. Gating the
+flatten on attribution would therefore be inverted, not merely
+inconvenient. ADR-004 §5.3's real safety property is *observability* —
+"flattening what you cannot see is how a hedge becomes a naked
+position" — not agreement, and `UNKNOWN` is precisely the codified
+"cannot see" (a missing, stale, or incomplete snapshot).
+`MISMATCHED`-because-a-position-exists is the expected, informative
+state and must not close this gate.
+
+`flatten_once()` (`application/execution.py`) deliberately still passes
+`ExpectedState.flat()` here rather than the derived expectation core
+critical path item 8 makes available
+(`ExpectedState.from_durable_exposure()`,
+`review/adr/ADR-010-post-fill-reconciliation.md` §2.3) — switching would
+be all-cost, no-benefit at the one moment (the deadline) this platform
+cares most about not stalling: the derived expectation is provably
+either identical to `flat()` or `flat()` plus an undetermined reason (an
+unrelated request stuck at `SUBMISSION_STARTED`), which can only *newly
+close* this gate, never newly open it. ADR-004 §5.3's "reconcile before
+flattening" requirement is already fully satisfied by the *observed*-side
+legs above (5, plus `reconcile()`'s own completeness checks) — identical
+under either expectation — so keeping `flat()` here does not weaken §5.3
+by even one leg. See ADR-010 §2.3 for the full reasoning and D-051 for
+the trigger condition to revisit this.
 
 **Condition 7 tolerates an `OVERNIGHT_EXPOSURE`-only halt, deliberately.**
 The existing detection path (`risk/policies.py::_overnight_breach`,

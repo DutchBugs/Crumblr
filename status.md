@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `ea80f05` |
+| **`main` HEAD** | `ea80f05` (pending — see the sixty-fifth entry's follow-up commit for the exact SHA once item 8 merges) |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`), automatic flatten submission (item 7, `ADR-009`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 8 (post-fill reconciliation). BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
+| **Dev 1** | DONE: SubmissionGate built and wired (F-049/F-062), F-063 fixed (confirmed by run 60), F-051 part 2 CLOSED, F-065 fixed same day as opened, F-067 fixed same day as opened (hosted pg_dump/psql restore proof), `SUBMISSION_STARTED` emission (item 3), execution-event conflict hardening (item 4), `order_send` idempotence/MT5 magic-number derivation (item 5, `ADR-007`), ambiguous-outcome recovery (item 6, `ADR-008`), automatic flatten submission (item 7, `ADR-009`), post-fill reconciliation (item 8, `ADR-010`). NEXT: confirm hosted CI fully green (needs a human), then core critical path item 9 (broker-side SL verification) — the last item on the owner's punch list. BLOCKED: hosted CI confirmation. Review 1.28 (F-066, strategy-neutral Core) explicitly does not change this — no reimplementation of external strategy semantics, support Dev 2 only with a small requested seam if/when asked |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **Owner blockers** | Confirm next hosted CI run is fully green; owner risk-policy decisions (risk/trade, max daily loss/drawdown, last-entry cutoff, flatten deadline, HALT-reset authority); decide when to enable terminal AlgoTrading |
@@ -8649,6 +8649,171 @@ Next:
   deferred, not claimed as part of this item's own work.
 - Continue down the owner's punch list: core critical path item 8,
   post-fill reconciliation.
+
+---
+
+## Update 2026-09-02 (sixty-fifth entry) — post-fill reconciliation (core critical path item 8)
+
+Component: `application/expected_state.py`, `application/reconciliation.py`, `application/execution.py`, `persistence/execution.py`, `persistence/flatten.py`, `domain/enums.py`, new migration, `scripts/reconcile.py`, `review/adr/ADR-010-post-fill-reconciliation.md`, `review/DEVIATIONS.md`
+Milestone: Dev-1 core critical path item 8 (review 1.16 §7-8, review 1.26 §6 item 8), planned via `EnterPlanMode` (with a `Plan` sub-agent pass) and approved before implementation; final item of the owner's punch list before item 9
+Status before: `ExpectedState.expected_position_tickets`/`expected_pending_order_ids` existed since F-047 but had never been populated by any caller — every reconciliation everywhere in the codebase compared against `flat()`, unconditionally
+Status after: `ExecutionOrchestrator.reconcile_once()` derives an expectation from durable execution/flatten history and reconciles it against real broker state every pass, appending `RECONCILED` once per request when its own exposure is fully accounted for — `close_all_positions`/`order_send` remain completely unreachable throughout
+
+Completed:
+- Researched via `Agent`/`Explore` (`model: opus`), then a `Plan`
+  sub-agent pass to validate the design before committing to it — this
+  item's honest scope turned out narrower than items 6/7 in one specific
+  sense (its output is provably identical to `flat()`'s in every
+  deployment today, since nothing can ever fill) but surfaced a genuine
+  cross-item architecture fork with item 7's already-shipped
+  `flatten_gate.py`, resolved explicitly rather than left to fall out of
+  the implementation by accident (see below).
+- Asked the user how to proceed before starting, given the scope
+  ambiguity and the cross-item interaction with already-shipped,
+  reviewed code — approved to do the full design and build.
+- `domain/enums.py`: `RECONCILED` moved out of "Reserved for M5" into
+  the emitted section with a full docstring — the only one of the five
+  reserved members whose literal claim ("the platform compared its
+  expectation against broker truth") this platform can honestly make
+  today, since the other four each assert a broker fact no code path
+  can produce.
+- `application/expected_state.py` (new, pure): `derive_expected_exposure()`
+  — a total, exhaustive mapping over every `ExecutionEventType` member
+  (guarded by a test that iterates the enum, so a future addition
+  without an exposure decision fails a test rather than silently
+  reporting zero exposure), plus the flatten-interaction rules (a
+  resolved flatten's `closed_tickets` are removed from what a request
+  is still expected to hold; an unresolved commitment's targets become
+  undetermined) and D-049 promoted to a runtime-enforced leg (a
+  non-`MARKET` entry makes pending-order exposure undetermined rather
+  than a false empty set).
+- `application/reconciliation.py`: new `ExpectedState.undetermined_reasons`
+  field (symmetric with the existing `expected_spec_version=None` leg,
+  F-055) and `from_durable_exposure()` classmethod, alongside — not
+  replacing — `flat()`. One new `UNKNOWN` leg in `reconcile()`.
+- **Resolved the flatten-gate fork explicitly**: item 7's `flatten_gate.py`
+  leg was justified in ADR-009 §2.3 on the premise that `flat()` is the
+  only expectation this platform can form — item 8 makes that premise
+  false. Decision: `flatten_once()` keeps passing `flat()` (switching
+  would be all-cost, no-benefit at the deadline — the derived
+  expectation can only *newly close* the gate, never newly open it);
+  only the gate's *justification* is rewritten, to an
+  expectation-independent argument that survives item 8. The existing
+  guard test's assertions are unchanged, only its docstring.
+- `application/execution.py::reconcile_once()`: called from the
+  *bottom* of `run_once()` (after the capsule loop, not the top like
+  `flatten_once()`), so item 6's same-pass recovery resolves an
+  ambiguity before reconciliation asks about it — confirmed directly:
+  the two pre-existing item-6 tests now observe `RECONCILED` following
+  `AMBIGUOUS_OUTCOME_RESOLVED` in the same `run_once()` call, and were
+  updated accordingly (not a regression — the intended, designed
+  same-pass convergence).
+- Two new persistence read seams: `ExecutionEventStore
+  .request_ids_with_event()`, `FlattenEventStore.occurrence_histories()`
+  — bounded by state (the exhaustively-proven candidate set), not time,
+  deliberately: time-bounding would defeat the mechanism's purpose (a
+  position lost track of weeks ago is exactly the drift this item
+  exists to catch).
+- One index-only migration (`03df83b062a6`, off head `cc35e55b3f92`,
+  coordinated with Dev 2 first per instruction §8) —
+  `ix_execution_events_type_time` — serves the new seam and
+  retroactively serves `count_events_since()`'s existing unindexed
+  filter.
+- `scripts/reconcile.py` updated to use the derived expectation when
+  any durable history exists, `flat()` otherwise — a second, human-
+  facing consumer of the same mechanism, output unchanged today.
+- `review/adr/ADR-010-post-fill-reconciliation.md` (new): the gap, the
+  mechanism (with named subsections for the flatten-gate fork in full,
+  why `RECONCILED` and not the other four, the exposure mapping, the
+  read-seam scale reasoning), what this does not do, consequences.
+- `review/DEVIATIONS.md`: new **D-051** naming three adjacent gaps, none
+  folded into this item's own work — no `OrderState` transition-
+  validation state machine, a forward hazard in `live_decision.py`'s
+  cached `flat()` expectation once `order_send` lands, and
+  `config.SupervisorConfig.halt_on_reconciliation_mismatch` staying
+  unconsumed (confirmed by grep: set in `config/base.yaml`, read
+  nowhere). D-049 and D-050 both gain cross-references.
+- `review/FEEDBACK.md`: completion row, same structure as items 4-7, no
+  new F-number. `review/INTEGRATION_NOTICES.md`: two entries — the new
+  Alembic head, the additive `ExpectedState.undetermined_reasons` field.
+
+Evidence:
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — clean, 174 source files.
+- `uv run alembic heads` — confirmed single head before and after
+  creating the migration (`cc35e55b3f92` → `03df83b062a6`).
+- `uv run pytest tests/integration/test_migrations.py -v` — 8 passed,
+  run immediately after creating the migration.
+- Targeted new/changed test files — 143 passed: 17
+  (`test_expected_state.py`) + 4 (`test_reconciliation.py` additions) +
+  7 (`test_execution_reconciliation.py`) + 7 (`test_execution_persistence.py`
+  additions) + 3 (`test_flatten_persistence.py` additions) + 74
+  (`test_execution_orchestrator.py` + `test_execution_flatten.py` +
+  `test_reconciliation.py` + `tests/integration/test_reconciliation.py`
+  + `test_flatten_gate.py`, all confirmed passing together, including
+  the two item-6 tests updated for same-pass convergence) + 31
+  (persistence files run standalone once more to confirm).
+- Full suite, solo, against `crumblr_test_dev1` — **1244 passed, 3
+  skipped** (1209 + 35 new item-8 tests exactly: 17+4+7+4+3), zero
+  failures.
+- Grepped the diff for any new `.order_send(`/`.close_all_positions(`
+  call site (excluding definitions, refuses, test-double assertions) —
+  zero. Grepped `src/crumblr/agent_gateway/` for every new item-8
+  symbol (`expected_state`, `reconcile_once`,
+  `ReconciliationAttemptOutcome`, `RECONCILED`, `from_durable_exposure`,
+  `request_ids_with_event`, `occurrence_histories`) — zero references.
+
+Problems found:
+- Two pre-existing item-6 tests broke on first run once
+  `reconcile_once()` was wired into `run_once()` — not a design flaw,
+  the intended same-pass convergence catching an outdated test
+  assumption. Fixed by updating the assertions to expect `RECONCILED`
+  immediately following `AMBIGUOUS_OUTCOME_RESOLVED` in the same pass,
+  with the exact new event/payload/broker-read-count shape asserted
+  explicitly rather than loosened.
+- One real design correction, self-caught before it shipped: the first
+  draft of `reconcile_once()` skipped the broker read entirely once any
+  candidate already carried `RECONCILED` (mirroring `flatten_once()`'s
+  own idempotence pattern) — but unlike `flatten_once()`, this item's
+  purpose is *continuous* whole-book monitoring, so the plan's own
+  intended design (confirmed by re-reading it) is to keep the broker
+  read going as long as any historically-committed request exists, and
+  only skip appending a *new* `RECONCILED` for ones already reconciled.
+  This is the design shipped; the theoretical residual gap (a position
+  confirmed accounted-for once and never revisited would not be
+  re-checked for drift absent a new durable event for that request) is
+  named honestly rather than silently accepted — it has no effect on
+  any path this platform can exercise today, since `order_send` stays
+  unreachable, but is worth a future D-### entry if real fills ever
+  make it a live concern.
+
+Risk impact:
+- None. `close_all_positions`/`order_send` remain completely
+  unreachable through every path this item added — the mechanism only
+  reads durable history and already-real broker state, and durably
+  records a determination; nothing here closes a position or decides to
+  attempt one.
+
+Decision:
+- Asked the user how to proceed before starting (full design+build vs.
+  pause vs. narrower slice) — approved full design and build.
+- Entered plan mode before implementing; a `Plan` sub-agent pass
+  validated the design against real source before finalizing it; plan
+  approved before any code was written.
+- Coordinated the migration with Dev 2 before creating it, per
+  instruction §8.
+- Not yet committed — pending the usual per-turn approval and full-suite
+  confirmation, on a new `core/`-prefixed branch.
+
+Next:
+- Confirm hosted CI is genuinely fully green (still needs a human or a
+  session with GitHub access — no `gh` access here); unchanged from
+  prior entries.
+- Core critical path item 9: broker-side SL verification — not yet
+  started, no plan drafted. The last item on the owner's original punch
+  list ("→ CI pg_dump/psql verbinding fixen → hosted CI volledig groen
+  → ambiguous-outcome recovery → flatten → post-fill reconciliation →
+  broker-SL verification").
 
 ---
 

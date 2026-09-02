@@ -92,18 +92,19 @@ class TestFlattenGate:
         assert ReasonCode.RECONCILIATION_UNKNOWN in decision.reason_codes
 
     def test_a_mismatched_reconciliation_does_not_close_the_gate(self) -> None:
-        """The asymmetry with `submission_gate.py`, guarded directly.
+        """The asymmetry with `submission_gate.py`, guarded directly —
 
-        `ExpectedState.flat()` is the only expectation this platform can
-        currently form — every observed open position reports as
-        "unexpected". A flatten is *triggered by* an open position, so
-        reconciliation is *always* MISMATCHED at the moment a flatten is
-        needed. Requiring MATCHED here (the naive copy of
-        `submission_gate.py`'s leg) would make this gate unconditionally
-        closed exactly when a flatten is needed — see
-        `risk/flatten_gate.py`'s own module docstring. A future "fix"
-        that reintroduces a MATCHED requirement should turn this test
-        red, not the default-open context above.
+        and expectation-independent, not merely a consequence of
+        `flat()` being the only expectation this platform could once
+        form (core critical path item 8 made a second one available; see
+        `risk/flatten_gate.py`'s own module docstring and
+        `review/adr/ADR-010-post-fill-reconciliation.md` §2.3). Under
+        *any* expectation, a position past the flatten deadline is
+        either attributed (MATCHED) or not (MISMATCHED) — requiring
+        MATCHED would refuse to flatten precisely the positions the
+        platform did not put there, which is more alarming, not less. A
+        future "fix" that reintroduces a MATCHED requirement should turn
+        this test red, not the default-open context above.
         """
         decision = evaluate_flatten_gate(
             flatten_context(reconciliation_status=ReconciliationStatus.MISMATCHED)

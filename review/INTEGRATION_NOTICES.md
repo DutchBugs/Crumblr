@@ -436,3 +436,52 @@ proposed), these are the contracts to reuse rather than inventing
 parallel ones.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-02 — DEV1
+Changed: New Alembic migration, migrations/versions/20260902_03df83b062a6
+_execution_events_type_time_index.py, revises cc35e55b3f92 (the head at
+the time this was created - confirmed via `alembic heads`, and confirmed
+with Dev 2 no migration was in flight). Index-only: adds
+Index("ix_execution_events_type_time", "event_type", "occurred_at_utc")
+on execution_events (core critical path item 8, post-fill reconciliation,
+review/adr/ADR-010-post-fill-reconciliation.md). Serves the new
+ExecutionEventStore.request_ids_with_event() seam and retroactively
+serves count_events_since()'s existing unindexed filter, which FINAL
+Risk already calls every _process() pass.
+Impact: persistence/schema.py is shared/cross-cutting infrastructure.
+Index-only - no table, column, FK, or existing index changed. Confirmed
+via tests/integration/test_migrations.py (all 8 tests pass) and a full-
+suite run.
+Action required: current Alembic head is now 03df83b062a6 - the next
+migration on either side must chain from there.
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-09-02 — DEV1
+Changed: application/reconciliation.py::ExpectedState gains one new
+field, undetermined_reasons: tuple[str, ...] = () (core critical path
+item 8, ADR-010 SS2). Non-empty means reconcile() returns UNKNOWN -
+symmetric with the existing expected_spec_version=None leg (F-055).
+ExpectedState.flat() never sets it; a new classmethod,
+from_durable_exposure(), does.
+Impact: application/reconciliation.py is not itself on the shared/
+handshake list, but ExpectedState is a dataclass any caller could
+construct - noting this defensively. Purely additive: a new field with
+a default, a new classmethod alongside (not replacing) flat(), one new
+early-return leg in reconcile() placed before any existing leg's logic
+runs, unreachable for any caller that never sets the new field
+(confirmed by tests/unit/test_reconciliation.py
+::test_flat_never_sets_undetermined_reasons - flat() produces
+identical results before and after this change).
+Action required: none expected. If agent_gateway/ code ever needs to
+construct an ExpectedState directly (grep-confirmed: it does not today),
+be aware of the new field and prefer flat() unless durable execution
+history is genuinely being read.
+Relevant commit: (this commit)
+```

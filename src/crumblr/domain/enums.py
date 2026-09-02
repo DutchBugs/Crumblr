@@ -432,11 +432,49 @@ class ExecutionEventType(StrEnum):
     nothing here decides to attempt one — that stays exactly as
     unreachable as it has always been."""
 
-    # Reserved for M5. Never emitted by anything Phase 4 builds.
+    RECONCILED = "RECONCILED"
+    """Core critical path item 8 (review 1.16 §7-8, review 1.26 §6 item
+
+    8): "derive post-fill expected state from durable platform execution
+    history and reconcile it against broker truth." Appended at most
+    once per request, ever (`event_id_for` derives from
+    `(order_request_id, event_type)` alone — a second append with
+    different content raises `ExecutionEventConflictError`) — a
+    once-per-request terminal determination, not a per-pass heartbeat,
+    matching this member's own position in `OrderState`'s build.md §19
+    machine (after `FILLED`, before `CLOSED`). Payload carries the
+    determination only (`expected_position_tickets`,
+    `observed_open_tickets`, `closed_tickets`, `book_status`) — no
+    timestamp, no snapshot id, mirroring `AMBIGUOUS_OUTCOME_RESOLVED`'s
+    own precedent exactly, so a concurrent double-check converges rather
+    than raising a false conflict.
+
+    **The only one of the five reserved-for-M5 members whose literal
+    claim this platform can honestly make today.** `SUBMITTED`/
+    `BROKER_ACK`/`FILLED`/`CLOSED` each assert a broker fact — a real
+    submission, acknowledgement, fill, or lifecycle end — that no code
+    path here can produce; emitting any of them would be evidence
+    fabrication in the one table whose purpose is auditable provenance
+    (the same objection ADR-009 §2.1 raised against fabricating a
+    placeholder capsule). `RECONCILED`'s claim — "the platform compared
+    its durable expectation against observed broker truth, and here is
+    the verdict" — is true of an action the platform actually performs,
+    including truthfully about a still-flat expectation. See
+    `review/adr/ADR-010-post-fill-reconciliation.md` §2.2.
+
+    **Provably always the `flat()`-equivalent verdict today.** No
+    committed request can ever have resulted in a real position, since
+    `order_send` stays unreachable — see
+    `application/execution.py::ExecutionOrchestrator.reconcile_once()`.
+    """
+
+    # Reserved for M5. `SUBMITTED`/`BROKER_ACK`/`FILLED`/`CLOSED` each
+    # assert a broker fact (a real submission, acknowledgement, fill, or
+    # lifecycle end) that no code path in this platform can produce —
+    # never emitted by anything Phase 4 or the core critical path builds.
     SUBMITTED = "SUBMITTED"
     BROKER_ACK = "BROKER_ACK"
     FILLED = "FILLED"
-    RECONCILED = "RECONCILED"
     CLOSED = "CLOSED"
 
 

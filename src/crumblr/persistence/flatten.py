@@ -322,3 +322,53 @@ class FlattenEventStore:
             )
             for row in rows
         )
+
+    def occurrence_histories(
+        self, *, environment: Environment, canonical_symbol: str
+    ) -> tuple[tuple[UUID, tuple[FlattenEventRecord, ...]], ...]:
+        """Every flatten occurrence for this environment/symbol, each with
+
+        its full event history, oldest trading day first (core critical
+        path item 8, ADR-010). `flatten_events` carries no environment or
+        symbol of its own — both live on `flatten_requests` — so this
+        joins the two rather than duplicating those columns onto the
+        event table. Bounded forever by real occurrence volume: at most
+        one row per `(environment, canonical_symbol, trading_day)`,
+        served by the existing `ix_flatten_requests_day` index.
+        """
+        statement = (
+            select(flatten_events, flatten_requests.c.trading_day)
+            .select_from(
+                flatten_requests.join(
+                    flatten_events,
+                    flatten_events.c.flatten_request_id == flatten_requests.c.flatten_request_id,
+                )
+            )
+            .where(
+                flatten_requests.c.environment == environment.value,
+                flatten_requests.c.canonical_symbol == canonical_symbol,
+            )
+            .order_by(flatten_requests.c.trading_day, flatten_events.c.sequence)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+
+        histories: dict[UUID, list[FlattenEventRecord]] = {}
+        order: list[UUID] = []
+        for row in rows:
+            flatten_request_id = row["flatten_request_id"]
+            if flatten_request_id not in histories:
+                histories[flatten_request_id] = []
+                order.append(flatten_request_id)
+            histories[flatten_request_id].append(
+                FlattenEventRecord(
+                    event_id=row["event_id"],
+                    flatten_request_id=flatten_request_id,
+                    event_type=FlattenEventType(row["event_type"]),
+                    occurred_at_utc=row["occurred_at_utc"],
+                    reason_codes=tuple(ReasonCode(code) for code in row["reason_codes"]),
+                    detail=row["detail"],
+                    payload=row["payload"],
+                )
+            )
+        return tuple((rid, tuple(histories[rid])) for rid in order)

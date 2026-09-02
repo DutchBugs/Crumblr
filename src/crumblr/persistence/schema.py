@@ -477,12 +477,19 @@ execution_events = Table(
     Column("payload", JSONB, nullable=True),
     Column("schema_version", Integer, nullable=False),
     Index("ix_execution_events_request", "order_request_id", "sequence"),
+    Index("ix_execution_events_type_time", "event_type", "occurred_at_utc"),
 )
 """Append-only lifecycle log for one execution request (Phase 4): every
 attempt, refusal and outcome, one row each. `event_id` is content-derived
 from `(order_request_id, event_type)`, so a retry after a crash re-emits the
 same logical event rather than duplicating it — the same idempotence
-discipline `domain/events.py::build_event` documents for the main journal."""
+discipline `domain/events.py::build_event` documents for the main journal.
+
+`ix_execution_events_type_time` (core critical path item 8, ADR-010)
+serves `ExecutionEventStore.request_ids_with_event()`'s `event_type`
+predicate and retroactively serves `count_events_since()`'s existing
+`(event_type, occurred_at_utc)` filter, which FINAL Risk already calls
+every `_process()` pass — both were unindexed before this."""
 
 
 flatten_requests = Table(

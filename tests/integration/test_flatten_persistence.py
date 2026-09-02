@@ -231,3 +231,84 @@ class TestFlattenEvents:
         )
         assert first == second
         assert first != different
+
+
+class TestOccurrenceHistories:
+    """Core critical path item 8 (ADR-010): the read seam
+
+    `reconcile_once()` needs to fold flatten history into the derived
+    expectation — `flatten_events` carries no environment/symbol of its
+    own, so this joins against `flatten_requests` for the filter.
+    """
+
+    def test_returns_one_entry_per_occurrence_with_full_history(self, engine: Engine) -> None:
+        flatten_request_id = uuid4()
+        FlattenRequestStore(engine).claim(**_claim_kwargs(flatten_request_id=flatten_request_id))
+        events = FlattenEventStore(engine)
+        events.append(
+            flatten_request_id=flatten_request_id,
+            event_type=FlattenEventType.FLATTEN_REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        events.append(
+            flatten_request_id=flatten_request_id,
+            event_type=FlattenEventType.FLATTEN_GATE_PASSED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        histories = events.occurrence_histories(
+            environment=Environment.PAPER, canonical_symbol="EUR/USD"
+        )
+
+        assert len(histories) == 1
+        rid, history = histories[0]
+        assert rid == flatten_request_id
+        assert [event.event_type for event in history] == [
+            FlattenEventType.FLATTEN_REQUEST_CLAIMED,
+            FlattenEventType.FLATTEN_GATE_PASSED,
+        ]
+
+    def test_filters_by_environment_and_symbol(self, engine: Engine) -> None:
+        matching = uuid4()
+        FlattenRequestStore(engine).claim(
+            **_claim_kwargs(
+                flatten_request_id=matching,
+                environment=Environment.PAPER,
+                canonical_symbol="EUR/USD",
+            )
+        )
+        wrong_symbol = uuid4()
+        FlattenRequestStore(engine).claim(
+            **_claim_kwargs(
+                flatten_request_id=wrong_symbol,
+                environment=Environment.PAPER,
+                canonical_symbol="GBP/USD",
+            )
+        )
+        wrong_environment = uuid4()
+        FlattenRequestStore(engine).claim(
+            **_claim_kwargs(
+                flatten_request_id=wrong_environment,
+                environment=Environment.SHADOW,
+                canonical_symbol="EUR/USD",
+            )
+        )
+        events = FlattenEventStore(engine)
+        for rid in (matching, wrong_symbol, wrong_environment):
+            events.append(
+                flatten_request_id=rid,
+                event_type=FlattenEventType.FLATTEN_REQUEST_CLAIMED,
+                occurred_at_utc=FIXED_NOW,
+            )
+
+        histories = events.occurrence_histories(
+            environment=Environment.PAPER, canonical_symbol="EUR/USD"
+        )
+
+        assert [rid for rid, _ in histories] == [matching]
+
+    def test_empty_when_no_occurrence_exists(self, engine: Engine) -> None:
+        histories = FlattenEventStore(engine).occurrence_histories(
+            environment=Environment.PAPER, canonical_symbol="EUR/USD"
+        )
+        assert histories == ()

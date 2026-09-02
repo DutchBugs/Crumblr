@@ -11,13 +11,17 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-09-02 — D-050 added: automatic flatten submission
-(core critical path item 7, ADR-009) commits and records a flatten but
-does not perform one; D-033 updated to PARTIALLY RESOLVED to match. D-049
-added 2026-09-01: ambiguous-outcome recovery (item 6, ADR-008) only
-covers open positions, not pending orders. D-047's second gap (two
-separate live MT5 reads) closed 2026-08-27 per review 1.22 F-058; its
-first gap (capsule-table full scan) remains open.
+Last updated 2026-09-02 — D-051 added: post-fill reconciliation (core
+critical path item 8, ADR-010) names three adjacent gaps (no OrderState
+transition guard, live_decision.py's flat() forward hazard, the
+unconsumed halt_on_reconciliation_mismatch flag); D-049/D-050 both gain
+cross-references. D-050 added same day: automatic flatten submission
+(item 7, ADR-009) commits and records a flatten but does not perform
+one; D-033 updated to PARTIALLY RESOLVED to match. D-049 added
+2026-09-01: ambiguous-outcome recovery (item 6, ADR-008) only covers
+open positions, not pending orders. D-047's second gap (two separate
+live MT5 reads) closed 2026-08-27 per review 1.22 F-058; its first gap
+(capsule-table full scan) remains open.
 
 ---
 
@@ -1049,6 +1053,13 @@ mean anything should start here.
   unreachable through every path this item added. A prerequisite for
   full-coverage recovery once LIMIT entries and `order_send` both
   exist.
+- **Cross-reference:** core critical path item 8
+  (`application/expected_state.py`, `review/adr/ADR-010-post-fill
+  -reconciliation.md` §2.5) now enforces this same gap as a runtime
+  fail-closed leg, not only a documented one — a non-`MARKET` entry type
+  makes the derived expectation `undetermined` rather than silently
+  reporting `expected_pending_order_ids=frozenset()` as if that were an
+  honest zero.
 
 ### D-050 — The automatic flatten is committed and recorded, not performed
 - **Status:** deliberate, with three named remaining gaps
@@ -1083,6 +1094,57 @@ mean anything should start here.
 - **Gate affected:** none directly today; a prerequisite for a real
   automatic flatten once `close_all_positions` exists, not itself
   claiming to be one.
+- **Cross-reference:** core critical path item 8 (D-051,
+  `review/adr/ADR-010-post-fill-reconciliation.md` §2.5) reads this
+  item's own durable history — `FLATTEN_SUBMISSION_STARTED`'s targets
+  become undetermined exposure until `FLATTEN_OUTCOME_RESOLVED` resolves
+  them, at which point `closed_tickets` are removed from what a request
+  is still expected to hold. The "commitment, not outcome" rule above is
+  exactly what item 8's own derivation respects.
+
+### D-051 — Post-fill reconciliation: three adjacent gaps named, not folded in
+- **Status:** deliberate; each piece has its own trigger condition
+- **Spec:** review 1.16 §7-8, review 1.26 §6 item 8;
+  `review/adr/ADR-010-post-fill-reconciliation.md`
+- **Code:** `application/expected_state.py`, `application/execution.py
+  ::ExecutionOrchestrator.reconcile_once()`
+- **Gap 1 — no `OrderState` transition-validation state machine.**
+  `domain/enums.py`'s `OrderState` defines the full build.md §19 machine
+  (`CREATED` → … → `RECONCILED` → `CLOSED`) with the docstring "illegal
+  transitions must fail closed", and nothing anywhere validates a
+  transition — confirmed by direct read before this item. A real,
+  separate, `order_send`-independent gap, but not what item 8's own
+  reviewer sentence asks for (that sentence is about deriving expected
+  state and reconciling it, not about guarding a lifecycle). **Trigger:**
+  belongs with item 9 or later — a transition guard is only meaningful
+  once transitions can actually be driven by broker responses.
+- **Gap 2 — `live_decision.py`'s `flat()` call site becomes wrong once
+  `order_send` works.** The decision tier is deliberately MT5-free
+  (`live_decision.py`'s own module docstring) and its `ExpectedState` is
+  cached once at construction — a shape a derived expectation, which
+  needs re-reading durable history, cannot fit without changing that
+  shape. Left as `flat()` for this item, deliberately (§3 of ADR-010).
+  Once `order_send` is reachable, every legitimately-open platform
+  position will read to that tier as "unexpected" — a mismatch, in a
+  tier whose reconciliation result feeds a trust judgement. **Trigger:**
+  must be resolved before submission is ever enabled; a cross-tier
+  read-boundary problem, genuinely different from this item's own scope.
+- **Gap 3 — `config.SupervisorConfig.halt_on_reconciliation_mismatch` is
+  unconsumed.** Confirmed by grep: set `true` in `config/base.yaml`,
+  defined in `config.py`, read by no code anywhere in `src/`. Wiring a
+  fifth kill-switch producer onto a flag nothing has ever consumed would
+  be an unrequested behaviour change with real blast radius — item 8's
+  own reviewer sentence says "reconcile", not "halt". **Trigger:** an
+  explicit, separate decision — whether a book-level `MISMATCHED`
+  (independent of any per-request `RECONCILED`) should itself halt —
+  belongs to whoever owns that policy question, not assumed here.
+- **Watch for:** none of the three is silently handled by item 8 —
+  `reconcile_once()`'s own book-level `MISMATCHED`/`UNKNOWN` results are
+  visible via `scripts/reconcile.py` and the durable `RECONCILED`
+  payloads, but nothing automatic acts on them beyond recording.
+- **Gate affected:** none directly today; gap 2 must close before
+  `feedback.2.0`'s submission authorization, gaps 1 and 3 are independent
+  of any specific gate.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
