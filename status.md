@@ -14,12 +14,12 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `b2a07a5` |
-| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01: `postgresql-client` now installed, `-h`/`-p`/`PGPASSWORD` wired from `TEST_URL`, plus a new CI guard that fails loudly instead of silently skipping). Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: everything through post-fill reconciliation (item 8, `ADR-010`), plus **owner risk policy v1** — real portfolio open-risk accounting (D1.4, `risk/portfolio_risk.py::assess_open_risk`), O-004 withdrawn/multiple positions permitted (D1.3), owner's four risk numbers shipped (D1.2, `0.02`/`0.03`/`0.04`/`0.08`), `ADR-011`, O-008. NEXT: the separate D1.5 slice (session policy: daily → weekly/weekend-flat), then core critical path item 9 (broker-side SL verification) — the last item on the owner's original punch list. D1.6/D1.7/D1.8 remain separate, future work. BLOCKED: none currently |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged. Found AG-015 (Static Agent fork's frozen strategy needs a closed, strategy-specific reason-code vocabulary `ict_v1` cannot honestly produce) and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**, all three tempting mapping fixes explicitly rejected. NEXT: revised work order (review 1.28 §11) — finish the unhealthy-market smoke proof (doesn't depend on AG-015), replace the context payload with a strategy-neutral `AgentMarketContextV1`, make Gateway reason-code handling structural/opaque (no whitelist), split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (directly fixes AG-013); wire `PortfolioSnapshot.open_risk_fraction` against Dev 1's new `assess_open_risk` (D2.2) — their own `bf49549` already lands the None-fails-closed interim shape and records the gap as D-052, deliberately waiting on this seam; Dev 1 to ping now that it exists. BLOCKED: none currently |
+| **`main` HEAD** | `bbd06fd` |
+| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01). **Owner-reported 2026-09-03: F-067's unpinned `postgresql-client` resolved to a different major than the `postgres:17` service, so `pg_dump` still refused to run — fixed same day (F-068), now pinned to `postgresql-client-17` via the official PGDG apt repo.** Hosted confirmation still pending — no `gh`/Actions access in this environment |
+| **Dev 1** | DONE: everything through owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008 — real portfolio open-risk accounting, O-004 withdrawn, owner's four risk numbers shipped), CI PostgreSQL client version pin (F-068). Owner issued a new Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) **D1.5** session/weekend policy (Mon–Thu no daily cutoff, Fri entry cutoff T-15, Fri mandatory flat T-5, weekend exposure forbidden, one Core calendar/authority) — not yet started; (3) **PL-006** structural fix in Shared Risk (persisted `max_session_loss_fraction`/`max_drawdown_fraction` must not be forgotten on restart once equity recovers) — not yet started; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: plan D1.5. BLOCKED: none currently |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
-| **Owner blockers** | Confirm next hosted CI run is fully green; remaining session-policy decisions (last-entry cutoff, flatten deadline, HALT-reset authority — D1.5); decide when to enable terminal AlgoTrading |
+| **Owner blockers** | Confirm next hosted CI run is fully green (F-068 fix pending confirmation); decide when to enable terminal AlgoTrading. Session-policy numbers **now supplied** 2026-09-03 (Fri T-15/T-5, HALT-reset human-only) — D1.5 is an engineering task now, not a blocked decision |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
 | **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md`/`feedback.1.27.md`/`feedback.1.28.md` (all 2026-09-01) were deliberate owner/reviewer checkpoints (1.28 an explicit early-escalation exception per 1.27 §12's own trigger), not a change to that default |
 
@@ -8995,6 +8995,72 @@ Next:
 - D1.6 (HALT reset human-only, verification only)/D1.7 (item 9,
   broker-side SL verification)/D1.8 (Settings-activation seam) remain
   separate, future work — not started.
+
+---
+
+## Update 2026-09-03 (sixty-seventh entry) — F-068: hosted CI's postgresql-client resolved to the wrong major version; a new Shared-Core work order issued
+
+Component: `.github/workflows/ci.yml`, `review/FEEDBACK.md`, `status.md`
+Milestone: Owner-reported CI defect, part of a new Shared-Core work order for PAPER_LITE/`feedback.2.0` convergence
+Status before: F-067 installed `postgresql-client` (unpinned) so the restore test would stop silently skipping in hosted CI; hosted confirmation itself was never obtained (no `gh`/Actions access here)
+Status after: `postgresql-client-17` installed explicitly via the official PGDG apt repository, matching the `postgres:17-alpine` service image exactly, rather than trusting `ubuntu-latest`'s own default apt major; hosted confirmation still pending
+
+Completed:
+- Owner reported (2026-09-03, as part of a larger four-item Shared-Core
+  work order) that hosted CI's client/server PostgreSQL majors mismatch
+  — client resolved to 16, server runs 17, and `pg_dump` refuses to dump
+  from a server newer than itself. Read `.github/workflows/ci.yml`'s
+  F-067-era install step (`sudo apt-get install -y postgresql-client`,
+  unpinned) — confirmed this is exactly the mechanism: `ubuntu-latest`'s
+  own default apt repository ships whatever major it currently carries,
+  independent of the service image's own pinned `postgres:17-alpine`.
+  Fixed via the standard PGDG bootstrap (`postgresql-common` +
+  `/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y`, the
+  official way to get version-pinned client packages on Debian/Ubuntu),
+  then installed `postgresql-client-17` explicitly rather than the
+  unpinned meta-package. No test-code change needed —
+  `_pg_dump_command()`/`_psql_command()` are plain `shutil.which()`
+  lookups with no version logic of their own to touch.
+- Registered as **F-068** in `review/FEEDBACK.md`'s finding register,
+  same "SPECIFIC DEFECT FIXED / HOSTED-GREEN CONFIRMATION STILL OPEN"
+  structure as F-056/F-063/F-065/F-067 before it.
+- Updated `status.md`'s compact header: `main` HEAD, hosted CI result
+  line, Dev 1's DONE/NEXT (the owner's new four-item work order —
+  hosted CI, D1.5 session/weekend policy, PL-006 restart-recovery
+  hardening, item 9 broker-side SL verification — recorded in full),
+  Dev 2's line (D2.2 now wired against `assess_open_risk` on their
+  `agent/contracts` branch, per their own cross-session report — not
+  yet on `main`), and the owner-blockers line (the session-policy
+  numbers the owner supplied this same message — Friday T-15 entry
+  cutoff, Friday T-5 mandatory flat, HALT-reset human-only reconfirmed
+  — move D1.5 from "blocked on a decision" to "an engineering task").
+
+Evidence:
+- YAML syntax validated (`yaml.safe_load`).
+- No test-code path touched; full suite unaffected (CI-workflow-only
+  change).
+- Hosted confirmation itself still pending — no `gh`/Actions access in
+  this environment, same limitation as every CI finding before it.
+
+Problems found:
+- None beyond the reported defect itself.
+
+Risk impact:
+- None. CI-workflow-only change; no application code touched;
+  `order_send`/`close_all_positions` unaffected.
+
+Decision:
+- Committed and pushed directly (small, mechanical, CI-infrastructure-
+  only fix) rather than a full plan-mode cycle: `bbd06fd` on
+  `core/ci-pg-client-version-pin` → `main`.
+
+Next:
+- Plan and implement **D1.5** (session/weekend policy) as its own
+  plan-mode cycle — the numbers are now owner-supplied, not blocked.
+- **PL-006** (persisted loss/drawdown-fraction restart-recovery
+  hardening in Shared Risk) after D1.5.
+- Core critical path **item 9** (broker-side SL verification) after
+  PL-006 — the owner's explicit sequencing.
 
 ---
 
