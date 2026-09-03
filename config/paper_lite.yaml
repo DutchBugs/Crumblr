@@ -1,0 +1,24 @@
+# Owner-authorized PAPER_LITE runtime settings.
+#
+# This file contains no broker or Agent credentials. The starting balance is
+# explicit and belongs only to the simulated portfolio; it is never re-synced
+# from the real Pepperstone account after initialization.
+
+mode: PAPER_LITE
+starting_balance: '10000'
+journal_path: var/paper_lite.journal.jsonl
+safety_latch_path: var/paper_lite.safety.json
+account_currency: EUR
+leverage: 30
+
+# Technical anti-loop ceiling only. Owner Policy v1 imposes no business-rule
+# position-count limit; the exact 3% total-open-risk budget remains authoritative.
+operational_max_open_positions: 20
+
+max_risk_per_trade: '0.02'
+max_open_risk: '0.03'
+max_daily_loss: '0.04'
+max_drawdown: '0.08'
+
+friday_last_entry_minutes_before_close: 15
+friday_flatten_minutes_before_close: 5
