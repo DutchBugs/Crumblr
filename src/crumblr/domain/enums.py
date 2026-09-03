@@ -600,14 +600,57 @@ class ExecutionEventType(StrEnum):
     `application/execution.py::ExecutionOrchestrator.reconcile_once()`.
     """
 
-    # Reserved for M5. `SUBMITTED`/`BROKER_ACK`/`FILLED`/`CLOSED` each
-    # assert a broker fact (a real submission, acknowledgement, fill, or
-    # lifecycle end) that no code path in this platform can produce —
-    # never emitted by anything Phase 4 or the core critical path builds.
+    # Reserved for M5. `SUBMITTED`/`BROKER_ACK`/`CLOSED` each assert a
+    # broker fact (a real submission, acknowledgement, or lifecycle end)
+    # that no code path in this platform can produce — never emitted by
+    # anything Phase 4 or the core critical path builds. `SUBMITTED`/
+    # `BROKER_ACK` stay reserved even after Phase B item B3
+    # (`review/adr/ADR-019-execution-outcome-normalization.md`): a
+    # MARKET IOC `order_send` response has no separate "acked, not yet
+    # filled" phase the way a pending LIMIT/STOP order would — these two
+    # remain deliberately deferred until pending-order support exists
+    # (first canary is MARKET-only, same boundary
+    # `_recover_ambiguous_submission`'s own docstring already names).
+    # `CLOSED` stays reserved for Phase B item B5 (real per-ticket
+    # close/flatten), not yet built.
     SUBMITTED = "SUBMITTED"
     BROKER_ACK = "BROKER_ACK"
     FILLED = "FILLED"
+    """A real `order_send` response reported a full or partial fill
+
+    (`application/execution_outcome.py::normalize_execution_result`,
+    Phase B item B3 — the first of these five reserved members with a
+    real, tested producer, though not yet a live caller). Full vs.
+    partial is distinguished by the payload's `requested_volume`/
+    `executed_volume`, not a separate event type.
+
+    **This event's own exposure meaning stays `UNDETERMINED`,
+    deliberately unchanged by B3.** `DemoOrderSendMt5Gateway.order_send()`
+    (Phase B item B1) never claims to know which resulting broker
+    position is "the" one this request created —
+    `ExecutionResult.mt5_position_ticket` is left `None` on purpose
+    (`review/adr/ADR-016-demo-order-send-adapter.md` §2.5). Attributing
+    a ticket is the *existing* magic-number search's job
+    (`application/execution.py::_recover_ambiguous_submission`, items
+    6/B4), triggered once that method's own trigger condition is widened
+    to also react to `FILLED` — a later, separate wiring decision, not
+    this one. A `FILLED` event on its own is an honest, durable record
+    of what the broker's API response said, not yet an exposure
+    determination."""
     CLOSED = "CLOSED"
+
+    REJECTED = "REJECTED"
+    """A real `order_send` response was definitively rejected — no
+
+    position was ever created (Phase B item B3,
+    `application/execution_outcome.py::normalize_execution_result`).
+    Deliberately **not** represented via `AMBIGUOUS_OUTCOME_RESOLVED
+    {submitted=False}`: that event's own name and docstring claim a
+    *post-hoc, broker-position-search* determination of an unclear
+    outcome (items 6/B4) — a definite, synchronous rejection response
+    was never ambiguous, so naming it that way would misdescribe what
+    actually happened. Exposure meaning is unconditionally zero — see
+    `application/expected_state.py::_EXPOSURE_BY_EVENT`."""
 
 
 class FlattenEventType(StrEnum):

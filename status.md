@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `cfbb669` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, 4 of 6 slices shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine — setting the general `AccountGuardConfig.expected_login` would've silently blocked the live `LiveReader` path) · B8 (`ADR-018`, durable atomic one-shot canary permit — `CanaryPermitStore`, proven race-safe under real concurrency; a real PostgreSQL grant constraint, append-only-only tables, meant consumption had to be a second row, never an update). All four deliberately **not wired into `ExecutionOrchestrator`** — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet. Full suite 1403 passed/3 skips/0 failed. B3 (outcome normalization) and B5 (real close/flatten) remain (B6 explicitly deferred by the work order until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (B3 or B5). BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, 5 of 6 slices shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload; deliberately did not widen B4's freshly-hardened `_recover_ambiguous_submission()` — no real caller to justify it yet). All five deliberately **not wired into `ExecutionOrchestrator`** — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet. Full suite 1418 passed/3 skips/0 failed. Only **B5 (real per-ticket close/flatten)** remains (B6 explicitly deferred by the work order until continuous-DEMO promotion) — then Phase C/AG-012 (joint with Dev 2) is the only thing left before the real submission chain can actually be wired together. NEXT: plan and implement B5. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -10214,6 +10214,116 @@ Next:
   Phase C/AG-012 before B1+B2's adapter can be wired in. B6 stays
   explicitly deferred by the work order until continuous-DEMO
   promotion.
+
+---
+
+## Update 2026-09-03 (seventy-eighth entry) — Phase B slice 5: normalize definite broker outcomes, narrowed to MARKET-only (B3)
+
+```text
+Component: domain/enums.py, application/expected_state.py, application/execution_outcome.py (new)
+Milestone: DEMO canary work order, Phase B, item B3 — slice 5 of the Phase-B punch list
+Status before: B1/B2/B4/B7/B8 shipped; B3/B5 not started
+Status after:  B3 shipped; B5 remains, plus Phase C/AG-012 before B1+B2's adapter can be wired in
+```
+
+**Narrowed B3's own six-outcome list down to two real durable event
+
+types, with reasoning for each cut, not silent scope-shrinking.**
+`ExecutionEventType`'s own docstring already distinguishes it as a
+narrower vocabulary than `OrderState`'s full build.md §19 machine — this
+item continues that narrowing rather than mechanically mirroring
+`OrderState` 1:1 into the journal:
+
+- full/partial fill → one `ExecutionEventType.FILLED` (distinguished by
+  payload `requested_volume`/`executed_volume`, not two event types —
+  a MARKET IOC response is one synchronous retcode);
+- rejection → new `ExecutionEventType.REJECTED` (deliberately **not**
+  `AMBIGUOUS_OUTCOME_RESOLVED{submitted=False}` — that event's own name
+  claims a post-hoc broker-position-search determination; a definite,
+  synchronous rejection was never ambiguous);
+- `SUBMITTED`/`BROKER_ACK` — stay reserved; a MARKET order has no
+  separate "acked, not yet filled" phase, and pending-order support is
+  explicitly out of scope for the first canary (same boundary B4's own
+  docstring already names);
+- transport exception/timeout/ambiguous response — **needs no new code
+  at all**: if `order_send` raises, the normalization function is
+  simply never reached, `SUBMISSION_STARTED` stays the last event, and
+  the *existing* `_recover_ambiguous_submission()` (items 6/B4) already
+  resolves that via broker-position search, exactly as it does today.
+
+**Completed**
+
+- `domain/enums.py::ExecutionEventType.REJECTED` (new) — `String(64)`
+  column, **no migration needed**. `FILLED`'s own docstring extended to
+  record, explicitly, that its exposure meaning stays `UNDETERMINED`
+  (see below) so a future reader lands on that reasoning directly.
+- New `application/execution_outcome.py::normalize_execution_result()`
+  — pure, `ExecutionResult -> (ExecutionEventType, payload)`. A small,
+  separate module (mirrors `expected_state.py`/`flatten_plan.py`'s own
+  "pure derivation" shape) rather than adding to the already-large
+  `execution.py`.
+- `application/expected_state.py`: `_EXPOSURE_BY_EVENT[REJECTED] =
+  DETERMINED`, with a new branch in `derive_expected_exposure()`
+  mirroring the existing `AMBIGUOUS_OUTCOME_RESOLVED{submitted=False}`
+  case exactly (zero exposure, no ticket search). **`FILLED`'s own
+  entry stays `UNDETERMINED`, deliberately unchanged** —
+  `DemoOrderSendMt5Gateway.order_send()` (B1) never sets
+  `ExecutionResult.mt5_position_ticket` (ADR-016 §2.5), so a `FILLED`
+  event alone genuinely cannot claim to know which ticket resulted;
+  attribution stays the *existing* magic-number search's job. This item
+  does **not** widen `_recover_ambiguous_submission()`'s own trigger
+  condition to also react to `FILLED` — that touches the exact method
+  B4 just hardened this same session, with no real caller to test it
+  against yet; deferred to the eventual wiring/AG-012 slice.
+- `review/adr/ADR-019-execution-outcome-normalization.md` written,
+  including all four narrowing decisions above with their reasoning, so
+  whoever eventually wires this in doesn't have to re-derive it.
+- **Zero touches to `application/execution.py` or `agent_gateway/`** —
+  confirmed via `git status`/`git diff --stat`, not merely intended:
+  same unwired discipline as every prior Phase-B slice.
+
+**Evidence**
+
+- New tests: `tests/unit/test_execution_outcome.py` — 14 (full fill,
+  partial fill, rejection, every other `OrderState` member refused via
+  a parametrized guard, plus the structural not-wired-in proof).
+  `tests/unit/test_expected_state.py` — 1 new (`REJECTED` → determined,
+  zero exposure). 15 new tests total.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (192 source files).
+- Full suite: **1418 passed, 3 pre-existing skips, 0 failed** (292.58s)
+  — 1403 (post-B8 baseline) + 15 new, exactly accounted for.
+- Determinism: `scripts/run_replay.py --bars 600` run twice (PowerShell,
+  stdout only), MD5 identical (`704967823f258496922a9b16c4d29788` — same
+  hash as every prior slice).
+
+**Problems found**
+
+- None specific to this item's own logic.
+
+**Risk impact**
+
+- None: `normalize_execution_result()` is real and tested but called by
+  nothing in the live orchestrator.
+- Deliberately did not touch B4's freshly-hardened
+  `_recover_ambiguous_submission()` — a real, considered risk-avoidance
+  choice (see "Completed" above), not an oversight.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/phase-b-5-execution-outcome-normalization`
+  branch, `[core]` prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational — no
+  cross-track surface change expected).
+- Plan and implement the last remaining Phase B slice — B5 (real
+  per-ticket close/flatten) — then only Phase C/AG-012 (joint with
+  Dev 2) stands between all of Phase B and actually wiring the real
+  submission chain together. B6 stays explicitly deferred by the work
+  order until continuous-DEMO promotion.
 
 ---
 
