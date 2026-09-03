@@ -245,6 +245,8 @@ def evaluate_agent_trade_intent(
         live_equity=portfolio.account.equity,
         live_open_positions=len(portfolio.open_positions),
         market_day=trading_day(now),
+        max_daily_loss=config.risk.max_daily_loss,
+        max_drawdown=config.risk.max_drawdown,
     )
     if recovery.must_halt:
         _trip(

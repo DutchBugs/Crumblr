@@ -151,6 +151,8 @@ def recover_session(
     live_equity: Decimal,
     live_open_positions: int,
     market_day: date,
+    max_daily_loss: Decimal,
+    max_drawdown: Decimal,
 ) -> SessionRecovery:
     """Rebuild the risk session from what was recorded, erring downwards.
 
@@ -159,12 +161,20 @@ def recover_session(
     disagree about how much has been lost, the worse number wins; where they
     disagree about whether a position exists, nothing wins and the system
     halts.
+
+    `max_daily_loss`/`max_drawdown` are the *configured* thresholds (owner
+    risk policy v1), not a cached historical value — PL-006. Reconstructing
+    the recorded maxima correctly is not enough on its own: this function
+    must also refuse to resume a session whose own recorded worst already
+    breached policy, or a restart followed by a partial equity recovery
+    could quietly resume trading a session that should stay halted. See
+    `review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`.
     """
     if not record.is_known:
         return _halt(
             live_equity,
             market_day,
-            ReasonCode.SAFETY_STATE_UNKNOWN,
+            (ReasonCode.SAFETY_STATE_UNKNOWN,),
             f"risk-session state could not be read: {record.unreadable}",
         )
 
@@ -184,7 +194,7 @@ def recover_session(
         return _halt(
             live_equity,
             market_day,
-            ReasonCode.SAFETY_STATE_UNKNOWN,
+            (ReasonCode.SAFETY_STATE_UNKNOWN,),
             f"risk-session schema {recorded.schema_version!r} is not the expected {SCHEMA_VERSION}",
         )
 
@@ -195,7 +205,7 @@ def recover_session(
         return _halt(
             live_equity,
             market_day,
-            ReasonCode.SAFETY_STATE_UNKNOWN,
+            (ReasonCode.SAFETY_STATE_UNKNOWN,),
             f"recorded trading day {recorded.trading_day} is after the market day {market_day}",
         )
 
@@ -206,7 +216,7 @@ def recover_session(
         return _halt(
             live_equity,
             market_day,
-            ReasonCode.RECONCILIATION_MISMATCH,
+            (ReasonCode.RECONCILIATION_MISMATCH,),
             f"recorded {recorded.open_position_count} open position(s), "
             f"account reports {live_open_positions}",
         )
@@ -231,6 +241,27 @@ def recover_session(
         max_session_loss_fraction=(recorded.max_session_loss_fraction if same_session else ZERO),
     )
 
+    # PL-006: a restart must not silently resume a session whose own
+    # recorded worst already exhausted an owner-policy limit, just because
+    # equity has since moved back under it. Checked against the *widened*
+    # maxima above, not the live instantaneous fraction the per-tick gate
+    # uses — that gate already catches a live breach; this catches one a
+    # restart could otherwise forget.
+    exhausted: list[ReasonCode] = []
+    if ledger.max_drawdown_fraction >= max_drawdown:
+        exhausted.append(ReasonCode.MAX_DRAWDOWN)
+    if ledger.max_session_loss_fraction >= max_daily_loss:
+        exhausted.append(ReasonCode.DAILY_LOSS_LIMIT)
+    if exhausted:
+        return _halt(
+            live_equity,
+            market_day,
+            tuple(exhausted),
+            "recovered risk session already exhausted an owner-policy limit: "
+            f"max_session_loss_fraction={ledger.max_session_loss_fraction}, "
+            f"max_drawdown_fraction={ledger.max_drawdown_fraction}",
+        )
+
     _log.info(
         "risk_session.resumed",
         recorded_day=recorded.trading_day.isoformat(),
@@ -243,19 +274,24 @@ def recover_session(
 
 
 def _halt(
-    live_equity: Decimal, market_day: date, reason: ReasonCode, detail: str
+    live_equity: Decimal,
+    market_day: date,
+    reasons: tuple[ReasonCode, ...],
+    detail: str,
 ) -> SessionRecovery:
     """Refuse to start trading, but still produce a usable ledger.
 
     The run continues observing — a halted system that cannot even measure its
     own equity has nothing to report to the operator who has to clear it.
     """
-    _log.error("risk_session.unrecoverable", reason=reason.value, detail=detail)
+    _log.error(
+        "risk_session.unrecoverable", reasons=[reason.value for reason in reasons], detail=detail
+    )
     return SessionRecovery(
         ledger=EquityLedger(starting_equity=live_equity),
         trading_day=market_day,
         resumed=False,
-        reason_codes=(reason,),
+        reason_codes=reasons,
         detail=detail,
     )
 

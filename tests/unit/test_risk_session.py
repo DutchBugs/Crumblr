@@ -53,10 +53,18 @@ def make_state(**overrides: Any) -> RiskSessionState:
 
 
 def recover(record: SessionRecord, **overrides: Any) -> Any:
+    """`max_daily_loss`/`max_drawdown` default far above anything this
+
+    file's other tests exercise (some deliberately swing `live_equity`
+    by double digits to prove "recovery only ever tightens", unrelated
+    to PL-006's own check) — effectively off unless a test overrides
+    them to exercise PL-006's halt directly."""
     fields: dict[str, Any] = {
         "live_equity": Decimal("9850"),
         "live_open_positions": 0,
         "market_day": TODAY,
+        "max_daily_loss": Decimal("0.5"),
+        "max_drawdown": Decimal("0.5"),
     }
     fields.update(overrides)
     return recover_session(record, **fields)
@@ -133,6 +141,103 @@ class TestRecoveryOnlyEverTightens:
         assert recovery.ledger.peak_equity == Decimal("10200")
         assert recovery.ledger.max_drawdown_fraction >= Decimal("0.0343")
 
+    def test_the_daily_reset_also_means_recovery_does_not_halt_on_yesterdays_exhausted_loss(
+        self,
+    ) -> None:
+        """PL-006's own check must not reach across a genuine day reset —
+
+        a session that exhausted its daily allowance yesterday starts a
+        fresh allowance today, exactly like the live per-tick gate does."""
+        recovery = recover(
+            SessionRecord(state=make_state(max_session_loss_fraction=Decimal("0.05"))),
+            market_day=TOMORROW,
+            live_equity=Decimal("9850"),
+            max_daily_loss=Decimal("0.02"),
+        )
+
+        assert not recovery.must_halt
+        assert recovery.ledger.max_session_loss_fraction == Decimal("0")
+
+
+class TestAnAlreadyExhaustedLimitHaltsRecovery:
+    """PL-006 (owner Shared-Core work order 2026-09-03 item 3): a restart
+
+    must not silently resume a session whose own recorded worst already
+    breached an owner-policy limit, just because the *current* fraction
+    has since moved back under it."""
+
+    def test_a_recovered_drawdown_at_the_threshold_halts(self) -> None:
+        recovery = recover(
+            SessionRecord(state=make_state(max_drawdown_fraction=Decimal("0.08"))),
+            max_drawdown=Decimal("0.08"),
+        )
+
+        assert recovery.must_halt
+        assert ReasonCode.MAX_DRAWDOWN in recovery.reason_codes
+
+    def test_a_recovered_drawdown_just_under_the_threshold_does_not_halt(self) -> None:
+        recovery = recover(
+            SessionRecord(state=make_state(max_drawdown_fraction=Decimal("0.079"))),
+            max_drawdown=Decimal("0.08"),
+        )
+
+        assert not recovery.must_halt
+
+    def test_a_recovered_daily_loss_at_the_threshold_halts(self) -> None:
+        recovery = recover(
+            SessionRecord(state=make_state(max_session_loss_fraction=Decimal("0.04"))),
+            max_daily_loss=Decimal("0.04"),
+        )
+
+        assert recovery.must_halt
+        assert ReasonCode.DAILY_LOSS_LIMIT in recovery.reason_codes
+
+    def test_a_recovered_daily_loss_just_under_the_threshold_does_not_halt(self) -> None:
+        recovery = recover(
+            SessionRecord(state=make_state(max_session_loss_fraction=Decimal("0.039"))),
+            max_daily_loss=Decimal("0.04"),
+        )
+
+        assert not recovery.must_halt
+
+    def test_both_breached_together_report_both_reasons(self) -> None:
+        recovery = recover(
+            SessionRecord(
+                state=make_state(
+                    max_session_loss_fraction=Decimal("0.05"),
+                    max_drawdown_fraction=Decimal("0.09"),
+                )
+            ),
+            max_daily_loss=Decimal("0.04"),
+            max_drawdown=Decimal("0.08"),
+        )
+
+        assert recovery.must_halt
+        assert set(recovery.reason_codes) == {ReasonCode.DAILY_LOSS_LIMIT, ReasonCode.MAX_DRAWDOWN}
+
+    def test_a_current_equity_recovery_does_not_erase_the_halt(self) -> None:
+        """The finding itself, on the actual recovery path: equity moving
+
+        back under the live threshold must not read as "safe to resume" —
+        only the recorded *worst* this session ever saw is what PL-006
+        checks, not where equity happens to stand right now."""
+        recovery = recover(
+            SessionRecord(state=make_state(max_drawdown_fraction=Decimal("0.09"))),
+            live_equity=Decimal("10190"),  # back near the recorded peak — current drawdown ~0
+            max_drawdown=Decimal("0.08"),
+        )
+
+        assert recovery.must_halt
+        assert ReasonCode.MAX_DRAWDOWN in recovery.reason_codes
+
+    def test_a_halted_recovery_still_produces_a_usable_ledger(self) -> None:
+        recovery = recover(
+            SessionRecord(state=make_state(max_drawdown_fraction=Decimal("0.08"))),
+            max_drawdown=Decimal("0.08"),
+        )
+
+        assert recovery.ledger.current_equity == Decimal("9850")
+
 
 class TestWhatCannotBeEstablishedHalts:
     """`UNKNOWN → HALT → reconcile`, as review 1.5 §4 step 2 requires."""
@@ -208,6 +313,8 @@ class TestRoundTrip:
             live_equity=Decimal("9850"),
             live_open_positions=0,
             market_day=TODAY,
+            max_daily_loss=Decimal("0.02"),
+            max_drawdown=Decimal("0.10"),
         )
         store.save(
             snapshot(
@@ -224,6 +331,8 @@ class TestRoundTrip:
             live_equity=Decimal("9850"),
             live_open_positions=0,
             market_day=TODAY,
+            max_daily_loss=Decimal("0.02"),
+            max_drawdown=Decimal("0.10"),
         )
 
         assert second.ledger.session_start_equity == first.ledger.session_start_equity
@@ -241,6 +350,8 @@ class TestRoundTrip:
                 live_equity=Decimal("9850"),
                 live_open_positions=0,
                 market_day=TODAY,
+                max_daily_loss=Decimal("0.02"),
+                max_drawdown=Decimal("0.10"),
             )
             assert recovery.ledger.session_loss_fraction == loss
             store.save(

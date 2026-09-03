@@ -565,6 +565,8 @@ class LiveDecisionOrchestrator:
             live_equity=account_snapshot.equity,
             live_open_positions=len(self._broker_state.positions_for(account_snapshot.snapshot_id)),
             market_day=market_day,
+            max_daily_loss=self._config.risk.max_daily_loss,
+            max_drawdown=self._config.risk.max_drawdown,
         )
         self._ledger = recovery.ledger
         self._current_trading_day = recovery.trading_day
