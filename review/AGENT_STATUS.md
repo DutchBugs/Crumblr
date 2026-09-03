@@ -1369,6 +1369,45 @@ integration against `crumblr_test_dev2`): **1339 passed**, 3 skipped
 
 ---
 
+## 0t. Phase 0 convergence — synced with item 9, pushed for review; PR itself blocked on missing GitHub access — 2026-09-03
+
+The owner/reviewer published a major new coordination document,
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` — a staged route
+(Phases 0 through F) to a one-shot, deliberately constrained real
+Pepperstone **DEMO** canary. Its Phase 0 names this track's own next
+required action explicitly: merge/rebase latest `main` (including item 9,
+ADR-014's broker-side protective-stop verification) into
+`agent/contracts`, preserve the already-reviewed D2.2/Core-risk,
+0-vs-`None` and `STRATEGY_ARTIFACT_MISMATCH` changes, run the full local
+gate, push, and open a PR to `main` — explicitly **not** bundling
+Supervisor or new Static Agent work into that PR, keeping it a pure,
+reviewable convergence.
+
+Merged `origin/main` (`7ad93a5` — item 9/ADR-014 plus the new work order
+document itself) into `agent/contracts`: clean, one usual
+`review/DEVIATIONS.md` append-collision (both tracks append entries at
+the same location; resolved keeping all entries), no conflict anywhere
+in code. Verified §0p/§0q/§0r/§0s's work (`assess_open_risk` wiring,
+`OpenRiskFraction`, `STRATEGY_ARTIFACT_MISMATCH`, the PL-006 test fixes)
+all survived intact — nothing needed re-doing, exactly as the work order
+itself expected ("Preserve the already-reviewed... changes").
+
+**Blocked on the PR step itself, not on anything code-related:** neither
+this session nor Dev 1's has `gh` CLI installed or a `GITHUB_TOKEN`/
+`GH_TOKEN` available — confirmed independently on both sides. The branch
+is pushed and ready; opening the actual PR object needs a human with
+GitHub access (the owner, most likely). Dev 1 has agreed to start their
+own Phase-0 cross-track review directly against the pushed branch
+(`agent/contracts` vs `main`) without waiting on the PR object to exist,
+so review is not blocked even though the formal PR artifact is.
+
+Full gate (unit + integration against `crumblr_test_dev2`, on the
+dedicated Dev-2 database as the work order specifies): **1358 passed**,
+3 skipped (pre-existing, unrelated), 0 failed. ruff/ruff format/mypy
+clean.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |
