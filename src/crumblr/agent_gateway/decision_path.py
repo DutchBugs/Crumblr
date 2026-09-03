@@ -607,7 +607,13 @@ def _risk_context(config: PlatformConfig) -> policies.RiskContext:
         # `BrokerAccountSnapshot`, which never carries it, build.md section 21).
         # Account identity is verified by reconciliation instead, not by this
         # field, so it is always `None` here rather than risking a false
-        # `WRONG_ACCOUNT` BLOCK against a placeholder value.
+        # `WRONG_ACCOUNT` BLOCK against a placeholder value. `review/DEVIATIONS.md`
+        # D-046's own "Watch for" warns exactly against setting a real
+        # `AccountGuardConfig.expected_login` while callers reconstruct
+        # `AccountState` from a snapshot whose `.login` is a placeholder --
+        # confirmed by Dev 1 (grep across every `RiskContext(expected_login=...)`
+        # site, B7/ADR-017) that this module's own `None` is the identical
+        # case, not something to "fix" independently of that warning.
         expected_login=None,
         expected_currency=config.account_guard.expected_currency,
         expected_leverage=config.account_guard.expected_leverage,
