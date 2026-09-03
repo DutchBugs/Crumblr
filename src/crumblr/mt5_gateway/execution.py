@@ -7,12 +7,22 @@ this class performs — MT5's `order_check` is a server-side dry run: it
 validates a request and reports margin/rejection information, but creates no
 ticket and no market exposure.
 
-`order_send`, `cancel_pending_orders` and `close_all_positions` always raise
-`ExecutionDisabledError`, unconditionally. There is no config flag read
-inside any of those three methods — nothing here could switch them on by
-mistake, because the code simply does not implement them. That is what
-"non-sending" means structurally rather than as a promise: see
+`order_send`, `cancel_pending_orders` and `close_all_positions` on
+`OrderCheckMt5Gateway` itself always raise `ExecutionDisabledError`,
+unconditionally. There is no config flag read inside any of those three
+methods — nothing here could switch them on by mistake, because the
+code simply does not implement them. That is what "non-sending" means
+structurally rather than as a promise: see
 `review/PHASE4_PLAN_REVIEW_GO_WITH_TWEAKS.md` point 8 and ADR-001.
+
+Phase B item B1 (`review/adr/ADR-016-demo-order-send-adapter.md`) adds a
+real, but separate and unwired, `order_send` in `mt5_gateway
+/demo_execution.py::DemoOrderSendMt5Gateway` — this module exports
+`build_market_order_request`/`decimal_from_mt5` for that class to reuse
+so `order_check` validates the exact request `order_send` would submit,
+never a similar-looking duplicate. Neither of those two functions
+themselves sends anything; they only build a request dict / decode a
+result field.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ from crumblr.domain.enums import Side
 from crumblr.domain.events import OrderCheckCompleted
 from crumblr.domain.models import AccountState, ApprovedOrder, InstrumentSpec, PositionState
 from crumblr.domain.timeutils import UtcDatetime, utc_now
-from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client
+from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module
 from crumblr.mt5_gateway.port import ExecutionDisabledError
 from crumblr.mt5_gateway.readonly import ReadOnlyMt5Gateway
 from crumblr.observability.logging import get_logger
@@ -60,17 +70,53 @@ in `mt5_gateway/client.py`.
 """
 
 
-def _decimal_from_mt5(value: Any) -> Decimal:
-    """Convert an `order_check` result field to `Decimal` without binary float.
+def decimal_from_mt5(value: Any) -> Decimal:
+    """Convert an MT5 result field to `Decimal` without binary float.
 
     Mirrors `readonly.py::_to_decimal`'s technique (`Decimal(repr(float(...)))`,
-    never `Decimal(float(...))`) for the same reason: `OrderCheckResult`'s
-    numeric fields are plain Python floats, and going through `repr` avoids
-    a binary-float artifact leaking into a persisted Decimal. Pydantic
-    coerces the result into `OrderCheckCompleted.margin_required`'s
-    `ExactDecimal` field on construction below.
+    never `Decimal(float(...))`) for the same reason: MT5's numeric result
+    fields are plain Python floats, and going through `repr` avoids a
+    binary-float artifact leaking into a persisted Decimal. Shared by
+    `order_check` (below) and `mt5_gateway/demo_execution.py`'s real
+    `order_send` — not underscored, since both files need it.
     """
     return Decimal(repr(float(value)))
+
+
+def build_market_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, Any]:
+    """The MT5 request dict for `order`, shared between `order_check`
+
+    (below) and `mt5_gateway/demo_execution.py`'s real `order_send`.
+    Deliberately one function, not two similar dict literals: the whole
+    point of `order_check` is to validate the exact request `order_send`
+    would submit — a check that validated a *different* request would
+    not actually be checking what matters. `magic` is included here
+    (core critical path item 5, `review/adr/ADR-007-order-send-idempotence.md`)
+    even though `order_check` never needed it for a dry run: the real
+    `order_send` cannot omit it — every reconciliation/ambiguous-recovery
+    read since item 6 searches broker positions by this exact value
+    (`ApprovedOrder.magic_number`).
+    """
+    order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+    if order_type_constant is None:
+        raise ValueError(f"no MT5 market order type for side {order.side}")
+
+    request: dict[str, Any] = {
+        "action": module.TRADE_ACTION_DEAL,
+        "symbol": order.broker_symbol,
+        "volume": float(order.volume),
+        "type": getattr(module, order_type_constant),
+        "magic": order.magic_number,
+        "sl": float(order.stop_loss_price),
+        "deviation": order.max_slippage_points,
+        "type_time": module.ORDER_TIME_GTC,
+        "type_filling": module.ORDER_FILLING_IOC,
+    }
+    if order.price is not None:
+        request["price"] = float(order.price)
+    if order.take_profit_price is not None:
+        request["tp"] = float(order.take_profit_price)
+    return request
 
 
 class OrderCheckMt5Gateway:
@@ -150,24 +196,7 @@ class OrderCheckMt5Gateway:
             )
 
         module = self._client.module
-        order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
-        if order_type_constant is None:
-            raise ValueError(f"order_check has no MT5 market order type for side {order.side}")
-
-        request: dict[str, Any] = {
-            "action": module.TRADE_ACTION_DEAL,
-            "symbol": order.broker_symbol,
-            "volume": float(order.volume),
-            "type": getattr(module, order_type_constant),
-            "sl": float(order.stop_loss_price),
-            "deviation": order.max_slippage_points,
-            "type_time": module.ORDER_TIME_GTC,
-            "type_filling": module.ORDER_FILLING_IOC,
-        }
-        if order.price is not None:
-            request["price"] = float(order.price)
-        if order.take_profit_price is not None:
-            request["tp"] = float(order.take_profit_price)
+        request = build_market_order_request(module, order)
 
         _log.info(
             "mt5.order_check",
@@ -206,7 +235,7 @@ class OrderCheckMt5Gateway:
             accepted=accepted,
             retcode=retcode,
             comment=comment,
-            margin_required=_decimal_from_mt5(getattr(result, "margin", 0.0)),
+            margin_required=decimal_from_mt5(getattr(result, "margin", 0.0)),
             payload=payload,
         )
 

@@ -156,6 +156,7 @@ class FakeMt5:
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
+    TRADE_RETCODE_DONE_PARTIAL = 1
 
     def __init__(self, *, tick_bid: float = 1.08500, tick_ask: float = 1.08512) -> None:
         self._tick_bid = tick_bid

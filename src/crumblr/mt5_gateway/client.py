@@ -47,9 +47,17 @@ class Mt5Module(Protocol):
     def orders_get(self, *args: Any, **kwargs: Any) -> tuple[Any, ...] | None: ...
     # Server-side dry run: validates a request without creating a ticket or
     # any market exposure. Phase 4 (`mt5_gateway/execution.py`) is the only
-    # caller — `order_send` is not part of this protocol, deliberately, so
-    # there is nothing here for a future caller to reach for by accident.
+    # caller.
     def order_check(self, request: dict[str, Any]) -> Any: ...
+    # Places a real order. Phase B item B1
+    # (`mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`) is the only
+    # caller — and that class is not constructed or referenced anywhere in
+    # `application/execution.py` today (see that module's own docstring).
+    # Declaring this here is a pure type-surface change: the real
+    # `MetaTrader5` package already has this method, `load_mt5_module()`
+    # only `cast()`s it to this protocol, so nothing about the real
+    # terminal's own capability changes.
+    def order_send(self, request: dict[str, Any]) -> Any: ...
 
     # Request-parameter constants for copy_ticks_from / copy_rates_from_pos.
     # Declared here rather than hardcoded at the call site: these are read off
@@ -72,6 +80,8 @@ class Mt5Module(Protocol):
     ORDER_TIME_GTC: int
     ORDER_FILLING_IOC: int
     TRADE_RETCODE_DONE: int
+    # order_send result constant (Phase B item B1).
+    TRADE_RETCODE_DONE_PARTIAL: int
 
 
 class Mt5UnavailableError(RuntimeError):

@@ -94,6 +94,7 @@ class FakeMt5:
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
+    TRADE_RETCODE_DONE_PARTIAL = 1
 
     def __init__(
         self,
@@ -236,6 +237,10 @@ class TestOrderCheck:
         assert request["action"] == FakeMt5.TRADE_ACTION_DEAL
         assert request["symbol"] == "EURUSD"
         assert request["volume"] == pytest.approx(0.10)
+        # Phase B item B1: order_check must validate the exact request
+        # order_send would submit, magic included — a check that omitted
+        # it would not actually be checking what matters.
+        assert request["magic"] == order.magic_number
         assert result.order_request_id == order.order_request_id
         assert result.intent_id == order.intent_id
         assert result.accepted is True

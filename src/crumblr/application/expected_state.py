@@ -199,6 +199,14 @@ def derive_expected_exposure(
             continue
 
         if event_type is ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED:
+            if payload is not None and payload.get("integrity_ambiguity"):
+                reasons.append(
+                    f"order_request_id {order_request_id}: "
+                    f"{payload.get('matching_position_count')} broker positions share "
+                    "its magic number -- cannot safely attribute any of them to this "
+                    "request (integrity ambiguity, not a malformed payload)"
+                )
+                continue
             if payload is None or "submitted" not in payload:
                 reasons.append(
                     f"order_request_id {order_request_id}'s AMBIGUOUS_OUTCOME_RESOLVED "
