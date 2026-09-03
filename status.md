@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `eb63c50` |
-| **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01). **Owner-reported 2026-09-03: F-067's unpinned `postgresql-client` resolved to a different major than the `postgres:17` service, so `pg_dump` still refused to run — fixed same day (F-068), now pinned to `postgresql-client-17` via the official PGDG apt repo.** Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), **item 9 broker-side SL verification (`ADR-014`)** — `verify_protective_stops()` compares broker-reported protective stops against the platform's own durably-recorded intent for every attributed, open ticket; absence/mismatch fails closed and escalates via a dedicated, narrowly-scoped kill-switch producer (`PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH`), deliberately decoupled from `reconcile()`'s own generic MATCHED/MISMATCHED verdict (D-051 gap 3 amended, not resolved). Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) PL-006 — done; (4) item 9 — done. All four items of the work order shipped (pending commit/push). Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: awaiting new instructions — no further owner punch-list item open. BLOCKED: none currently |
+| **`main` HEAD** | `7ad93a5` |
+| **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`) — reviewer-confirmed correct (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.1: "correctly escalates a missing/mismatched broker SL"). All four items of the 2026-09-03 Shared-Core work order shipped. **New owner/reviewer coordination order received 2026-09-03: `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`** — stages the route to a constrained one-shot Pepperstone DEMO canary across Phases 0/A/B/C/D/E/F. Dev 1's own **Phase B** (real-but-disabled DEMO mutation adapter, real submission side-effect chain, honest definite/ambiguous outcome semantics, real per-ticket close/flatten, exact account pin, one-shot canary permit, shared final-Risk/side-effect authority with Dev 2) is **queued but explicitly not to start yet** — the work order's own Phase-0 sequencing requires Dev 2's `agent/contracts` convergence PR (still unmerged; branch `d62722d` last synced to pre-item-9 `main` `8505fd2`, must rebase before PR) and a fresh fully-green hosted CI run first. NEXT: awaiting Dev 2's Phase-0 convergence merge; Dev 1's own Phase-0 role is review-only (cross-track Core invariants / item-9 conflicts) once that PR exists. BLOCKED: on Dev 2's Phase-0 PR + confirmed-green hosted CI before Phase B may branch |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9521,6 +9521,86 @@ Next:
 - All four items of the 2026-09-03 Shared-Core work order are now
   shipped (pending commit/push). No further owner punch-list item
   remains open as of this entry.
+
+---
+
+## Update 2026-09-03 (seventy-first entry) — new owner/reviewer coordination order received: constrained DEMO canary route
+
+```text
+Component: none (documentation/status only — no source changed)
+Milestone: n/a — reading a new coordination document and updating tracking
+Status before: item 9 shipped; awaiting new instructions
+Status after:  new work order read and understood; Dev 1 identified as BLOCKED on Dev 2's Phase-0 convergence before any new Core code may branch
+```
+
+**Completed**
+
+- Item 9 pushed and Dev 2 notified (`824c4f2`); Dev 2 replied confirming
+  the 2 known CI failures are already fixed on `agent/contracts`
+  (`d62722d`), held there pending their own merge review — clarified in
+  the seventieth entry, committed as `e919fe8`.
+- Pulled a new commit that landed directly on `origin/main`
+  (`7ad93a5`, author `DutchBugs` — the owner account, not a Dev session):
+  `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`, a 751-line
+  owner/reviewer coordination order. Explicitly **not** `feedback.1.29`
+  or `feedback.2.0` — a staged route (Phases 0/A/B/C/D/E/F) to a
+  one-shot, deliberately constrained real Pepperstone **DEMO** canary,
+  with `order_send`/`feedback_2_0_approved` staying NO-GO throughout
+  every phase except the final, owner-confirmed canary attempt itself.
+- Read in full. Confirmed by direct check, not assumed: `agent/contracts`
+  (`d62722d`) branches from pre-item-9 `main` (`8505fd2`) — Dev 2 has not
+  yet rebased/converged onto item 9, matching the work order's own §1.8
+  claim ("behind the latest Core item-9 commits and must sync before
+  PR").
+- `status.md` compact header updated: `main` HEAD (`7ad93a5`), hosted CI
+  result (owner-reported run #106: 1339/1341 passed, the 2 failures
+  being the same known, already-fixed-on-Dev2's-branch assertions), Dev
+  1's DONE/NEXT/BLOCKED row rewritten to name the new work order and the
+  Phase-0 dependency.
+
+**Evidence**
+
+- `git log origin/agent/contracts -1` = `d62722d...`, `git merge-base
+  origin/main origin/agent/contracts` = `8505fd2` — directly confirms
+  the sync gap the new work order describes, rather than trusting its
+  prose alone.
+- No quality gate run this entry — no source file changed.
+
+**Problems found**
+
+- None. This entry is a coordination/tracking update, not an engineering
+  change.
+
+**Risk impact**
+
+- None — `order_send`/`close_all_positions`/`feedback_2_0_approved`
+  remain exactly as closed as before. The new work order's own Phase B
+  explicitly requires all new real-mutation code to ship fully disabled
+  behind structurally closed gates, with no shipped config enabling it.
+
+**Decision**
+
+- **Not** starting Phase B (the real-but-disabled DEMO execution slice)
+  yet, even though it is Dev 1's own next assignment — the work order's
+  own §2 Phase-0 section is explicit: "Do not start real `order_send`
+  wiring on stale main; branch the new execution work only after the
+  Dev-2 convergence merge," and Phase 0 itself is not yet complete
+  (Dev 2's PR does not exist yet; hosted CI has not been reconfirmed
+  green after it). Starting Phase B against current `main` would
+  contradict the work order's own explicit sequencing.
+- Asking the user for direction before proceeding further, given the
+  scale of Phase B (new real-mutation adapter, real submission
+  side-effect chain, real per-ticket close/flatten, one-shot canary
+  permit, shared final-Risk authority with Dev 2) and its explicit
+  "queued, not yet startable" status.
+
+Next:
+- Await either: Dev 2 signaling Phase-0 convergence is merged and
+  hosted CI is confirmed green (at which point Dev 1's own Phase-0 role
+  — reviewing that merge for cross-track Core invariants/item-9
+  conflicts — begins), or explicit user direction to begin Phase B
+  research/planning ahead of that (still disabled-by-construction, but
+  the work order's own text discourages branching before Phase 0).
 
 ---
 
