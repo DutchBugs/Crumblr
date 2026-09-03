@@ -117,6 +117,7 @@ class FakeMt5:
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
+    TRADE_RETCODE_DONE_PARTIAL = 1
 
     def __init__(
         self, *, symbols: tuple[str, ...] = ("EURUSD.a", "EURUSD.a.cfd", "GBPUSD.a")
@@ -172,6 +173,12 @@ class FakeMt5:
         """The probe never calls this. Present only so this fake still
         structurally satisfies `Mt5Module`."""
         raise AssertionError("order_check must never be called by the M1 first-contact probe")
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        """The probe never calls this either (Phase B item B1). Present
+
+        only so this fake still structurally satisfies `Mt5Module`."""
+        raise AssertionError("order_send must never be called by the M1 first-contact probe")
 
 
 def connected_client(fake: FakeMt5) -> Mt5Client:

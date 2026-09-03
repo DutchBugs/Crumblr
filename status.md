@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `1fad624` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), no conflicts, independently re-verified green locally (1358 passed/3 skips/0 failed). **Phase B slice 1 (B4, `ADR-015`) shipped** — `_recover_ambiguous_submission()` now fails closed and HALTs (`ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS`) on >1 broker positions sharing one magic number, instead of silently attributing them all to one request; full suite 1361 passed/3 skips/0 failed. 7 of 8 Phase-B sub-items remain (B1/B2/B3/B5/B7/B8; B6 explicitly deferred by the work order itself until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (leaning B7 — exact account pin, small/independent — or B1+B2, the core adapter + submission chain). BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), independently re-verified green locally. **Phase B slice 1 (B4, `ADR-015`) shipped** — ambiguous-recovery fails closed/HALTs on >1 matching broker positions. **Phase B slice 2 (B1+B2, `ADR-016`) shipped** — `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real, tested `order_send` adapter (demo-only guard reuses the existing account-verify mechanism, shares its MT5 request builder with `order_check` including the `magic` idempotency key) — deliberately **not wired into `ExecutionOrchestrator`** yet (proven by a structural test), since B2's own required chain needs the account pin (B7), the one-shot canary permit (B8) and Phase C/AG-012's shared Risk authority first; full suite 1377 passed/3 skips/0 failed. B3/B5/B7/B8 remain (B6 explicitly deferred by the work order until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (B7 account pin, B8 canary permit, B3 outcome normalization, or B5 real close/flatten). BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9866,6 +9866,130 @@ Next:
 - Plan and implement the next Phase B slice — likely B7 (exact account
   pin, small/independent) or B1+B2 (the core new adapter + submission
   chain, the largest remaining piece) — to be decided with the user.
+
+---
+
+## Update 2026-09-03 (seventy-fifth entry) — Phase B slice 2: real (but unwired) DEMO order_send adapter (B1+B2)
+
+```text
+Component: mt5_gateway/execution.py, mt5_gateway/client.py, mt5_gateway/demo_execution.py (new)
+Milestone: DEMO canary work order, Phase B, items B1+B2 — slice 2 of the Phase-B punch list
+Status before: Phase B slice 1 (B4) shipped; B1/B2/B3/B5/B7/B8 not started
+Status after:  B1+B2 shipped (deliberately stopped before wiring the real call site into the orchestrator); B3/B5/B7/B8 remain
+```
+
+**Scope decision, confirmed with the user before planning:** B2's own
+required chain references two steps that do not exist yet — Phase
+C/AG-012's shared execution/Risk authority (joint Dev1+Dev2) and item
+B8's one-shot canary permit. Rather than inventing throwaway placeholder
+gates for those, this slice stops exactly where the chain already stops
+today: `_process()` is bit-identical to before this slice.
+`DemoOrderSendMt5Gateway` exists, is fully real and tested, but nothing
+in `ExecutionOrchestrator` holds a reference to it — proven directly by
+a new structural test, not merely asserted.
+
+**Completed**
+
+- New `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway` — wraps
+  `OrderCheckMt5Gateway` by composition (every read/`order_check`
+  delegates unchanged), adding one real capability: `order_send`. Real
+  demo-only refusal needed no new mechanism — `order_send()` calls
+  `self.account()` first, which already raises `AccountGuardError` on
+  any non-demo/mismatched account via the existing, already-tested
+  `ReadOnlyMt5Gateway._verify_account`.
+  `cancel_pending_orders`/`close_all_positions` still refuse (Phase B
+  item B5's scope).
+- `mt5_gateway/execution.py::build_market_order_request()` (new,
+  extracted from `order_check()`'s own request-building) is shared by
+  both `order_check` and the new `order_send` — a correctness property,
+  not just DRY: `order_check` must validate the exact request
+  `order_send` would submit. **Deliberate, called-out behaviour change**
+  to `order_check`'s own real request: it now includes `"magic":
+  order.magic_number` (item 5/ADR-007's computed field), which it never
+  carried before — the entire ambiguous-recovery/reconciliation chain
+  (items 6-9) depends on this exact value to find a resulting position;
+  omitting it from `order_send` was never an option, and including it in
+  `order_check` too is what makes the two calls genuinely equivalent.
+  Verified, not just asserted: existing `order_check` tests extended to
+  assert the field, plus a new test driving both calls against the
+  identical order and asserting the two request dicts are equal.
+- `mt5_gateway/client.py::Mt5Module` gains `order_send`/
+  `TRADE_RETCODE_DONE_PARTIAL` — pure Protocol-surface declarations
+  (`load_mt5_module()` just `cast()`s the real package, which already
+  has both). Every fake `Mt5Module` across the suite updated to satisfy
+  the wider Protocol (5 files).
+- `order_send()`'s `ExecutionResult.state` classification is a
+  deliberately modest three-way split (FILLED/PARTIALLY_FILLED/REJECTED
+  by retcode), matching `order_check`'s own DONE-vs-not-DONE precision —
+  full durable outcome semantics are Phase B item B3's separate, later
+  scope. `mt5_position_ticket` deliberately left `None` — attributing a
+  resulting position to a request is the existing magic-number
+  ambiguous-recovery mechanism's job, not this adapter's.
+- `review/adr/ADR-016-demo-order-send-adapter.md` written, including a
+  section checking this slice against every one of `build.md` §7's ten
+  gateway invariants: 2 are concretely satisfied now (credential scope,
+  idempotency key), 5 are properties of the full wired chain (not yet
+  exercised, since nothing calls this adapter), and 1 ("every
+  `order_send` result is persisted") is honestly **not yet true** and
+  named as deferred, not silently skipped.
+
+**Evidence**
+
+- New tests: `tests/unit/test_demo_order_send_gateway.py` — 16 new
+  (order_send request/decode shape incl. the demo-guard's 3 dedicated
+  tests, reads/order_check delegation, cancel/close still disabled, the
+  structural not-wired-in proof). `tests/unit/test_mt5_execution_gateway.py`
+  — existing `order_check` test extended (not counted as new) to assert
+  the `magic` field.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (187 source files).
+- Full suite: **1377 passed, 3 pre-existing skips, 0 failed** (336.89s)
+  — 1361 (post-B4 baseline) + 16 new, exactly accounted for.
+- Determinism: `scripts/run_replay.py --bars 600` run twice (PowerShell,
+  stdout only), MD5 identical (`704967823f258496922a9b16c4d29788` — same
+  hash as every prior slice).
+- Grep the diff: zero `self._adapter.order_send`/
+  `self._order_check_gateway.order_send` call sites, zero
+  `DemoOrderSendMt5Gateway` references under `src/crumblr/application/`,
+  zero edits under `agent_gateway/`.
+
+**Problems found**
+
+- One test-only bug, not an implementation defect: `pytest.approx(0.10)`
+  cannot compare against a `Decimal` field (`ExecutionResult
+  .executed_volume`) — `TypeError: unsupported operand type(s) for -:
+  'float' and 'decimal.Decimal'`. Fixed by comparing against
+  `Decimal("0.10")` directly, matching how the rest of the codebase
+  compares Decimal fields.
+
+**Risk impact**
+
+- None to structural inertness: `order_send` is real code now, for the
+  first time this project, but is reachable from nowhere in the live
+  orchestrator — proven directly, not just claimed. `submission_enabled`/
+  `feedback_2_0_approved` remain `false` everywhere and are moot to this
+  slice regardless.
+- The `order_check` request-shape change (adding `magic`) is the one
+  genuine behaviour change to already-real, previously-terminal-tested
+  code this slice makes — deliberate, additive, verified, and documented
+  explicitly in ADR-016 rather than smuggled in as an incidental
+  refactor detail.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/phase-b-2-demo-order-send-adapter` branch,
+  `[core]` prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational, but flagging
+  the `Mt5Module` Protocol-surface growth precautionarily since no
+  `agent_gateway/` code touches `mt5_gateway/` today).
+- Plan and implement the next Phase B slice — B3 (durable outcome
+  normalization), B5 (real per-ticket close/flatten), B7 (exact account
+  pin) and B8 (one-shot canary permit) all remain, plus Phase C/AG-012
+  before this slice's adapter can actually be wired in.
 
 ---
 

@@ -117,6 +117,7 @@ class FakeMt5:
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
+    TRADE_RETCODE_DONE_PARTIAL = 1
 
     def __init__(
         self,
@@ -192,6 +193,12 @@ class FakeMt5:
         before reaching the module. Present only so this fake still
         structurally satisfies `Mt5Module`."""
         raise AssertionError("order_check must never be called through the M1 read-only gateway")
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        """M1 never calls this either — present only so this fake still
+
+        structurally satisfies `Mt5Module` (Phase B item B1)."""
+        raise AssertionError("order_send must never be called through the M1 read-only gateway")
 
 
 FAKE_NOW = datetime.fromtimestamp(1_767_000_000, tz=UTC)

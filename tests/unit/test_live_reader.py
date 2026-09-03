@@ -132,6 +132,7 @@ class ScriptedMt5:
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
+    TRADE_RETCODE_DONE_PARTIAL = 1
 
     def __init__(self) -> None:
         self.initialize_ok = True
@@ -200,6 +201,12 @@ class ScriptedMt5:
         """`LiveReader` never calls this. Present only so this fake still
         structurally satisfies `Mt5Module`."""
         raise AssertionError("order_check must never be called by LiveReader")
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        """`LiveReader` never calls this either (Phase B item B1). Present
+
+        only so this fake still structurally satisfies `Mt5Module`."""
+        raise AssertionError("order_send must never be called by LiveReader")
 
 
 class RecordingSink:
