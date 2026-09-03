@@ -1304,6 +1304,71 @@ this slice's merge) was built entirely on their side.
 
 ---
 
+## 0s. PL-006 (`recover_session()` loss/drawdown check) merged — two test assertions updated for the new, more-correct timing — done 2026-09-03
+
+Dev 1 shipped PL-006 (`b3068c0`/`8505fd2` on `main`,
+`review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`):
+`risk/session.py::recover_session()` now checks a recovered session's
+`max_drawdown_fraction`/`max_session_loss_fraction` against the
+configured `max_drawdown`/`max_daily_loss` thresholds itself, during
+recovery — a real gap PAPER_LITE's own test suite surfaced: previously,
+an already-breached session that survived a restart was only ever caught
+later, inside `policies.evaluate()`'s own live loss-gate leg. `Dev 1`
+made the one-line mechanical fix at this track's own call site
+(`decision_path.py:243`, two new kwargs,
+`max_daily_loss=config.risk.max_daily_loss`/
+`max_drawdown=config.risk.max_drawdown` — the same shape `orchestration
+.py`/`live_decision.py`/`execution.py` already pass) themselves, with my
+explicit go-ahead: `main` was red for PAPER_LITE's own tests over this
+today, not a future break on my branch, so waiting for me to touch it
+was the wrong call there — confirmed by reading the actual diff after
+merging, exactly the two kwargs, nothing else in the file touched.
+
+**Two tests broke, correctly — a timing change, not a defect.** Before
+PL-006, an already-breached session's `DAILY_LOSS_LIMIT`/`MAX_DRAWDOWN`
+was caught inside `policies.evaluate()`'s own live loss-gate leg, landing
+directly in `risk_decision.reason_codes` as `RiskVerdict.HALT`. Now
+`recover_session()` catches it first and trips the kill switch during
+recovery, before `evaluate()` ever runs — `evaluate()` then runs against
+an already-halted switch and reports `RiskVerdict.BLOCK` with
+`ReasonCode.SYSTEM_HALTED`, per its own pre-existing "an already-halted
+system is enforced as a BLOCK, not a fresh HALT escalation" convention
+(`tests/unit/test_risk_engine.py
+::test_adr001_7_a_kill_switch_tripped_since_approval_is_refused`) —
+reused here, not reinvented. The kill switch itself is still correctly
+halted with the real reason, just visible via `kill_switch.active_reasons`
+now rather than `risk_decision.reason_codes`. Updated
+`tests/unit/test_agent_decision_path.py
+::TestAG012FreshSessionRecoveryEveryCall`'s two affected tests to assert
+the new, more-correct shape (`kill_switch.is_halted` +
+`active_reasons` carries the real breach reason + downstream
+`risk_decision.verdict is BLOCK`/`SYSTEM_HALTED`) rather than paper over
+the difference.
+
+Self-review (`/code-review medium`) caught one real precision gap before
+commit: my first draft asserted `MAX_DRAWDOWN in active_reasons or
+DAILY_LOSS_LIMIT in active_reasons` for the second test, but the actual
+fixture (`max_drawdown_fraction=0.5`, `max_session_loss_fraction=0.5`,
+both far over their configured thresholds) always trips *both* reasons —
+confirmed directly from the captured log output
+(`"reasons": ["MAX_DRAWDOWN", "DAILY_LOSS_LIMIT"]`), not assumed. An
+`or` would have silently stopped catching a regression that dropped
+either one; tightened to `and` on both.
+
+Did not touch `test_agent_decision_path.py` before Dev 1 pushed, per our
+own agreement (`agent_gateway/**` stays single-owned; I fix my own test
+file against real, pushed code rather than either session editing it
+blind or concurrently).
+
+Evidence: `tests/unit/test_agent_decision_path.py` — both previously
+failing tests pass again (23/23 in the file); full `tests/unit`
+**1067 passed**, 1 skipped (pre-existing, unrelated), 0 failed;
+ruff/ruff format/mypy clean (185 source files). Full gate after (unit +
+integration against `crumblr_test_dev2`): **1339 passed**, 3 skipped
+(pre-existing, unrelated), 0 failed.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |

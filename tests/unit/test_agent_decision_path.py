@@ -399,7 +399,20 @@ class TestAG012FreshSessionRecoveryEveryCall:
     fresh from the store on every call, never cached -- proven here by a
     loss gate that could only trip if the store's carried-forward
     `session_start_equity` genuinely participated in this call's
-    evaluation, since nothing else in the fixture implies a loss."""
+    evaluation, since nothing else in the fixture implies a loss.
+
+    PL-006 (`review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`):
+    `recover_session()` now catches an already-breached
+    `max_daily_loss`/`max_drawdown` itself, during recovery -- before
+    `policies.evaluate()` ever runs -- rather than relying solely on
+    `evaluate()`'s own live loss-gate leg to catch it. The kill switch is
+    tripped with the real reason (`DAILY_LOSS_LIMIT`/`MAX_DRAWDOWN`)
+    during recovery; `evaluate()` then runs against an already-halted
+    switch and reports `BLOCK`/`SYSTEM_HALTED` per its own
+    already-halted-system convention (`test_risk_engine.py
+    ::test_adr001_7_a_kill_switch_tripped_since_approval_is_refused`),
+    not a fresh `HALT`/`DAILY_LOSS_LIMIT` escalation -- the halt already
+    happened, earlier and more correctly than before PL-006."""
 
     def test_a_recorded_prior_loss_this_session_reaches_the_daily_loss_gate(self) -> None:
         risk = config().risk
@@ -424,10 +437,11 @@ class TestAG012FreshSessionRecoveryEveryCall:
         fixture = Fixture(account=account, session_store=session_store, kill_switch=kill_switch)
         result, _ = fixture.evaluate(agent_intent())
 
-        assert result.risk_decision is not None
-        assert result.risk_decision.verdict is RiskVerdict.HALT
-        assert ReasonCode.DAILY_LOSS_LIMIT in result.risk_decision.reason_codes
         assert kill_switch.is_halted
+        assert ReasonCode.DAILY_LOSS_LIMIT in kill_switch.active_reasons
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in result.risk_decision.reason_codes
 
     def test_two_calls_against_different_stores_are_fully_independent(self) -> None:
         """No object here is reused/mutated between calls -- proves there
@@ -451,10 +465,20 @@ class TestAG012FreshSessionRecoveryEveryCall:
                 recorded_at_utc=FIXED_NOW,
             )
         )
-        second_fixture = Fixture(session_store=stale_store)
+        second_kill_switch = KillSwitch()
+        second_fixture = Fixture(session_store=stale_store, kill_switch=second_kill_switch)
         second, _ = second_fixture.evaluate(agent_intent())
+
+        assert second_kill_switch.is_halted
+        # The stale store's max_drawdown_fraction=0.5 and
+        # max_session_loss_fraction=0.5 both exceed their configured
+        # thresholds (max_drawdown=0.08, max_daily_loss=0.04) -- both
+        # reasons, not either/or, so both must survive recovery.
+        assert ReasonCode.MAX_DRAWDOWN in second_kill_switch.active_reasons
+        assert ReasonCode.DAILY_LOSS_LIMIT in second_kill_switch.active_reasons
         assert second.risk_decision is not None
-        assert second.risk_decision.verdict is RiskVerdict.HALT
+        assert second.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in second.risk_decision.reason_codes
 
 
 class TestReplaySafety:
