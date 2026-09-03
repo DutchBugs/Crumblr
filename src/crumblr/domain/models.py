@@ -621,7 +621,13 @@ class FlattenInstruction(Contract):
     open_price: Price
     opened_at_utc: UtcDatetime
     magic: int | None = None
-    crossed_rollover: bool
+    crossed_weekly_close: bool
+    """Whether this position survived the weekly close (owner risk policy
+
+    v1, D1.5) — renamed from `crossed_rollover`, which meant "survived
+    any daily rollover" under the old daily policy. A real change to a
+    persisted audit-payload key; see `review/adr
+    /ADR-012-owner-session-policy-v1.md`."""
     observed_at_utc: UtcDatetime
 
     @model_validator(mode="after")
@@ -657,7 +663,7 @@ class FlattenPlan(Contract):
     session_close_utc: UtcDatetime
     flatten_deadline_utc: UtcDatetime
     past_deadline: bool
-    crossed_rollover: bool
+    crossed_weekly_close: bool
     observed_at_utc: UtcDatetime
     broker_state_snapshot_id: UUID
     """Ties this commitment to the exact durable `BrokerAccountSnapshot`/
@@ -670,9 +676,9 @@ class FlattenPlan(Contract):
     def _check_plan(self) -> Self:
         if not self.instructions:
             raise ValueError("a flatten plan must target at least one position")
-        if not (self.past_deadline or self.crossed_rollover):
+        if not (self.past_deadline or self.crossed_weekly_close):
             raise ValueError(
-                "a flatten plan must have a real trigger: past_deadline or crossed_rollover"
+                "a flatten plan must have a real trigger: past_deadline or crossed_weekly_close"
             )
         return self
 

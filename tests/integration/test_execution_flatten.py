@@ -1,16 +1,16 @@
 """Automatic flatten submission, end to end, against real PostgreSQL and a
 
-fake MT5 terminal — core critical path item 7, ADR-009. Mirrors
-`test_execution_orchestrator.py`'s own end-to-end shape: this is the test
-that proves the non-sending guarantee holds for the *flatten* path
-specifically — a real broker-side position past its deadline reaches a
-persisted `FLATTEN_SUBMISSION_STARTED` event, and `close_all_positions`/
-`order_send` are never called.
+fake MT5 terminal — core critical path item 7, ADR-009, weekly close per
+owner risk policy v1 (D1.5). Mirrors `test_execution_orchestrator.py`'s own
+end-to-end shape: this is the test that proves the non-sending guarantee
+holds for the *flatten* path specifically — a real broker-side position past
+its deadline reaches a persisted `FLATTEN_SUBMISSION_STARTED` event, and
+`close_all_positions`/`order_send` are never called.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -32,16 +32,29 @@ from tests.integration._execution_fixtures import (
 
 pytestmark = pytest.mark.integration
 
-# `session_close(FIXED_NOW) == 2026-08-17 21:00:00 UTC`, nine hours after
-# FIXED_NOW — computed directly from `risk/trading_window.py::session_close`
-# rather than guessed, so these two policies land on opposite sides of that
-# nine-hour gap deterministically.
+# `FIXED_NOW` (2026-08-17 12:00 UTC) is a Monday, and owner risk policy v1
+# (D1.5) gives Monday-Thursday no deadline at all regardless of offsets —
+# the deadline-dependent tests below need a moment on the Friday trading
+# day instead. `FRIDAY_NOW` is that same week's Friday, at the same local
+# time of day, so the "N hours out from the weekly close" reasoning below
+# still holds: `weekly_close(FRIDAY_NOW) == 2026-08-21 21:00:00 UTC` (17:00
+# America/New_York, daylight saving in effect in August), nine hours after
+# FRIDAY_NOW — computed directly from `trading_agent/sessions.py
+# ::weekly_close` rather than guessed, so the two policies below land on
+# opposite sides of that nine-hour gap deterministically, exactly as they
+# did against the old daily `session_close`.
+FRIDAY_NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+
+
+def _friday_clock() -> datetime:
+    return FRIDAY_NOW + timedelta(seconds=1)
+
 
 PAST_DEADLINE_POLICY = IntradayConfig.model_validate(
     {
         "enabled": True,
         "last_entry_minutes_before_close": 660,  # 11h — still before the deadline below
-        "flatten_minutes_before_close": 600,  # 10h — FIXED_NOW (9h out) is already past this
+        "flatten_minutes_before_close": 600,  # 10h — FRIDAY_NOW (9h out) is already past this
     }
 )
 
@@ -49,7 +62,7 @@ OPEN_POLICY = IntradayConfig.model_validate(
     {
         "enabled": True,
         "last_entry_minutes_before_close": 120,  # 2h
-        "flatten_minutes_before_close": 60,  # 1h — FIXED_NOW (9h out) is well before this
+        "flatten_minutes_before_close": 60,  # 1h — FRIDAY_NOW (9h out) is well before this
     }
 )
 
@@ -75,7 +88,7 @@ class TestFlattenOnce:
         )
         fake = FakeMt5()  # open_positions defaults to ()
 
-        orch = orchestrator(engine, config, fake, activation_watermark=None)
+        orch = orchestrator(engine, config, fake, activation_watermark=None, clock=_friday_clock)
         outcome = orch.flatten_once()
 
         assert outcome is None
@@ -86,9 +99,29 @@ class TestFlattenOnce:
         InstrumentSpecStore(engine).record(the_spec)
         config = platform_config(expected_spec_version=the_spec.spec_version, intraday=OPEN_POLICY)
         fake = FakeMt5()
+        fake.open_positions = (fake_position(time=int(FRIDAY_NOW.timestamp())),)
+
+        orch = orchestrator(engine, config, fake, activation_watermark=None, clock=_friday_clock)
+        outcome = orch.flatten_once()
+
+        assert outcome is None
+
+    def test_a_monday_never_reaches_a_deadline_regardless_of_the_policy(
+        self, engine: Engine
+    ) -> None:
+        """Owner risk policy v1 (D1.5)'s own affirmative claim: Monday has
+
+        no cutoff/flatten at all, even under the config that would already
+        be past a Friday deadline."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(
+            expected_spec_version=the_spec.spec_version, intraday=PAST_DEADLINE_POLICY
+        )
+        fake = FakeMt5()
         fake.open_positions = (fake_position(time=int(FIXED_NOW.timestamp())),)
 
-        orch = orchestrator(engine, config, fake, activation_watermark=None)
+        orch = orchestrator(engine, config, fake, activation_watermark=None)  # FIXED_NOW, a Monday
         outcome = orch.flatten_once()
 
         assert outcome is None
@@ -105,7 +138,12 @@ class TestFlattenOnce:
         kill_switch = KillSwitch()
 
         orch = orchestrator(
-            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+            engine,
+            config,
+            fake,
+            activation_watermark=None,
+            kill_switch=kill_switch,
+            clock=_friday_clock,
         )
         outcome = orch.flatten_once()
 
@@ -160,7 +198,12 @@ class TestFlattenOnce:
         kill_switch = KillSwitch()
 
         orch = orchestrator(
-            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+            engine,
+            config,
+            fake,
+            activation_watermark=None,
+            kill_switch=kill_switch,
+            clock=_friday_clock,
         )
         outcome = orch.flatten_once()
 
@@ -211,7 +254,7 @@ class TestFlattenOnce:
         fake = FakeMt5()
         fake.open_positions = (fake_position(ticket=900042),)
 
-        orch = orchestrator(engine, config, fake, activation_watermark=None)
+        orch = orchestrator(engine, config, fake, activation_watermark=None, clock=_friday_clock)
 
         first = orch.flatten_once()
         assert first is not None
@@ -235,38 +278,48 @@ class TestFlattenOnce:
         assert third is None
         assert fake.positions_get_calls == positions_before_third
 
-    def test_a_position_from_an_earlier_trading_day_is_caught_on_the_first_pass(
+    def test_a_position_from_before_the_weekly_close_is_caught_on_the_first_pass(
         self, engine: Engine
     ) -> None:
-        """ADR-004 §5.4: a position opened before FIXED_NOW's trading day is
+        """A position that survived the weekly close is a breach even
 
-        a rollover breach even though the OPEN policy's deadline itself
-        has not been reached."""
+        though the OPEN policy's own deadline has not been reached —
+        owner risk policy v1 (D1.5)'s `has_crossed_weekly_close`, replacing
+        the old daily rollover check ADR-004 §5.4 named."""
         the_spec = spec()
         InstrumentSpecStore(engine).record(the_spec)
         config = platform_config(expected_spec_version=the_spec.spec_version, intraday=OPEN_POLICY)
         fake = FakeMt5()
-        yesterday = int((FIXED_NOW - timedelta(days=1)).timestamp())
-        fake.open_positions = (fake_position(time=yesterday),)
+        last_week = int((FRIDAY_NOW - timedelta(days=7)).timestamp())
+        fake.open_positions = (fake_position(time=last_week),)
         kill_switch = KillSwitch()
 
         orch = orchestrator(
-            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+            engine,
+            config,
+            fake,
+            activation_watermark=None,
+            kill_switch=kill_switch,
+            clock=_friday_clock,
         )
         outcome = orch.flatten_once()
 
         assert outcome is not None
         assert kill_switch.is_halted
 
-    def test_an_incomplete_position_book_blocks_the_flatten(self, engine: Engine) -> None:
+    def test_an_incomplete_position_book_before_the_deadline_blocks_the_flatten(
+        self, engine: Engine
+    ) -> None:
         """ADR-004 §5.3: a book this platform cannot currently see must not
 
         be flattened — MT5's own failure convention, `positions_get`
-        returning `None` with a non-RES_S_OK error code."""
+        returning `None` with a non-RES_S_OK error code. Before the Friday
+        deadline this is not yet the D1.5 HALT below — see the next test
+        for that leg."""
         the_spec = spec()
         InstrumentSpecStore(engine).record(the_spec)
         base_config = platform_config(
-            expected_spec_version=the_spec.spec_version, intraday=PAST_DEADLINE_POLICY
+            expected_spec_version=the_spec.spec_version, intraday=OPEN_POLICY
         )
         version = base_config.config_version
         config = base_config.model_copy(
@@ -291,17 +344,70 @@ class TestFlattenOnce:
 
         fake.positions_get = failing_positions_get  # type: ignore[method-assign]
         fake.last_error = failing_last_error  # type: ignore[method-assign]
+        kill_switch = KillSwitch()
 
-        orch = orchestrator(engine, config, fake, activation_watermark=None)
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=None,
+            kill_switch=kill_switch,
+            clock=_friday_clock,
+        )
         outcome = orch.flatten_once()
 
         # A failed position read means an empty observed book, which is
         # indistinguishable from genuinely flat at the `flatten_once()`
         # early-return — there is nothing to flatten *or* refuse yet. The
         # incompleteness is still durably recorded on the broker-state
-        # snapshot itself (`position_set_state=FAILED`); this proves the
-        # failure does not get silently upgraded into "flat, all clear".
+        # snapshot itself (`position_set_state=FAILED`). Before the Friday
+        # deadline (OPEN_POLICY, FRIDAY_NOW is well inside it), this does
+        # not yet trip the new D1.5 halt — see the next test for the
+        # at/past-deadline leg.
         assert outcome is None
+        assert not kill_switch.is_halted
+
+    def test_an_incomplete_book_at_the_deadline_halts_rather_than_assuming_flat(
+        self, engine: Engine
+    ) -> None:
+        """Owner risk policy v1 (D1.5)'s own explicit requirement: if flat
+
+        state cannot be confirmed by the mandatory deadline, HALT and
+        surface the incident rather than assume success. Same failing
+        `positions_get` as the test above, but under `PAST_DEADLINE_POLICY`
+        — `phase_at(FRIDAY_NOW, ...)` is `FLATTEN_REQUIRED`, so the
+        emptiness this failure produces must not read as genuinely flat.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(
+            expected_spec_version=the_spec.spec_version, intraday=PAST_DEADLINE_POLICY
+        )
+        fake = FakeMt5()
+
+        def failing_positions_get(*_a: Any, **_k: Any) -> tuple[Any, ...]:
+            return None  # type: ignore[return-value]
+
+        def failing_last_error() -> tuple[int, str]:
+            return (2, "connection lost")
+
+        fake.positions_get = failing_positions_get  # type: ignore[method-assign]
+        fake.last_error = failing_last_error  # type: ignore[method-assign]
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=None,
+            kill_switch=kill_switch,
+            clock=_friday_clock,
+        )
+        outcome = orch.flatten_once()
+
+        assert outcome is None
+        assert kill_switch.is_halted
+        assert ReasonCode.FLATTEN_STATE_UNKNOWN in kill_switch.active_reasons
 
     def test_the_operator_flatten_control_is_never_reached(self) -> None:
         """ADR-004 §5.1 made mechanical: the automatic path must not be

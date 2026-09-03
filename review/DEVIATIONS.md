@@ -1203,6 +1203,84 @@ mean anything should start here.
   recorded in `review/INTEGRATION_NOTICES.md` for their track.
 - **Gate affected:** none directly today.
 
+### D-055 — `trading_day()`'s weekend-fabrication bug, fixed as part of D1.5
+- **Status:** RESOLVED 2026-09-03 — real, pre-existing bug, fixed while
+  building owner session policy v1, not new scope
+- **Spec:** `review/adr/ADR-012-owner-session-policy-v1.md` §2.2
+- **Code:** `trading_agent/sessions.py::trading_day()`
+- **Original gap:** no weekday awareness — during the closed weekend gap
+  (Friday 17:00 ET through Sunday 17:00 ET), `trading_day()` fabricated
+  two fictional trading days ("Saturday", "Sunday") instead of collapsing
+  the gap into the next real one, Monday. Not merely theoretical:
+  `persistence/flatten.py::flatten_request_id_for()` is keyed on
+  `trading_day` alone, and `application/execution.py::flatten_once()` runs
+  unconditionally every pass on the service's own wall clock — the
+  fabrication produced up to two spurious extra flatten-request rows
+  across every real weekend, and `application/orchestration.py
+  ::_roll_session` reset the daily-loss ledger baseline the same extra
+  number of times.
+- **Current state:** fixed directly — any moment during the closed gap now
+  resolves to the upcoming Monday's date. Zero behavior change for any
+  Monday-Friday moment (verified: the new branch is only reachable when
+  `is_market_open` is already `False`). Verified monotonic across the
+  transition, so `risk/session.py`'s `recorded.trading_day > market_day`
+  halt cannot newly trip across this deploy.
+- **Why fixed in scope rather than deferred:** D1.5's own `weekly_close()`
+  is built directly on `trading_day()` (the owner's "one Core calendar
+  authority" instruction) — leaving the bug in place would have forced
+  either a duplicate, independently-derived week-boundary computation, or
+  a silently-still-buggy `weekly_close()`.
+- **Watch for:** two tests relied on the old fabrication to read
+  `FIXED_NOW - timedelta(days=1)` (a Sunday) as "an earlier trading day" —
+  fixed to use a genuine prior-week weekday instead
+  (`test_flatten_plan.py`, `test_execution_flatten.py`).
+- **Gate affected:** none directly; a correctness fix underneath D1.5.
+
+### D-056 — `crossed_rollover` renamed to `crossed_weekly_close`: a persisted audit-payload key changed
+- **Status:** deliberate, recorded rather than silent
+- **Spec:** `review/adr/ADR-012-owner-session-policy-v1.md` §2.6
+- **Code:** `domain/models.py::FlattenInstruction`/`FlattenPlan
+  .crossed_weekly_close`, `application/flatten_plan.py`
+- **What changed:** `FLATTEN_SUBMISSION_STARTED` events persist
+  `plan.model_dump(mode="json")` in full — this field's name is a real
+  audit-payload key, not merely an in-memory one. Historical rows (before
+  this change) carry `crossed_rollover`; rows from this change onward
+  carry `crossed_weekly_close`. The field's meaning genuinely changed too
+  (survived *any* daily rollover, under the old policy, vs. survived the
+  weekly close, under D1.5) — the rename says so honestly rather than
+  reusing a now-wrong name for a new meaning.
+- **Why safe:** nothing re-validates the persisted payload back into a
+  typed model today — confirmed by direct read,
+  `_resolve_flatten_outcome` (`application/execution.py`) reads it via raw
+  dict access (`payload["instructions"][i]["ticket"]`), never
+  reconstructing a `FlattenPlan`/`FlattenInstruction` from it. So nothing
+  breaks; the only audience that needs to know why the key differs is a
+  human auditor reading old and new rows side by side, and the field's own
+  docstring now tells them.
+- **Watch for:** if a future change ever does re-validate persisted
+  flatten payloads into typed models, it must handle both key names for
+  rows written before 2026-09-03.
+- **Gate affected:** none.
+
+### D-057 — Market holidays are unmodelled, and matter more under a weekly session policy
+- **Status:** open question, not fixed
+- **Spec:** `review/adr/ADR-012-owner-session-policy-v1.md` §7
+- **Code:** `trading_agent/sessions.py` (no holiday calendar anywhere)
+- **Why:** `is_market_open()`/`trading_day()`/`weekly_close()` model only
+  the ordinary weekly Friday-close/Sunday-open cycle — no Good Friday, no
+  Christmas, no broker-specific early close. Under the old *daily* policy
+  a holiday just meant one quiet day; under the new *weekly* policy,
+  pinned to Friday 17:00 America/New_York specifically, a holiday landing
+  on or near that boundary could mean a flatten deadline pointed at a
+  moment the broker is already shut, or an entry cutoff measured against
+  a close that never actually happens that week.
+- **Watch for:** this becomes a real operational risk the first time a
+  real DEMO canary run crosses a holiday week, not before — no code
+  change needed until then, but the gap must not be forgotten between now
+  and that point.
+- **Gate affected:** before any real DEMO canary run that could cross a
+  market holiday.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

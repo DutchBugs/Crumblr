@@ -16,10 +16,10 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `bbd06fd` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01). **Owner-reported 2026-09-03: F-067's unpinned `postgresql-client` resolved to a different major than the `postgres:17` service, so `pg_dump` still refused to run — fixed same day (F-068), now pinned to `postgresql-client-17` via the official PGDG apt repo.** Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: everything through owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008 — real portfolio open-risk accounting, O-004 withdrawn, owner's four risk numbers shipped), CI PostgreSQL client version pin (F-068). Owner issued a new Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) **D1.5** session/weekend policy (Mon–Thu no daily cutoff, Fri entry cutoff T-15, Fri mandatory flat T-5, weekend exposure forbidden, one Core calendar/authority) — not yet started; (3) **PL-006** structural fix in Shared Risk (persisted `max_session_loss_fraction`/`max_drawdown_fraction` must not be forgotten on restart once equity recovers) — not yet started; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: plan D1.5. BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), **owner session policy v1 (D1.5, `ADR-012`, O-009)** — weekday overnight now permitted, only the Friday trading day restricted (entry cutoff T-15, mandatory flat T-5 against the weekly close), weekend exposure still forbidden, one calendar authority (`trading_agent/sessions.py::weekly_close`), a real pre-existing `trading_day()` weekend-fabrication bug fixed in scope (D-055), new `ReasonCode.FLATTEN_STATE_UNKNOWN` HALT when flat state can't be confirmed by the deadline. Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) **PL-006** structural fix in Shared Risk (persisted `max_session_loss_fraction`/`max_drawdown_fraction` must not be forgotten on restart once equity recovers) — not yet started; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: PL-006. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
-| **Owner blockers** | Confirm next hosted CI run is fully green (F-068 fix pending confirmation); decide when to enable terminal AlgoTrading. Session-policy numbers **now supplied** 2026-09-03 (Fri T-15/T-5, HALT-reset human-only) — D1.5 is an engineering task now, not a blocked decision |
+| **Owner blockers** | Confirm next hosted CI run is fully green (F-068 fix pending confirmation); decide when to enable terminal AlgoTrading. All risk/session-policy numbers now supplied and shipped (O-008, O-009) |
 | **`order_send`** | **NO-GO.** `ExecutionConfig.feedback_2_0_approved` stays `false` |
 | **Next formal review target** | `feedback.2.0.md` (routine, per review 1.25 §9's three triggers) — `feedback.1.26.md`/`feedback.1.27.md`/`feedback.1.28.md` (all 2026-09-01) were deliberate owner/reviewer checkpoints (1.28 an explicit early-escalation exception per 1.27 §12's own trigger), not a change to that default |
 
@@ -56,7 +56,7 @@ document you have that this repository doesn't yet.
 | # | What | Why it needs you | Where |
 |---|---|---|---|
 | 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. Hosted run 60 already confirmed **F-063** genuinely fixed; **F-065** (`ruff format --check`) and now **F-067** (the `pg_dump`/`psql` restore proof silently skipping instead of running — `postgresql-client` was never installed on the runner, and the dump/restore subprocess calls carried no connection parameters underneath that) are both fixed 2026-09-01. "Local green" was never allowed to stand in for "hosted green," and now — for the first time — neither is "hosted green that never actually exercised the restore test." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job (including the two new "assert not silently skipped" steps), Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; `tests/integration/test_migrations.py`; §2 M0 acceptance below; `review/FEEDBACK.md` F-067 |
-| 2 | ~~Owner risk-policy decisions: risk per trade, max daily loss, max drawdown~~ **done 2026-09-02** — `max_risk_per_trade=0.02`, `max_open_risk=0.03`, `max_daily_loss=0.04`, `max_drawdown=0.08` (O-008b, ADR-011). Still open: last-entry cutoff, mandatory flatten deadline, HALT-reset authority — session policy (D1.5), a separate later slice | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. The four fractions are no longer placeholders (D-013 partially resolved); the session-timing fields are D1.5's own scope | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; `review/adr/ADR-011-owner-risk-policy-v1.md`; §11 below |
+| 2 | ~~Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority~~ **all done** — risk fractions 2026-09-02 (`max_risk_per_trade=0.02`, `max_open_risk=0.03`, `max_daily_loss=0.04`, `max_drawdown=0.08`, O-008b, ADR-011); session policy 2026-09-03 (Friday-only entry cutoff T-15, flatten T-5, weekday overnight now permitted, weekend still forbidden, O-009, ADR-012); HALT-reset human-only reconfirmed compliant, no code change needed | build.md §29 Q7/Q8 and ADR-004 §3 reserved these for a human by design; all now answered | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; `review/adr/ADR-011-owner-risk-policy-v1.md`; `review/adr/ADR-012-owner-session-policy-v1.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
@@ -451,10 +451,10 @@ Per capability, because "implemented" and "validated" are different claims
 | cancel pending orders | x | x | | | |
 | flatten positions | x | x | | | |
 | real portfolio open-risk accounting (D1.4, supersedes O-004) | x | x | x | | |
-| intraday entry cut-off (O-003) | x | x | x | | |
-| overnight-exposure halt (O-003) | x | x | x | | |
+| Friday entry cut-off, weekday overnight permitted (D1.5, O-009, supersedes O-003) | x | x | x | | |
+| weekly-close exposure halt (D1.5, O-009, supersedes O-003) | x | x | x | | |
 | account currency / leverage guard | x | x | x | | |
-| automatic flatten at the deadline | | | | | |
+| automatic flatten at the deadline (item 7, ADR-009) | x | x | | | |
 | execution-time revalidation | x | x | x | | |
 
 Execution-time revalidation (ADR-001's FINAL Risk,
@@ -550,7 +550,7 @@ something was found and dealt with (F-009).
 | APP-008 | HIGH | The journal records decisions but not the market data they were made from; warm-up windows leave no trace at all (D-031) | | **CLOSED 2026-08-18** | `market_ticks` and `market_bars` written on the ordinary path for every observed window; tick→bar pipeline with gap, out-of-order, duplicate and crossed-quote detection. 46 tests |
 | APP-010 | MEDIUM | `metadata.create_all` was the only way to build the schema, on a database that now holds data (D-029) | | **CLOSED 2026-08-18** | Alembic baseline; the runtime migrates rather than creates; a restored `pg_dump` is proven to reproduce the run |
 | APP-011 | MEDIUM | Two supervisor checks could not fire but reported as passed (D-015, D-028, EV-002) | | **CLOSED 2026-08-18** | Threshold set to `null` = uncalibrated; every decision carries `uncalibrated_checks` and the run report names them. The calibration itself still needs real data |
-| APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18; O-004 leg superseded 2026-09-02** | O-004 (one exposure per symbol) is withdrawn by owner risk policy v1 (`review/OWNER_POLICY_V1.md`) — multiple positions are now permitted, enforced instead by real portfolio open-risk accounting (D1.4, `risk/portfolio_risk.py::assess_open_risk`, ADR-011, O-008). Intraday entries are refused and a breach halts — **the automatic flatten is built** (item 7, ADR-009) |
+| APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18; both legs superseded by owner risk policy v1** | O-004 (one exposure per symbol) withdrawn 2026-09-02 — multiple positions are now permitted, enforced instead by real portfolio open-risk accounting (D1.4, `risk/portfolio_risk.py::assess_open_risk`, ADR-011, O-008). O-003 (no overnight positions) withdrawn 2026-09-03 — weekday overnight is now permitted, only the Friday trading day carries entry-cutoff/flatten deadlines against the weekly close (D1.5, ADR-012, O-009). Entries are refused and a breach halts on both remaining rules; **the automatic flatten is built** (item 7, ADR-009) |
 | APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). Continuous bar/tick read and observed reconnect behaviour, once "still open" here, completed the same day: Phase A (30 clean minutes) and Phase B (two deliberate terminal closures, both recovered with full revalidation) — F-034/F-037 closed, M1 PASSED (`feedback.1.12.md`). Closed in place per review 1.14 §11 F-033, which found this row still read as open after the fact |
 | APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | **CLOSED 2026-08-24** | Confirmed against the real terminal (`filling_mode=2`→IOC, `trade_mode=4`→FULL, matching documentation) and fixed: decode logic shared between the gateway and the probe in `mt5_gateway/enums.py` |
 | APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | **CLOSED FOR DEMO 2026-08-24, by O-005** | Owner/reviewer decision: demo entity is **Pepperstone Limited (UK)**, amending O-001 for demo/development only. Does **not** decide the entity for a future live account — that reopens this question against live documentation (D-034) |
@@ -947,6 +947,7 @@ Use this for architectural or risk decisions.
 | 2026-08-25 | **O-006**: the next promotion target is a controlled MT5 **DEMO** account autonomous canary order — real decisioning, real order submission, real demo fills, zero live-money exposure — not a live account, not strategy validation from a handful of trades | Review 1.15 §3 interprets the owner's direction toward "daadwerkelijk getrade kan worden" concretely, so "autonomous trading" cannot later be read as authorizing more than this. Reprioritizes engineering away from dashboard/foundation polish (both now substantially closed) onto the M5 critical path: CI/M0 closure → F-047 durable broker-state persistence → read-only reconciliation → F-048 live shadow decision pipeline (execution stays disabled) → execution-safety work (F-049) → `feedback.2.0` → one gated canary order | Owner (relayed via reviewer, review 1.15 §3/§12) |
 | 2026-09-02 | **O-008a**, superseding O-004: multiple EUR/USD positions may be open at once, provided total open risk never exceeds `max_open_risk` — not one exposure at a time | `review/OWNER_POLICY_V1.md` (owner-approved). O-004 was always a v1 simplification, not a permanent constraint; the risk gateway now enforces the real portfolio budget via `risk/portfolio_risk.py::assess_open_risk` (D1.4) rather than a position-count rule, so relaxing the count constraint no longer weakens the actual safety property. See `review/adr/ADR-011-owner-risk-policy-v1.md` | Deferring the withdrawal until D1.5 (session-policy) also lands — rejected, D1.4's real accounting was already in place and there was no reason to keep the stricter rule waiting on unrelated work | Project owner |
 | 2026-09-02 | **O-008b**: the four risk fractions move from engineering placeholders to owner-approved policy — `max_risk_per_trade=0.02`, `max_open_risk=0.03`, `max_daily_loss=0.04`, `max_drawdown=0.08` | `review/OWNER_POLICY_V1.md` §1, answering build.md §29 Q7-Q8. Closes the numeric half of D-013 (`config/paper.yaml`'s risk values were placeholders since 2026-08-17). `max_orders_per_hour`, `max_open_positions` and `min_stop_distance_points` remain engineering-chosen, not owner policy — D-013's remaining gap, D-053 | Leaving the placeholders in place indefinitely; picking new numbers without an explicit owner decision | Project owner |
+| 2026-09-03 | **O-009**, superseding O-003: weekday overnight holding is permitted; only the Friday trading day carries restrictions — no new entries from T-15 (15 min before the weekly close), must be fully flat by T-5 (5 min before it); weekend exposure stays forbidden; HALT-reset stays human/operator-only (reconfirmed compliant, no code change) | Owner Shared-Core work order 2026-09-03 item 2 (D1.5), answering `review/adr/ADR-004-intraday-session-boundary.md` §7's own deferred question ("whether a Friday close needs a longer cutoff than a weekday roll"). `config/paper.yaml`'s `intraday:` offsets move from 60/15 (daily) to 15/5 (Friday-only). See `review/adr/ADR-012-owner-session-policy-v1.md` | Keeping the daily "no overnight" rule now that real portfolio open-risk accounting (D1.4) makes the exposure budget the real safety control, not position duration — rejected by the owner directly, superseding rather than retaining O-003 | Project owner |
 
 ---
 
@@ -987,7 +988,9 @@ Done in this pass:
 - [x] Make the risk session survive a restart (F-019).
 - [x] Encode the one-exposure rule and the intraday window (O-003, O-004) —
       O-004 later withdrawn 2026-09-02 and replaced by real portfolio
-      open-risk accounting (D1.4, O-008).
+      open-risk accounting (D1.4, O-008). O-003 later withdrawn
+      2026-09-03 and replaced by the weekly session policy (D1.5, O-009):
+      weekday overnight permitted, only the Friday close restricted.
 - [x] Implement the deterministic risk policy engine and kill switch (M4).
 
 Blocked on a human decision — see build.md §29 and `review/feedback.1.6.md` §6:
@@ -9061,6 +9064,173 @@ Next:
   hardening in Shared Risk) after D1.5.
 - Core critical path **item 9** (broker-side SL verification) after
   PL-006 — the owner's explicit sequencing.
+
+---
+
+## Update 2026-09-03 (sixty-eighth entry) — owner session policy v1: daily → weekly (D1.5)
+
+Component: `trading_agent/sessions.py`, `risk/trading_window.py`, `risk/policies.py`, `risk/flatten_gate.py`, `application/execution.py`, `application/orchestration.py`, `application/live_decision.py`, `application/flatten_plan.py`, `domain/models.py`, `domain/enums.py`, `config/paper.yaml`, `review/adr/ADR-012-owner-session-policy-v1.md`, `review/adr/ADR-004`/`ADR-009` (amended)
+Milestone: Owner Shared-Core work order 2026-09-03 item 2 (D1.5), following owner-approved `review/OWNER_POLICY_V1.md`; planned via `EnterPlanMode` with an `Explore` research pass and a `Plan` design-critique pass before implementation
+Status before: the intraday policy applied last-entry/flatten deadlines to *every* trading day and treated *any* daily rollover as an overnight breach (O-003: "v1 holds nothing overnight"); `trading_day()` fabricated fictional Saturday/Sunday trading days across every real weekend
+Status after: weekday overnight holding is permitted (Monday-Thursday: no cutoff/flatten at all); only the Friday trading day carries the last-entry (T-15)/flatten (T-5) deadlines, measured against the one weekly close; weekend exposure stays forbidden; `trading_day()`'s weekend-fabrication bug fixed; a new `FLATTEN_STATE_UNKNOWN` HALT fires if flat state cannot be confirmed by the Friday deadline
+
+Completed:
+- Owner sent a new four-item Shared-Core work order (hosted CI, D1.5,
+  PL-006, item 9) directly in chat, confirming the already-shipped owner
+  risk policy v1 as the leading authority. Item 1 (hosted CI PostgreSQL
+  client version pin, F-068) shipped first as a small, non-plan-mode fix
+  — see the sixty-seventh entry. This entry covers item 2, D1.5.
+- Entered plan mode; an `Explore` pass mapped every call site of the old
+  intraday machinery (11+ files, more than initially known — the
+  real-terminal evidence script and the external-agent path among them)
+  and the exact trigger condition of the already-built automatic-flatten
+  machinery (item 7, ADR-009), confirming it needed no changes of its
+  own, only its one caller. A `Plan` design-critique pass then stress-
+  tested the first-draft design against the actual source and caught
+  three real problems before any code was written: (1) the work order's
+  own explicit requirement — HALT if flat state cannot be confirmed by
+  the deadline — was entirely missing from the first draft; (2) my own
+  reasoning about which renames were "free" was inverted:
+  `crossed_rollover` (which I assumed unpersisted) is actually a real
+  audit-payload key (`FLATTEN_SUBMISSION_STARTED` persists the full
+  serialized `FlattenPlan`), while the `IntradayPolicy`/`IntradayConfig`
+  rename I was hesitant about is genuinely free; (3) the first-draft
+  `phase_at` design (a weekday-branch plus an independently-derived
+  week-start comparison) was correct but violated the owner's own "one
+  Core calendar/authority" instruction by needing two agreeing week
+  computations — redesigned around a single new `weekly_close()`
+  function in `sessions.py` instead, with no weekday branch at all
+  (Monday's own close sits ~4.5 days away, so the arithmetic alone
+  produces OPEN). All three folded into the plan before implementation,
+  not discovered mid-build.
+- **The mechanism**: `sessions.py::weekly_close(moment)` — Friday 17:00
+  America/New_York ending `moment`'s trading week, derived from
+  `trading_day()` alone. `trading_window.py::phase_at`/
+  `has_crossed_weekly_close` both measure against it directly, with zero
+  day-of-week special-casing. `trading_day()`'s real, pre-existing
+  weekend-fabrication bug (fictional Saturday/Sunday trading days, which
+  caused up to two spurious extra flatten-request rows and ledger resets
+  across every real weekend) fixed in scope, not deferred — recorded as
+  **D-055**, since D1.5's `weekly_close()` is built directly on top of it
+  and honoring "one calendar authority" required getting it right rather
+  than working around it. Confirmed zero behavior change for any
+  Monday-Friday moment and that the fix cannot newly trip
+  `risk/session.py`'s restart-recovery halt.
+- **The new HALT**: `ReasonCode.FLATTEN_STATE_UNKNOWN`, scoped to
+  `application/execution.py::flatten_once()` (the only component with
+  broker-read-completeness visibility) — an incomplete position read at
+  or past the Friday deadline now halts and surfaces the incident,
+  rather than silently reading as flat via the pre-existing emptiness
+  shortcut. Tolerated in the flatten gate's own halt-tolerance set
+  alongside `OVERNIGHT_EXPOSURE`, safely — the gate's own
+  `POSITION_BOOK_INCOMPLETE` leg independently still closes it whenever
+  the trigger genuinely applies.
+- Consolidated the two-legged "past deadline or crossed the boundary"
+  condition, previously duplicated inline in four places (only one of
+  which was a named function), into
+  `risk/policies.py::overnight_breach()` (renamed from `_overnight_
+  breach`, made public), now called by both `orchestration.py` and
+  `live_decision.py`'s `_check_session_boundary` instead of re-inlining
+  it a second time under the new semantics.
+- Renamed `FlattenInstruction`/`FlattenPlan.crossed_rollover` →
+  `crossed_weekly_close`, with the payload-shape change recorded
+  explicitly (**D-056**) rather than silently, once the Plan critique
+  caught that this field is genuinely persisted.
+- `config/paper.yaml`'s `intraday:` offsets: 60/15 (daily) → 15/5
+  (Friday-only), owner-approved this date, recorded as **O-009**,
+  superseding O-003.
+- Kept `IntradayPolicy`/`IntradayConfig`/the `intraday:` YAML key
+  unrenamed despite "Intraday" now materially overstating what they mean
+  — same reclassify-via-docstring precedent D1.4 set for
+  `max_open_positions`; every docstring on the touched types rewritten
+  instead. `ReasonCode.OVERNIGHT_EXPOSURE` kept for the persistence
+  reason `SYMBOL_EXPOSURE_EXISTS` established in D1.3.
+- Corrected two stale claims found while touching this code: ADR-009
+  §2.7's "every shipped config's default" inertness argument was already
+  false (`config/paper.yaml` has always shipped `enabled: true`); ADR-009
+  §2.1's "keyed on the policy occurrence" framing no longer matched
+  reality once the policy went weekly but the key stayed daily — amended
+  rather than left standing, with the daily-key decision now stated
+  explicitly as deliberate.
+- `tests/unit/test_trading_window.py` rewritten substantially (not
+  patched) — its `WINTER`/`SUMMER` constants are both Tuesdays, which
+  have no deadlines at all under the new policy, so most of the file's
+  premise moved. New `WINTER_FRIDAY`/`SUMMER_FRIDAY` constants (keeping
+  the DST-pair argument), a new `TestCrossingTheWeeklyClose` class, and
+  new affirmative tests proving weekday overnight is permitted — nothing
+  in the old file tested that, since it used to be forbidden.
+  `tests/integration/test_execution_flatten.py` gained a second,
+  Friday-anchored fixed-clock constant (`FRIDAY_NOW`) alongside the
+  existing Monday `FIXED_NOW`, since four of its nine tests were
+  deadline-dependent and a Monday can no longer reach a deadline; two
+  new tests added for the `FLATTEN_STATE_UNKNOWN` HALT's before/at-
+  deadline halves.
+
+Evidence:
+- tests: full suite, solo, `crumblr_test_dev1` — **1273 passed, 3
+  skipped** (skips pre-exist, unrelated). Up from 1263 before this
+  slice.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (175 source files).
+- determinism: `scripts/run_replay.py --bars 600` run twice, stdout-only
+  MD5 identical.
+- Replay-behavior delta measured, not assumed: the reference 1500-bar
+  `baseline_v1` replay `status.md` already recorded as producing 44
+  `SESSION_BLACKOUT` refusals under the old daily policy now produces
+  **zero** `SESSION_BLACKOUT`/`OVERNIGHT_EXPOSURE` refusals — confirmed
+  by direct replay run. The full `tests/replay/` suite (30 tests) passes
+  unchanged; none of its assertions were numerically tied to the old
+  daily boundary.
+- Grepped the diff for `.order_send(`/`.close_all_positions(` — only a
+  pre-existing docstring mention, no new call. Confirmed zero files
+  touched under `src/crumblr/agent_gateway/` via `git status --short`.
+
+Problems found:
+- The plan's own first draft (before the `Plan`-agent critique) would
+  have shipped without the work order's own explicit HALT-on-unconfirmed-
+  flat requirement, and with the `crossed_rollover` rename reasoning
+  inverted (see "Completed" above) — both caught before implementation,
+  not after, by deliberately running a design-review pass rather than
+  implementing the first workable design.
+- No problems found during implementation itself; the design review's
+  own predictions (which tests would need rewriting vs. patching) held
+  exactly, including the two tests that depended on the `trading_day()`
+  fabrication bug.
+
+Risk impact:
+- None to structural inertness: `order_send`/`close_all_positions`
+  remain unconditional `ExecutionDisabledError` raises, untouched,
+  confirmed by grep.
+- `FLATTEN_STATE_UNKNOWN` is a new HALT condition — a genuine safety
+  addition (fails closed on unconfirmed flat state), not a relaxation.
+  The overall session policy widens what is permitted (weekday
+  overnight), which is the owner's explicit, approved decision (O-009),
+  not an engineering judgement call.
+
+Decision:
+- Fixed `trading_day()`'s weekend-fabrication bug in scope rather than
+  deferring it or working around it with a second calendar helper.
+- Scoped the new `FLATTEN_STATE_UNKNOWN` HALT to `flatten_once()` only,
+  not the lighter per-tick checks, since only that component has the
+  broker-read-completeness signal needed to detect it honestly.
+- Kept the flatten idempotency key at daily granularity despite the
+  policy going weekly, and amended ADR-009 §2.1 to say so explicitly
+  rather than leaving a now-inaccurate framing standing.
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/owner-session-policy-v1` branch, `[core]`
+  prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after rebasing onto current `origin/main`
+  if it has moved.
+- **PL-006** (persisted loss/drawdown-fraction restart-recovery
+  hardening in Shared Risk) — item 3 of the owner's work order, not yet
+  started.
+- Core critical path **item 9** (broker-side SL verification) — item 4,
+  after PL-006.
+- Market holidays (D-057, ADR-012 §7) — open question, not fixed;
+  revisit before any real DEMO canary run that could cross a holiday
+  week.
 
 ---
 

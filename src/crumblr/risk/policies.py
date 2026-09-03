@@ -36,7 +36,7 @@ from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.sizing import realised_risk, size_position
 from crumblr.risk.trading_window import (
     IntradayPolicy,
-    has_crossed_rollover,
+    has_crossed_weekly_close,
     permits_new_entry,
     requires_flat,
 )
@@ -49,6 +49,7 @@ HALT_REASONS: frozenset[ReasonCode] = frozenset(
         ReasonCode.MAX_DRAWDOWN,
         ReasonCode.DAILY_LOSS_LIMIT,
         ReasonCode.OVERNIGHT_EXPOSURE,
+        ReasonCode.FLATTEN_STATE_UNKNOWN,
     }
 )
 """Conditions that mean the *system* is unsafe, not just this trade."""
@@ -90,9 +91,12 @@ class RiskContext:
     expected_currency: str | None = None
     expected_leverage: int | None = None
     intraday: IntradayPolicy = field(default_factory=IntradayPolicy.disabled)
-    """Owner decision O-003. Defaults to imposing nothing, which is safe only
-    because refusing *more* entries is never the unsafe direction — a context
-    built without it blocks nothing extra rather than permitting something."""
+    """The weekly session policy (owner risk policy v1, D1.5; supersedes
+
+    O-003's original daily rule). Defaults to imposing nothing, which is
+    safe only because refusing *more* entries is never the unsafe
+    direction — a context built without it blocks nothing extra rather
+    than permitting something."""
 
 
 def _stop_distance(intent: TradeIntent) -> Decimal:
@@ -162,7 +166,7 @@ def evaluate(
     if snapshot.spread_points > context.execution.max_spread_points:
         reasons.append(ReasonCode.SPREAD_TOO_WIDE)
 
-    # --- Trading session (O-003) ------------------------------------------
+    # --- Trading session (owner risk policy v1, D1.5) ----------------------
     # Judged on market time, not on when this process got round to deciding.
     if not permits_new_entry(snapshot.event_time_utc, context.intraday):
         reasons.append(ReasonCode.SESSION_BLACKOUT)
@@ -187,10 +191,10 @@ def evaluate(
     # O-004 (one exposure per symbol) withdrawn 2026-09-02: see
     # OWNER_POLICY_V1.md §2. Multiple positions are permitted; the real
     # portfolio budget is enforced below via `open_risk_fraction`.
-    if _overnight_breach(portfolio.open_positions, snapshot.event_time_utc, context.intraday):
-        # Past the flatten deadline with the book still open, or holding a
-        # position that has already crossed a rollover. A block would leave it
-        # there; only a halt brings a person in.
+    if overnight_breach(portfolio.open_positions, snapshot.event_time_utc, context.intraday):
+        # Past the Friday flatten deadline with the book still open, or
+        # holding a position that has already crossed the weekly close.
+        # A block would leave it there; only a halt brings a person in.
         reasons.append(ReasonCode.OVERNIGHT_EXPOSURE)
     if len(portfolio.open_positions) >= context.risk.max_open_positions:
         reasons.append(ReasonCode.MAX_OPEN_POSITIONS)
@@ -366,21 +370,30 @@ def _refuse_at_execution_time(
     )
 
 
-def _overnight_breach(
+def overnight_breach(
     positions: tuple[PositionState, ...], moment: UtcDatetime, policy: IntradayPolicy
 ) -> bool:
-    """Whether O-003 is being violated right now.
+    """Whether owner risk policy v1's weekly session policy (D1.5) is being
 
-    Two ways it can be: the flatten deadline has passed with the book still
-    open, or a position has already survived a rollover. The second matters
-    because the first stops being true the moment the day rolls — see
-    `trading_window.has_crossed_rollover`.
+    violated right now.
+
+    Two ways it can be: the Friday flatten deadline has passed with the
+    book still open, or a position has already survived the weekly
+    close. The second matters because the first stops being true the
+    moment the week rolls — see `trading_window.has_crossed_weekly_close`.
+
+    Public (not `_overnight_breach`) so `application/orchestration.py`
+    and `application/live_decision.py` can call this one implementation
+    instead of each re-inlining the same two-legged condition — the
+    duplication `review/adr/ADR-009-automatic-flatten-submission.md` §1
+    already named as a known fact, now four sites instead of three
+    inline copies plus this one.
     """
     if not policy.enabled or not positions:
         return False
     if requires_flat(moment, policy):
         return True
-    return any(has_crossed_rollover(position.opened_at_utc, moment) for position in positions)
+    return any(has_crossed_weekly_close(position.opened_at_utc, moment) for position in positions)
 
 
 def _refuse(

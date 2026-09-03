@@ -203,7 +203,8 @@ def main() -> int:
     now = utc_now()
     intraday = policy_from_config(config.intraday)
     if not permits_new_entry(now, intraday):
-        print("  refusing to proceed: inside the configured last-entry blackout window.")
+        print("  refusing to proceed: market closed, or inside the Friday last-entry")
+        print("  blackout window before the weekly close (owner risk policy v1, D1.5).")
         print("  Not constructing an evidence capsule. Run again outside the blackout.\n")
         return 1
 

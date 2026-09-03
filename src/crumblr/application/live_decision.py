@@ -600,17 +600,17 @@ class LiveDecisionOrchestrator:
     def _check_session_boundary(
         self, moment: UtcDatetime, positions: tuple[PositionState, ...], now: UtcDatetime
     ) -> None:
+        """Halt if exposure outlived its weekly deadline (owner risk
+
+        policy v1, D1.5). Uses `risk/policies.py::overnight_breach` —
+        the one shared implementation — rather than re-inlining it, so
+        this site and `orchestration.py`'s identical check cannot drift
+        from each other or from the risk gateway's own leg.
+        """
         if self._kill_switch.is_halted:
             return
         policy = self._risk_context.intraday
-        if not positions or not policy.enabled:
-            return
-        past_deadline = trading_window.requires_flat(moment, policy)
-        crossed = any(
-            trading_window.has_crossed_rollover(position.opened_at_utc, moment)
-            for position in positions
-        )
-        if not (past_deadline or crossed):
+        if not policies.overnight_breach(positions, moment, policy):
             return
         self._trip(
             (ReasonCode.OVERNIGHT_EXPOSURE,),

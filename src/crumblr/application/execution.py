@@ -114,7 +114,7 @@ from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
-from crumblr.trading_agent.sessions import trading_day
+from crumblr.trading_agent.sessions import trading_day, weekly_close
 
 _log = get_logger("execution_orchestrator")
 
@@ -661,21 +661,27 @@ class ExecutionOrchestrator:
     def flatten_once(self) -> FlattenAttemptOutcome | None:
         """Core critical path item 7 (ADR-009): the durable
 
-        commitment/record half of the automatic intraday flatten. Called
-        from the top of `run_once()`, independent of the capsule loop —
-        see that call site's own comment for why.
+        commitment/record half of the automatic weekly flatten (owner
+        risk policy v1, D1.5). Called from the top of `run_once()`,
+        independent of the capsule loop — see that call site's own
+        comment for why.
 
-        Early-returns before any broker read when the intraday policy is
-        disabled (`intraday.enabled=False` — every test config, and every
-        shipped config's default), which is what keeps this change
-        provably inert for the existing capsule-focused test suite: no
-        extra broker read, no extra table row, for any of them.
+        Early-returns before any broker read when the session policy is
+        disabled (`intraday.enabled=False` — every test config). **Not**
+        every shipped config's default: `config/paper.yaml` ships
+        `enabled: true`, so this path is live under the shipped paper
+        config, not merely a dormant one (ADR-009 §2.7 previously
+        overstated this — corrected in `review/adr
+        /ADR-012-owner-session-policy-v1.md`).
 
         Never calls `close_all_positions` or `order_send` — the gate
         opening only appends `FLATTEN_SUBMISSION_STARTED` and stops. The
-        `OVERNIGHT_EXPOSURE` halt trip happens *after* the gate decision
-        on every path, so a halt this very pass causes can never be the
-        halt that tolerates itself on `risk/flatten_gate.py`'s own
+        `OVERNIGHT_EXPOSURE`/`FLATTEN_STATE_UNKNOWN` halt trips happen
+        *after* the gate decision on every path they can reach from (the
+        one exception is `FLATTEN_STATE_UNKNOWN`'s own trip immediately
+        after the fresh broker read, before the emptiness shortcut — see
+        below), so a halt this very pass causes can never be the halt
+        that tolerates itself on `risk/flatten_gate.py`'s own
         `SYSTEM_HALTED` leg — that tolerance only ever applies starting
         the *next* pass.
 
@@ -695,7 +701,9 @@ class ExecutionOrchestrator:
             return None
 
         day = trading_day(now)
-        session_close_utc = trading_window.session_close(now)
+        # `session_close_utc` names the *weekly* close (owner risk policy
+        # v1, D1.5) - coherent on every trading day, not only Friday's own.
+        session_close_utc = weekly_close(now)
         flatten_deadline_utc = session_close_utc - policy.flatten_offset
         flatten_request_id = flatten_request_id_for(
             environment=self._config.environment,
@@ -734,15 +742,28 @@ class ExecutionOrchestrator:
         )
         self._broker_state.record(observation)
         positions = observation.position_states
+
+        if (
+            trading_window.phase_at(now, policy) is trading_window.SessionPhase.FLATTEN_REQUIRED
+            and observation.account.position_set_state is not SnapshotCompleteness.COMPLETE
+        ):
+            # Owner risk policy v1 (D1.5): flat state cannot be confirmed by
+            # the mandatory Friday deadline. An incomplete read that happens
+            # to yield an empty `positions` tuple would otherwise be
+            # indistinguishable from genuinely flat at the `if not positions`
+            # shortcut below — under the weekly policy that gap is a whole
+            # unmonitored weekend, not a day that self-corrects tomorrow.
+            self._trip_flatten_state_unknown(now)
+
         if not positions:
             return None
 
         past_deadline = trading_window.requires_flat(now, policy)
-        crossed_rollover = any(
-            trading_window.has_crossed_rollover(position.opened_at_utc, now)
+        crossed_weekly_close = any(
+            trading_window.has_crossed_weekly_close(position.opened_at_utc, now)
             for position in positions
         )
-        if not (past_deadline or crossed_rollover):
+        if not (past_deadline or crossed_weekly_close):
             return None
 
         request_fingerprint = fingerprint(
@@ -795,7 +816,7 @@ class ExecutionOrchestrator:
                 session_close_utc=session_close_utc,
                 flatten_deadline_utc=flatten_deadline_utc,
                 past_deadline=past_deadline,
-                crossed_rollover=crossed_rollover,
+                crossed_weekly_close=crossed_weekly_close,
                 now=now,
             )
 
@@ -812,7 +833,7 @@ class ExecutionOrchestrator:
         session_close_utc: UtcDatetime,
         flatten_deadline_utc: UtcDatetime,
         past_deadline: bool,
-        crossed_rollover: bool,
+        crossed_weekly_close: bool,
         now: UtcDatetime,
     ) -> FlattenAttemptOutcome:
         """The just-claimed branch: gate, then commit or refuse. Never
@@ -841,7 +862,7 @@ class ExecutionOrchestrator:
             is SnapshotCompleteness.COMPLETE,
             reconciliation_status=reconciliation.status,
             kill_switch=self._kill_switch,
-            flatten_required=past_deadline or crossed_rollover,
+            flatten_required=past_deadline or crossed_weekly_close,
             risk_config_version=self._config.config_version,
             approved_risk_config_version=self._config.risk.approved_config_version,
             flatten_submission_enabled=self._config.execution.flatten_submission_enabled,
@@ -981,8 +1002,25 @@ class ExecutionOrchestrator:
                 occurred_at_utc=now,
                 detail=(
                     f"{len(positions)} position(s) still open past the flatten "
-                    "deadline or a rollover"
+                    "deadline or the weekly close"
                 ),
+            )
+
+    def _trip_flatten_state_unknown(self, now: UtcDatetime) -> None:
+        """Owner risk policy v1 (D1.5): the position book could not be
+
+        confirmed flat by the mandatory Friday deadline — the broker read
+        was incomplete, so an empty `positions` tuple cannot be trusted.
+        Tripped *before* `flatten_once()`'s own emptiness shortcut can
+        silently treat that as genuinely flat. Same idempotent-trip shape
+        as `_trip_overnight_exposure` — a no-op once already halted.
+        """
+        if not self._kill_switch.is_halted:
+            self._kill_switch.trip(
+                reason_codes=(ReasonCode.FLATTEN_STATE_UNKNOWN,),
+                tripped_by="flatten_driver",
+                occurred_at_utc=now,
+                detail="position book could not be confirmed flat by the Friday deadline",
             )
 
     def _append_flatten(

@@ -1,13 +1,18 @@
-"""Intraday-only trading (owner decision O-003; review 1.6 F-025).
+"""Weekly session policy (owner risk policy v1, D1.5; supersedes O-003).
 
-Review 1.5 §1 gives an instruction that reads like pedantry and is not:
+Review 1.5 §1's original instruction still matters and is preserved by these
+tests:
 
     Do not silently interpret "intraday" as "close at midnight UTC".
 
-The FX day rolls at 17:00 New York. A position closed at midnight UTC has
-already been carried through a rollover and charged swap for it, so a system
-that believes it is flat by midnight is wrong about the one thing the policy
-exists to control. Several tests below are about exactly that hour.
+The FX week closes at 17:00 New York on Friday. A position held to midnight
+UTC on a Friday has already been carried through the weekly close and
+charged swap for it, so a system that believes it is flat by midnight is
+wrong about the one thing the policy exists to control.
+
+D1.5's own affirmative claim — weekday overnight holding is now permitted —
+is exercised directly here too: nothing in the old (pre-D1.5) version of this
+file tested it, because it used to be forbidden.
 """
 
 from __future__ import annotations
@@ -24,13 +29,12 @@ from crumblr.domain.models import PositionState, RiskDecision
 from crumblr.risk.trading_window import (
     IntradayPolicy,
     SessionPhase,
-    has_crossed_rollover,
+    has_crossed_weekly_close,
     permits_new_entry,
     phase_at,
     policy_from_config,
     requires_flat,
-    session_close,
-    time_until_close,
+    time_until_weekly_close,
 )
 from tests.conftest import make_instrument_spec, make_snapshot
 
@@ -41,42 +45,57 @@ POLICY = IntradayPolicy(
 )
 
 # A Tuesday in January (New York on standard time) and one in July (daylight
-# saving). The pair exists to catch a boundary pinned to a fixed UTC hour.
+# saving) — mid-week, for proving weekday overnight is permitted and nothing
+# mid-week has a deadline. Their Friday counterparts, same weeks, are what
+# the deadline/phase tests below are measured against; the pair still exists
+# to catch a boundary pinned to a fixed UTC hour rather than 17:00 NY.
 WINTER = datetime(2026, 1, 6, 12, 0, tzinfo=UTC)
 SUMMER = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+WINTER_FRIDAY = datetime(2026, 1, 9, 12, 0, tzinfo=UTC)
+SUMMER_FRIDAY = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
 
 def at(day: datetime, hour: int, minute: int = 0) -> datetime:
     return day.replace(hour=hour, minute=minute)
 
 
-class TestTheBoundaryIsSeventeenHundredNewYork:
-    def test_the_day_ends_at_five_pm_new_york_in_winter(self) -> None:
-        assert session_close(WINTER) == datetime(2026, 1, 6, 22, 0, tzinfo=UTC)
+class TestTheBoundaryIsFridaySeventeenHundredNewYork:
+    def test_the_week_closes_at_five_pm_new_york_in_winter(self) -> None:
+        from crumblr.trading_agent.sessions import weekly_close
 
-    def test_the_day_ends_at_five_pm_new_york_in_summer(self) -> None:
+        assert weekly_close(WINTER_FRIDAY) == datetime(2026, 1, 9, 22, 0, tzinfo=UTC)
+
+    def test_the_week_closes_at_five_pm_new_york_in_summer(self) -> None:
         """One hour earlier in UTC, because New York moved and the market did not."""
-        assert session_close(SUMMER) == datetime(2026, 7, 7, 21, 0, tzinfo=UTC)
+        from crumblr.trading_agent.sessions import weekly_close
+
+        assert weekly_close(SUMMER_FRIDAY) == datetime(2026, 7, 10, 21, 0, tzinfo=UTC)
 
     def test_the_boundary_is_not_midnight_utc(self) -> None:
         """The trap review 1.5 §1 names, asserted rather than commented."""
-        for day in (WINTER, SUMMER):
-            assert session_close(day).hour != 0
+        from crumblr.trading_agent.sessions import weekly_close
 
-    def test_midnight_utc_is_already_the_next_trading_day(self) -> None:
-        """A position held to midnight UTC has been through a rollover."""
-        midnight = datetime(2026, 1, 7, 0, 0, tzinfo=UTC)
+        for day in (WINTER_FRIDAY, SUMMER_FRIDAY):
+            assert weekly_close(day).hour != 0
 
-        assert session_close(midnight) > midnight
-        assert has_crossed_rollover(WINTER, midnight), (
-            "a position opened at noon and held to midnight UTC crossed the 17:00 roll"
+    def test_midnight_utc_friday_night_is_already_past_the_weekly_close(self) -> None:
+        """A position held to midnight UTC on a Friday has crossed the weekly close."""
+        from crumblr.trading_agent.sessions import weekly_close
+
+        midnight = datetime(2026, 1, 10, 0, 0, tzinfo=UTC)  # Saturday 00:00 UTC
+
+        assert weekly_close(midnight) > midnight
+        assert has_crossed_weekly_close(WINTER_FRIDAY, midnight), (
+            "a position opened Friday noon and held to midnight UTC crossed the weekly close"
         )
 
-    def test_time_until_close_counts_down_to_the_boundary(self) -> None:
-        assert time_until_close(at(WINTER, 21, 0)) == timedelta(hours=1)
+    def test_time_until_weekly_close_counts_down_to_the_boundary(self) -> None:
+        assert time_until_weekly_close(at(WINTER_FRIDAY, 21, 0)) == timedelta(hours=1)
 
 
 class TestThePhases:
+    """All measured on the Friday trading day — the only one with deadlines."""
+
     @pytest.mark.parametrize(
         ("hour", "minute", "expected"),
         [
@@ -89,17 +108,21 @@ class TestThePhases:
             (21, 59, SessionPhase.FLATTEN_REQUIRED),
         ],
     )
-    def test_the_day_moves_through_its_phases(
+    def test_friday_moves_through_its_phases(
         self, hour: int, minute: int, expected: SessionPhase
     ) -> None:
-        assert phase_at(at(WINTER, hour, minute), POLICY) is expected
+        assert phase_at(at(WINTER_FRIDAY, hour, minute), POLICY) is expected
 
-    def test_the_new_day_opens_at_the_rollover(self) -> None:
-        """17:00 New York is the start of a day as much as the end of one."""
-        assert phase_at(at(WINTER, 22, 0), POLICY) is SessionPhase.OPEN
+    @pytest.mark.parametrize("hour", [0, 6, 12, 18, 23])
+    def test_a_weekday_is_always_open_regardless_of_hour(self, hour: int) -> None:
+        """Monday-Thursday: no cutoff/flatten at all (owner risk policy v1,
+
+        D1.5's own affirmative claim — the weekly close is always too far
+        away for either offset to fire)."""
+        assert phase_at(at(WINTER, hour), POLICY) is SessionPhase.OPEN
 
     def test_the_weekend_is_closed_whatever_the_policy_says(self) -> None:
-        """Saturday. The intraday policy does not control when FX trades."""
+        """Saturday. The session policy does not control when FX trades."""
         saturday = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
 
         assert phase_at(saturday, POLICY) is SessionPhase.CLOSED
@@ -111,13 +134,13 @@ class TestThePhases:
 
 
 class TestEntriesAndFlatness:
-    def test_entries_are_refused_inside_the_last_hour(self) -> None:
-        assert permits_new_entry(at(WINTER, 20, 0), POLICY)
-        assert not permits_new_entry(at(WINTER, 21, 0), POLICY)
+    def test_entries_are_refused_inside_the_last_hour_before_the_weekly_close(self) -> None:
+        assert permits_new_entry(at(WINTER_FRIDAY, 20, 0), POLICY)
+        assert not permits_new_entry(at(WINTER_FRIDAY, 21, 0), POLICY)
 
     def test_flatness_is_required_only_after_its_own_deadline(self) -> None:
-        assert not requires_flat(at(WINTER, 21, 30), POLICY)
-        assert requires_flat(at(WINTER, 21, 45), POLICY)
+        assert not requires_flat(at(WINTER_FRIDAY, 21, 30), POLICY)
+        assert requires_flat(at(WINTER_FRIDAY, 21, 45), POLICY)
 
     def test_there_is_a_window_where_entries_stop_before_flatness_is_demanded(self) -> None:
         """The gap is the point: it is time to manage a position out.
@@ -125,53 +148,67 @@ class TestEntriesAndFlatness:
         Demanding flatness at the same instant entries stop would leave no
         interval in which an open position could legitimately be closed.
         """
-        moment = at(WINTER, 21, 30)
+        moment = at(WINTER_FRIDAY, 21, 30)
 
         assert not permits_new_entry(moment, POLICY)
         assert not requires_flat(moment, POLICY)
 
     def test_the_weekend_requires_flatness(self) -> None:
-        """A position held over a weekend is overnight three times over."""
         assert requires_flat(datetime(2026, 1, 10, 12, 0, tzinfo=UTC), POLICY)
+
+    def test_a_weekday_never_requires_flatness_or_refuses_entries(self) -> None:
+        """The affirmative half of D1.5: Monday-Thursday holds nothing back."""
+        for hour in (0, 9, 15, 23):
+            moment = at(WINTER, hour)
+            assert permits_new_entry(moment, POLICY)
+            assert not requires_flat(moment, POLICY)
 
 
 class TestADisabledPolicyImposesNothing:
     def test_it_permits_entries_at_any_open_moment(self) -> None:
-        assert permits_new_entry(at(WINTER, 21, 55), IntradayPolicy.disabled())
+        assert permits_new_entry(at(WINTER_FRIDAY, 21, 55), IntradayPolicy.disabled())
 
     def test_it_never_demands_flatness(self) -> None:
-        assert not requires_flat(at(WINTER, 21, 55), IntradayPolicy.disabled())
+        assert not requires_flat(at(WINTER_FRIDAY, 21, 55), IntradayPolicy.disabled())
 
     def test_disabling_is_explicit_rather_than_a_default(self) -> None:
-        """After O-003, "no intraday policy" must be a stated choice."""
+        """ "No session policy" must be a stated choice, not an accident."""
         with pytest.raises(TypeError):
             IntradayPolicy()  # type: ignore[call-arg]
 
 
-class TestCrossingTheRollover:
+class TestCrossingTheWeeklyClose:
     """The hole the phase check has on its own."""
 
     def test_a_position_opened_today_has_not_crossed(self) -> None:
-        assert not has_crossed_rollover(at(WINTER, 9, 0), at(WINTER, 16, 0))
+        assert not has_crossed_weekly_close(at(WINTER_FRIDAY, 9, 0), at(WINTER_FRIDAY, 16, 0))
 
-    def test_a_position_held_through_the_roll_has_crossed(self) -> None:
-        opened = at(WINTER, 16, 0)
-        later = at(WINTER, 23, 0)  # 18:00 New York — the next trading day
+    def test_a_weekday_hold_across_several_days_has_not_crossed(self) -> None:
+        """Monday through Thursday, an ordinary multi-day hold is not a breach."""
+        opened = at(WINTER, 9, 0)  # Tuesday
+        later = opened + timedelta(days=2)  # Thursday, same week
 
-        assert has_crossed_rollover(opened, later)
+        assert not has_crossed_weekly_close(opened, later)
 
-    def test_the_breach_does_not_expire_when_the_day_rolls(self) -> None:
-        """Without this, surviving the deadline stops being a breach one second later.
+    def test_a_position_held_through_the_weekly_close_has_crossed(self) -> None:
+        opened = at(WINTER_FRIDAY, 16, 0)
+        next_week = at(WINTER_FRIDAY + timedelta(days=3), 9, 0)  # the following Monday
 
-        At 17:00 New York `phase_at` reports OPEN for the new day, so a check
-        that only asked about the phase would forgive a position precisely
-        when it became an overnight one.
+        assert has_crossed_weekly_close(opened, next_week)
+
+    def test_the_breach_does_not_expire_when_the_week_rolls(self) -> None:
+        """Without this, surviving the deadline stops being a breach the
+
+        moment the new week opens. At 17:00 New York on Friday `phase_at`
+        reports OPEN once the market reopens, so a check that only asked
+        about the phase would forgive a position precisely when it became
+        a weekend breach.
         """
-        opened = at(WINTER, 16, 0)
-        just_after_roll = at(WINTER, 22, 1)
+        opened = at(WINTER_FRIDAY, 16, 0)
+        next_week_open = at(WINTER_FRIDAY + timedelta(days=3), 9, 0)
 
-        assert phase_at(just_after_roll, POLICY) is SessionPhase.OPEN
-        assert has_crossed_rollover(opened, just_after_roll)
+        assert phase_at(next_week_open, POLICY) is SessionPhase.OPEN
+        assert has_crossed_weekly_close(opened, next_week_open)
 
 
 class TestPolicyOrdering:
@@ -215,7 +252,7 @@ class TestPolicyOrdering:
         assert policy.flatten_offset == timedelta(minutes=20)
 
     def test_both_deadlines_are_required_in_configuration(self) -> None:
-        """A missing deadline is a policy that holds overnight."""
+        """A missing deadline is a policy that holds through the weekly close."""
         with pytest.raises(ValueError):
             IntradayConfig(enabled=True, last_entry_minutes_before_close=60)  # type: ignore[call-arg]
 
@@ -267,43 +304,64 @@ class TestTheRiskEngineEnforcesIt:
             observed_at_utc=opened_at,
         )
 
-    def test_an_entry_before_the_cutoff_is_not_refused_for_the_session(self) -> None:
-        decision = self._decide(at(WINTER, 20, 0))
+    def test_an_entry_before_the_friday_cutoff_is_not_refused_for_the_session(self) -> None:
+        decision = self._decide(at(WINTER_FRIDAY, 20, 0))
 
         assert ReasonCode.SESSION_BLACKOUT not in decision.reason_codes
 
-    def test_an_entry_inside_the_last_hour_is_blocked(self) -> None:
-        decision = self._decide(at(WINTER, 21, 0))
+    def test_an_entry_inside_the_friday_last_hour_is_blocked(self) -> None:
+        decision = self._decide(at(WINTER_FRIDAY, 21, 0))
 
         assert decision.verdict is RiskVerdict.BLOCK
         assert ReasonCode.SESSION_BLACKOUT in decision.reason_codes
 
-    def test_exposure_past_the_flatten_deadline_halts(self) -> None:
-        """A block would leave the position to roll over. Only a halt does not."""
-        decision = self._decide(at(WINTER, 21, 50), positions=(self._position(at(WINTER, 15, 0)),))
+    def test_a_weekday_entry_is_never_blocked_for_the_session_regardless_of_hour(self) -> None:
+        """The affirmative claim, on the actual risk-engine path this time."""
+        for hour in (0, 9, 15, 23):
+            decision = self._decide(at(WINTER, hour))
+            assert ReasonCode.SESSION_BLACKOUT not in decision.reason_codes
+
+    def test_exposure_past_the_friday_flatten_deadline_halts(self) -> None:
+        """A block would leave the position to roll into the weekend. Only a halt does not."""
+        decision = self._decide(
+            at(WINTER_FRIDAY, 21, 50), positions=(self._position(at(WINTER_FRIDAY, 15, 0)),)
+        )
 
         assert decision.verdict is RiskVerdict.HALT
         assert ReasonCode.OVERNIGHT_EXPOSURE in decision.reason_codes
 
-    def test_a_position_that_crossed_the_roll_halts_even_though_the_day_is_open(self) -> None:
+    def test_a_position_that_crossed_the_weekly_close_halts_even_though_the_week_is_open(
+        self,
+    ) -> None:
         """The case the phase check alone would forgive."""
-        just_after_roll = at(WINTER, 22, 30)
-        decision = self._decide(just_after_roll, positions=(self._position(at(WINTER, 15, 0)),))
+        opened = at(WINTER_FRIDAY, 15, 0)
+        next_week_open = at(WINTER_FRIDAY + timedelta(days=3), 9, 0)
+        decision = self._decide(next_week_open, positions=(self._position(opened),))
 
-        assert phase_at(just_after_roll, POLICY) is SessionPhase.OPEN
+        assert phase_at(next_week_open, POLICY) is SessionPhase.OPEN
         assert decision.verdict is RiskVerdict.HALT
         assert ReasonCode.OVERNIGHT_EXPOSURE in decision.reason_codes
+
+    def test_a_weekday_hold_never_halts_for_overnight_exposure(self) -> None:
+        """The affirmative claim again: an ordinary multi-day weekday hold
+
+        is not a breach, on the actual risk-engine path."""
+        opened = at(WINTER, 9, 0)
+        later = opened + timedelta(days=2)
+        decision = self._decide(later, positions=(self._position(opened),))
+
+        assert ReasonCode.OVERNIGHT_EXPOSURE not in decision.reason_codes
 
     def test_a_flat_book_past_the_deadline_does_not_halt(self) -> None:
         """The rule is about exposure, not about the hour."""
-        decision = self._decide(at(WINTER, 21, 50))
+        decision = self._decide(at(WINTER_FRIDAY, 21, 50))
 
         assert ReasonCode.OVERNIGHT_EXPOSURE not in decision.reason_codes
 
     def test_a_disabled_policy_enforces_neither_rule(self) -> None:
         decision = self._decide(
-            at(WINTER, 21, 50),
-            positions=(self._position(at(WINTER, 15, 0)),),
+            at(WINTER_FRIDAY, 21, 50),
+            positions=(self._position(at(WINTER_FRIDAY, 15, 0)),),
             policy=IntradayPolicy.disabled(),
         )
 

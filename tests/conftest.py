@@ -320,8 +320,8 @@ def paper_config_payload() -> dict[str, Any]:
         },
         "intraday": {
             "enabled": True,
-            "last_entry_minutes_before_close": 60,
-            "flatten_minutes_before_close": 15,
+            "last_entry_minutes_before_close": 15,
+            "flatten_minutes_before_close": 5,
         },
         "account_guard": {
             "expected_server": "DemoBroker-Demo",

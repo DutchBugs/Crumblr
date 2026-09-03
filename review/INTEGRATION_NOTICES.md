@@ -559,3 +559,42 @@ Action required: current Alembic head is now d3b2e828b5b0 - the next
 migration on either side must chain from there.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: owner session policy v1 (D1.5, review/adr
+/ADR-012-owner-session-policy-v1.md) - the daily intraday-only policy
+becomes weekly. Monday-Thursday now has no cutoff/flatten at all
+(weekday overnight explicitly permitted, reversing O-003); only the
+Friday trading day carries the last-entry/flatten deadlines, measured
+against the one weekly close (Friday 17:00 America/New_York). Also
+fixes a real pre-existing bug: trading_agent/sessions.py::trading_day()
+now collapses the closed weekend gap into the next real trading day
+(Monday) instead of fabricating fictional Saturday/Sunday trading days
+(D-055). New ReasonCode.FLATTEN_STATE_UNKNOWN (a HALT): if the position
+book cannot be confirmed flat by the Friday deadline, the platform now
+halts and surfaces the incident rather than silently treating an
+unconfirmed read as flat.
+Impact: agent_gateway/decision_path.py:217,390 inherits both changed
+semantics (SESSION_BLACKOUT/OVERNIGHT_EXPOSURE's new weekly meaning,
+and the fixed trading_day() weekend behavior) with zero edits under
+src/crumblr/agent_gateway/ - confirmed via git diff --stat, zero files
+touched under that directory. Also renamed FlattenInstruction/
+FlattenPlan.crossed_rollover -> crossed_weekly_close - a real
+persisted-audit-payload key change (FLATTEN_SUBMISSION_STARTED events
+persist the full serialized FlattenPlan); historical rows carry
+crossed_rollover, new rows carry crossed_weekly_close (D-056).
+Action required: none expected for the Static Agent/Gateway integration
+itself - both reason codes keep their existing names, so no code needs
+to change on the agent-facing contract. If any agent-side tooling
+displays SESSION_BLACKOUT/OVERNIGHT_EXPOSURE with a hard-coded
+explanation of what they mean (e.g. "held overnight"), that explanation
+is now only correct for a Friday/weekend case, not any weekday hold -
+worth checking if such a description exists anywhere in the Gateway or
+Static Agent fork. If anything ever reads persisted flatten-event
+payloads by the crossed_rollover key, it must also handle
+crossed_weekly_close for rows written from this change onward.
+Relevant commit: (this commit)
+```
