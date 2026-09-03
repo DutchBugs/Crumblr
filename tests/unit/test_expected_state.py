@@ -119,6 +119,23 @@ class TestPerRequestExposure:
         assert request_id in exposure.determined_request_ids
         assert exposure.tickets_by_request[request_id] == frozenset()
 
+    def test_a_rejection_expects_no_exposure(self) -> None:
+        """Phase B item B3: a definite broker rejection is determined,
+
+        zero exposure -- mirrors the AMBIGUOUS_OUTCOME_RESOLVED
+        {submitted=False} shape exactly, but reached via the new,
+        honestly-named REJECTED event instead."""
+        request_id = uuid4()
+        history = [
+            event(ExecutionEventType.SUBMISSION_STARTED, payload={"entry_type": "MARKET"}),
+            event(ExecutionEventType.REJECTED, payload={"retcode": 10_019}),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.expected_position_tickets == frozenset()
+        assert exposure.undetermined_reasons == ()
+        assert request_id in exposure.determined_request_ids
+        assert exposure.tickets_by_request[request_id] == frozenset()
+
     def test_a_resolution_of_submitted_expects_its_matching_tickets(self) -> None:
         request_id = uuid4()
         history = [

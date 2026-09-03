@@ -71,11 +71,17 @@ _EXPOSURE_BY_EVENT: Mapping[ExecutionEventType, _Exposure] = {
     # exhaustiveness test below still passes (they are already mapped),
     # but the UNDETERMINED choice means this module fails closed rather
     # than silently reporting zero exposure for a state it does not yet
-    # know how to read.
+    # know how to read. FILLED now has a real (still unwired) producer
+    # as of Phase B item B3 — its UNDETERMINED entry is deliberately
+    # unchanged: attributing a ticket is still the magic-number search's
+    # job (`_recover_ambiguous_submission`), not this event's own
+    # payload — see `domain/enums.py::ExecutionEventType.FILLED`'s own
+    # docstring.
     ExecutionEventType.SUBMITTED: _Exposure.UNDETERMINED,
     ExecutionEventType.BROKER_ACK: _Exposure.UNDETERMINED,
     ExecutionEventType.FILLED: _Exposure.UNDETERMINED,
     ExecutionEventType.CLOSED: _Exposure.UNDETERMINED,
+    ExecutionEventType.REJECTED: _Exposure.DETERMINED,
 }
 """Total over `ExecutionEventType` — see
 
@@ -196,6 +202,15 @@ def derive_expected_exposure(
                 f"order_request_id {order_request_id} is stuck at SUBMISSION_STARTED "
                 "with its outcome not yet determined"
             )
+            continue
+
+        if event_type is ExecutionEventType.REJECTED:
+            # A definite broker rejection: no position was ever created,
+            # no ticket search needed -- mirrors AMBIGUOUS_OUTCOME_RESOLVED
+            # {submitted=False}'s own zero-exposure shape exactly (Phase B
+            # item B3).
+            determined_request_ids.add(order_request_id)
+            tickets_by_request[order_request_id] = frozenset()
             continue
 
         if event_type is ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED:
