@@ -1221,6 +1221,89 @@ could complete unilaterally.
 
 ---
 
+## 0r. Rebase on current main, plus hard `StrategyArtifact` binding enforcement — done 2026-09-03
+
+Explicit owner instruction (Dutch, this session): rebase onto current
+`main` before continuing, re-confirm D2.2 uses only Core Risk semantics
+(§0p/§0q already did this — verified intact, not re-done), confirm `0 !=
+None` on the outbound open-risk contract (§0q already did this — also
+verified intact), and — the actual new work this slice — hard-enforce
+that a `TradeProposal` is bound to the exact `StrategyArtifact` its
+`TradingAssignment` names, not merely consistent with it after the fact.
+
+**Sync, not a literal `git rebase`.** `agent/contracts` is already
+pushed and Dev 1 messaged that they won't touch it — but a real `git
+rebase` would still rewrite already-pushed commit SHAs and require a
+force-push, exactly the operation CLAUDE.md's git-safety section singles
+out for extra caution. Used `git merge --no-ff origin/main` instead, the
+same non-destructive approach §0q already used successfully — same
+result (fully current with `main`), without rewriting shared history.
+Two merges landed this slice: `origin/main` had moved twice since §0q
+(Dev 3's PAPER_LITE, PR #1, plus Dev 1's D1.5 weekday/weekend session
+policy and a CI fix) — merged cleanly, one real conflict both times in
+`review/DEVIATIONS.md` (both tracks append entries at the same location;
+resolved by keeping every entry, in number order). Full suite green
+after each merge before starting new work, not just at the end.
+
+**`agent_gateway/errors.py::AgentRejectionReason.STRATEGY_ARTIFACT_MISMATCH`
+(new)** and the check in `gateway.py::_evaluate_proposal`:
+`proposal.strategy_artifact_hash != assignment.strategy_artifact_hash`
+now rejects before `_build_trade_intent` is ever called — zero
+`TradeIntent` constructed, a durably audited `REJECTED` outcome instead
+(the same claim→evaluate→settle sequence every other rejection reason
+already goes through, nothing new invented). **Why this mattered even
+though `_build_trade_intent` already ignored the claim:**
+`TradeIntent.strategy_version` has only ever been sourced from
+`assignment.strategy_artifact_hash`, the trusted value, never from the
+proposal's own (unverified) claim — confirmed true again this slice, so
+a mismatch could never have corrupted a constructed `TradeIntent`. But
+silently ignoring a wrong claim, rather than rejecting it, meant an agent
+could run artifact B, report B's hash in every proposal, and be audited
+entirely as artifact A after the fact — nothing durable would ever have
+recorded that its own claim disagreed with what was actually assigned.
+Rejecting makes the disagreement itself part of the audit trail, closing
+that gap.
+
+Evidence: `tests/unit/test_agent_gateway.py::TestStrategyArtifactBinding`
+— the exact adversarial shape requested (valid identity, valid
+assignment, valid context, valid proposal, wrong
+`strategy_artifact_hash` only → rejected, `trade_intent is None`), a
+positive control (matching hash still accepts), and a durable-audit
+proof (`REJECTED` + `RECEIVED` events both present for the rejected
+outcome). Self-review (`/code-review medium`) found the change itself
+clean — checked cross-file callers (`paper_lite_toy_agent.py` already
+populates the field consistently), all existing test fixtures (uniformly
+`"abc123"`, nothing broke), and check ordering — but flagged a real
+process gap: no `status.md` §13 entry existed for this change. Resolved
+by writing this entry here instead of directly editing `status.md`
+myself: `status.md` is Dev 1's actively-edited canonical document (this
+slice's own merges pulled in 259 lines of their concurrent edits to it)
+and the established, working pattern all session — visible in `status.md`
+line 20's own Dev-2 row, which already reflects §0q's `assess_open_risk`
+wiring — is that Dev 1 synthesizes a summary from this file into
+`status.md`'s tracker rather than both sessions editing the same
+document concurrently.
+
+Full gate: ruff/ruff format/mypy clean; `tests/unit` **1059 passed**, 1
+skipped (pre-existing, unrelated), 0 failed. Full gate (unit +
+integration against `crumblr_test_dev2`, including Dev 3's newly-merged
+PAPER_LITE suites): **1331 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+Reaffirmed, not newly built this slice (owner instruction's items 5-7):
+External Supervisor wiring is the explicitly-named *next* slice, not
+this one (§0m's core logic is done, HTTP client/wiring remain open,
+unchanged since §0q). AG-012 stays a cross-track requirement — no
+agent-only lock was built (§0n's proposal stands, unimplemented,
+awaiting Dev 1). Dev 3 gets narrow, stable seams only
+(`AgentMarketContextV1`, translation, `AgentGateway`, the shared
+open-risk input, Supervisor contracts) — no PAPER_LITE orchestration
+logic exists or was added anywhere under this track's ownership; Dev 3's
+own `application/paper_lite*.py` (merged via PR #1, now present after
+this slice's merge) was built entirely on their side.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |

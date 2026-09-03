@@ -119,6 +119,20 @@ class AgentRejectionReason(StrEnum):
     UNKNOWN_ASSIGNMENT = "UNKNOWN_ASSIGNMENT"
     ASSIGNMENT_NOT_OWNED = "ASSIGNMENT_NOT_OWNED"
     ASSIGNMENT_NOT_VALID_AT_TIME = "ASSIGNMENT_NOT_VALID_AT_TIME"
+    STRATEGY_ARTIFACT_MISMATCH = "STRATEGY_ARTIFACT_MISMATCH"
+    """`TradeProposal.strategy_artifact_hash` does not equal the
+
+    `TradingAssignment.strategy_artifact_hash` the agent was actually
+    assigned. `_build_trade_intent` already sources
+    `TradeIntent.strategy_version` exclusively from the trusted
+    `assignment.strategy_artifact_hash`, never from the proposal's own
+    (unverified) claim -- so a mismatch here could never corrupt a
+    constructed `TradeIntent`. It is still refused, explicitly, rather
+    than silently ignored: an agent that ran artifact B, reported B's
+    hash, but gets audited under artifact A's identity (because Crumblr
+    only ever looked at the assignment and never checked the claim)
+    leaves no trace that anything was wrong. Rejecting here makes the
+    disagreement itself part of the durable audit trail."""
     RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
     RISK_FRACTION_OUT_OF_BAND = "RISK_FRACTION_OUT_OF_BAND"
     MISSING_REQUIRED_EVIDENCE = "MISSING_REQUIRED_EVIDENCE"
