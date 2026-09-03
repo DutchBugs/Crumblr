@@ -1,19 +1,22 @@
 # MT5 demo / paper-trading environment.
 #
-# PROVISIONAL VALUES — these encode risk policy, which build.md §29 (Q4-Q8)
-# reserves for an explicit human decision. They are set conservatively so the
-# platform is loadable and testable; they must be confirmed before gate P2
-# (the paper campaign) begins, and the confirmation recorded in status.md §10.
+# The four fractions below are owner-approved policy, not placeholders:
+# review/OWNER_POLICY_V1.md (owner-approved, 2026-09-02), confirming
+# build.md §29 Q7-Q8 (risk budget, maximum drawdown). See
+# review/adr/ADR-011-owner-risk-policy-v1.md and status.md O-008.
+# `max_orders_per_hour`, `max_open_positions` and `min_stop_distance_points`
+# remain engineering-chosen, not owner policy — see D-013's remaining gap
+# in review/DEVIATIONS.md.
 #
 # Fractions are of account equity.
 
 risk:
-  max_risk_per_trade: '0.005'      # 0.5% of equity at risk per trade
-  max_open_risk: '0.02'            # 2% total open risk across positions
-  max_daily_loss: '0.02'           # halt for the day at 2% realised loss
-  max_drawdown: '0.10'             # halt outright at 10% drawdown
+  max_risk_per_trade: '0.02'       # 2.0% of equity at risk per trade
+  max_open_risk: '0.03'            # 3.0% total open risk across positions
+  max_daily_loss: '0.04'           # halt for the day at 4% realised loss
+  max_drawdown: '0.08'             # halt outright at 8% drawdown
   max_orders_per_hour: 6
-  max_open_positions: 1
+  max_open_positions: 10           # operational circuit-breaker, not owner policy — see D-053
   min_stop_distance_points: 50     # 5.0 pips on a 5-digit EUR/USD feed
 
 execution:

@@ -18,8 +18,10 @@ from scripts.run_replay import build_instrument_spec
 from crumblr.application.orchestration import ReplayOrchestrator, RunResult
 from crumblr.config import PlatformConfig, load_config
 from crumblr.domain.enums import Environment, ReasonCode, RiskVerdict, Side
+from crumblr.domain.models import ApprovedOrder, InstrumentSpec
 from crumblr.market_data.synthetic import (
     FaultInjection,
+    GeneratedTick,
     SyntheticMarketConfig,
     generate_ticks,
 )
@@ -81,6 +83,37 @@ def replay(
 
 def _decision_hashes(run: RunResult) -> list[str]:
     return [c.trade_intent.decision_hash for c in run.capsules if c.trade_intent is not None]
+
+
+def _build_order(
+    *,
+    spec: InstrumentSpec,
+    side: Side,
+    tick: GeneratedTick,
+    stop_loss_price: Decimal,
+    take_profit_price: Decimal,
+    volume: Decimal = Decimal("0.05"),
+) -> ApprovedOrder:
+    from uuid import uuid4
+
+    from crumblr.domain.enums import EntryType
+
+    return ApprovedOrder(
+        order_request_id=uuid4(),
+        intent_id=uuid4(),
+        intent_risk_decision_id=uuid4(),
+        supervisor_decision_id=uuid4(),
+        broker_symbol=spec.broker_symbol,
+        side=side,
+        entry_type=EntryType.MARKET,
+        volume=volume,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price,
+        max_slippage_points=20,
+        created_at_utc=tick.received_time_utc,
+        expires_at_utc=tick.received_time_utc.replace(year=2030),
+        environment=Environment.PAPER,
+    )
 
 
 class TestTheFlowRuns:
@@ -283,6 +316,98 @@ class TestSeparationOfPowers:
                 assert intent.stop_loss_price < intent.reference_price
             else:
                 assert intent.stop_loss_price > intent.reference_price
+
+
+class TestMultiplePositionsPermitted:
+    """Owner risk policy v1 (D1.3/D1.4): O-004 withdrawn, `OWNER_POLICY_V1.md`
+
+    §2's own acceptance example proved end to end — the replacement for
+    the deleted `test_one_exposure_policy.py::TestTheReplayNeverStacks`,
+    which asserted the opposite of what the owner now requires.
+
+    Not driven through the agent/strategy replay: `baseline_v1`'s own
+    `already_positioned` guard (`trading_agent/baseline.py`) refuses to
+    pyramid the *same* direction, so a second concurrent position can only
+    occur via a direction reversal while the first is still open — rare
+    enough on a synthetic random walk that forcing it would mean hunting
+    seeds or loosening loss gates until one turns up. Doing that would be
+    tuning against synthetic data in substance even without touching
+    `baseline_v1` itself, which `CLAUDE.md` §4 rules out. Instead this
+    drives `SimulatedBroker.order_send` directly — the same real
+    broker/`PositionState` machinery `TestIdempotency` above exercises —
+    so the proof is end to end through execution and real accounting
+    without depending on the strategy ever choosing to stack.
+    """
+
+    def test_the_broker_may_hold_more_than_one_position(self) -> None:
+        spec = build_instrument_spec()
+        broker = SimulatedBroker(spec, starting_balance=STARTING_BALANCE)
+        ticks = list(generate_ticks(SyntheticMarketConfig(bar_count=5), spec))
+        broker.advance(ticks[0])
+
+        broker.order_send(
+            _build_order(
+                spec=spec,
+                side=Side.BUY,
+                tick=ticks[0],
+                stop_loss_price=ticks[0].bid - Decimal("0.00300"),
+                take_profit_price=ticks[0].ask + Decimal("0.00600"),
+            )
+        )
+        broker.order_send(
+            _build_order(
+                spec=spec,
+                side=Side.SELL,
+                tick=ticks[0],
+                stop_loss_price=ticks[0].ask + Decimal("0.00300"),
+                take_profit_price=ticks[0].bid - Decimal("0.00600"),
+            )
+        )
+
+        assert len(broker.positions()) == 2
+
+    def test_the_resulting_book_is_valued_within_the_owner_budget(self) -> None:
+        """The real book two open positions produce, valued by
+
+        `risk/portfolio_risk.py::assess_open_risk` against the broker's
+        own equity, must fit inside the owner's `max_open_risk` (`0.03`)
+        — proof that real accounting, not a count, is what would gate a
+        third.
+        """
+        from crumblr.risk.portfolio_risk import assess_open_risk
+
+        spec = build_instrument_spec()
+        broker = SimulatedBroker(spec, starting_balance=STARTING_BALANCE)
+        ticks = list(generate_ticks(SyntheticMarketConfig(bar_count=5), spec))
+        broker.advance(ticks[0])
+
+        broker.order_send(
+            _build_order(
+                spec=spec,
+                side=Side.BUY,
+                tick=ticks[0],
+                stop_loss_price=ticks[0].bid - Decimal("0.00300"),
+                take_profit_price=ticks[0].ask + Decimal("0.00600"),
+                volume=Decimal("0.33"),
+            )
+        )
+        broker.order_send(
+            _build_order(
+                spec=spec,
+                side=Side.SELL,
+                tick=ticks[0],
+                stop_loss_price=ticks[0].ask + Decimal("0.00300"),
+                take_profit_price=ticks[0].bid - Decimal("0.00600"),
+                volume=Decimal("0.33"),
+            )
+        )
+
+        assessment = assess_open_risk(
+            broker.positions(), specs={spec.broker_symbol: spec}, equity=broker.equity
+        )
+        assert assessment.is_established
+        assert assessment.fraction is not None
+        assert Decimal("0") < assessment.fraction <= Decimal("0.03")
 
 
 class TestIdempotency:

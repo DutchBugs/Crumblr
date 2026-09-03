@@ -1190,6 +1190,63 @@ mean anything should start here.
   D1.4 exists — not a gate in the CI sense, but a hard functional ceiling
   on this track's own progress (Owner Work Order D2's "done condition").
 
+### D-053 — `max_open_positions` shipped ceiling of 10 is engineering-chosen, not owner policy
+- **Status:** deliberate; named trigger for revisiting
+- **Spec:** `review/OWNER_WORK_ORDERS_2026-09-02.md` D1.3;
+  `review/adr/ADR-011-owner-risk-policy-v1.md` §2.6
+- **Code:** `config/paper.yaml::risk.max_open_positions`,
+  `config.py::RiskConfig.max_open_positions`
+- **Why:** with O-004 withdrawn, position count alone must never again be
+  a refusal reason on its own account — that job now belongs entirely to
+  `max_open_risk`, enforced via `risk/portfolio_risk.py::assess_open_risk`.
+  `max_open_positions` still exists as an operational circuit-breaker so a
+  runaway strategy cannot open unbounded tickets before the risk budget
+  itself would catch it. `10` was derived, not picked: every registered
+  strategy requests a fixed 0.5% per trade today, so the 3% budget itself
+  binds at 6 concurrent positions under current behaviour; `10` sits above
+  that so the ceiling can never silently become a strategy rule again,
+  while staying low enough that hitting it is still worth an operator's
+  attention.
+- **Watch for:** the derivation depends on every strategy requesting
+  roughly 0.5% per trade. If any future strategy requests materially
+  less — below roughly 0.3% — the budget itself would bind above 10
+  positions, and this ceiling should be revisited rather than silently
+  left as the effective limit.
+- **Gate affected:** none directly; a config-only value.
+
+### D-054 — `OPEN_RISK_UNKNOWN` is a BLOCK, and `AgentPlatformState` still collapses two states into one
+- **Status:** deliberate; two adjacent gaps, one pinned by test, one flagged for Dev 2
+- **Spec:** `review/OWNER_WORK_ORDERS_2026-09-02.md` D1.4;
+  `review/adr/ADR-011-owner-risk-policy-v1.md` §2.5, §3
+- **Code:** `risk/policies.py::evaluate()`,
+  `domain/enums.py::ReasonCode.OPEN_RISK_UNKNOWN`,
+  `agent_gateway/market_context.py::AgentPlatformState.open_risk_fraction`
+- **Gap 1 — BLOCK, not HALT.** An unestablished open-risk assessment
+  (an open position with untrustworthy stop geometry) refuses the new
+  trade via `OPEN_RISK_UNKNOWN`, a BLOCK. The platform cannot currently
+  *close* the offending position either way (`close_all_positions` stays
+  unbuilt, D-050), so escalating to HALT would be a permanent brick with
+  no in-system remediation, not a safer outcome. Item 9 (broker-side
+  stop-loss verification) is the correctly-scoped future owner for the
+  system-level judgement this implies. **Trigger:** revisit only once
+  item 9 exists and the platform has a real remediation path for a
+  stopless position — not before, and not as a side effect of an
+  unrelated change (pinned by
+  `tests/unit/test_risk_engine.py
+  ::test_an_unestablished_open_risk_is_a_block_not_a_halt`).
+- **Gap 2 — `AgentPlatformState.open_risk_fraction` cannot distinguish
+  "flat" from "unestablished."** `RiskFraction` is constrained `gt=0`, so
+  both a genuinely flat book (`fraction=0`) and an unestablished
+  assessment (`fraction=None`) have to serialize as `None` on the
+  agent-visible contract — two states Core itself now tells apart
+  collapse into one before an external agent ever sees them. Not fixed
+  here: nothing under `src/crumblr/agent_gateway/` is touched by this
+  slice (confirmed: zero diff, zero new references to `portfolio_risk`/
+  `OPEN_RISK_UNKNOWN`). **Trigger:** Dev 2's own D2.2 (wiring
+  `PortfolioSnapshot.open_risk_fraction` against `assess_open_risk`);
+  recorded in `review/INTEGRATION_NOTICES.md` for their track.
+- **Gate affected:** none directly today.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only
@@ -1235,13 +1292,24 @@ mean anything should start here.
   the one with a live consequence today — see D-031. The rest are M5/M7.
 
 ### D-013 — Risk values in `config/paper.yaml` are placeholders
-- **Status:** provisional — must be confirmed before gate P2
+- **Status:** PARTIALLY RESOLVED 2026-09-02 — the four owner-policy
+  fractions are now confirmed
 - **Spec:** §29 Q7-Q8 reserve risk budget and maximum drawdown for a human
-- **Code:** 0.5% per trade, 2% daily loss, 10% drawdown, 1 open position
-- **Why:** the platform must be loadable to be testable, and no risk value has
-  a permissive default.
-- **Watch for:** these numbers have never been agreed by anyone. They are
-  conservative, which makes them easy to leave unchallenged by accident.
+- **Original code:** 0.5% per trade, 2% daily loss, 10% drawdown, 1 open
+  position
+- **Current state:** `review/OWNER_POLICY_V1.md` (owner-approved,
+  2026-09-02) confirms `max_risk_per_trade=0.02`, `max_open_risk=0.03`,
+  `max_daily_loss=0.04`, `max_drawdown=0.08` — see
+  `review/adr/ADR-011-owner-risk-policy-v1.md` and `status.md` O-008.
+  These four are no longer placeholders.
+- **Remaining gap:** `max_orders_per_hour`, `max_open_positions` (now
+  `10`, reclassified as an operational circuit-breaker — see D-053, not
+  an owner-approved trading rule), and `min_stop_distance_points` remain
+  engineering choices, not owner decisions. `risk.approved_config_version`
+  is still unset — owner approval of the *numbers* is not the same act as
+  the separate, later approval required to enable real submission.
+- **Watch for:** do not read the remaining engineering-chosen fields as
+  owner-approved just because their siblings now are.
 
 ### D-014 — `account_guard.expected_server` was an unmatchable placeholder
 - **Status:** RESOLVED 2026-08-18 — the owner supplied the server
@@ -1336,6 +1404,8 @@ which currently block M1.
 | Q2 hedging or netting account | position model, reconciliation logic |
 | Q3 strategy horizon | bar interval, D-015 calibration, tick-data need |
 | Q4 overnight positions allowed | swap modelling in the cost model |
-| Q7 risk budget per environment | D-013 |
-| Q8 maximum acceptable drawdown | D-013, promotion scorecard |
 | Q12 who may reset a production kill switch | operator workflow around D-011 |
+
+Q7 (risk budget per environment) and Q8 (maximum acceptable drawdown) were
+answered 2026-09-02 by `review/OWNER_POLICY_V1.md` — see D-013 and
+`status.md` O-008.

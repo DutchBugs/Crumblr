@@ -7,6 +7,7 @@ configured must stop the system, not default to something tolerable.
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,41 @@ class TestRiskBudgetCoherence:
             PlatformConfig.model_validate(payload)
 
 
+class TestOwnerRiskPolicyV1:
+    """`review/OWNER_POLICY_V1.md` (owner-approved, 2026-09-02): the four
+
+    risk fractions are confirmed policy, not placeholders — see
+    `review/adr/ADR-011-owner-risk-policy-v1.md`."""
+
+    def test_the_shipped_configuration_carries_the_owner_values(self) -> None:
+        config = load_config(Environment.PAPER, config_dir=REPO_CONFIG_DIR)
+        assert config.risk.max_risk_per_trade == Decimal("0.02")
+        assert config.risk.max_open_risk == Decimal("0.03")
+        assert config.risk.max_daily_loss == Decimal("0.04")
+        assert config.risk.max_drawdown == Decimal("0.08")
+
+    def test_the_shipped_open_position_ceiling_is_not_one(self) -> None:
+        """O-004 withdrawn: the shipped ceiling must no longer be the old
+
+        one-exposure value, or a stale config would silently reimpose the
+        rule the owner withdrew."""
+        config = load_config(Environment.PAPER, config_dir=REPO_CONFIG_DIR)
+        assert config.risk.max_open_positions > 1
+
+    @pytest.mark.parametrize(
+        "field", ["max_risk_per_trade", "max_open_risk", "max_daily_loss", "max_drawdown"]
+    )
+    def test_each_owner_fraction_independently_changes_the_config_version(self, field: str) -> None:
+        baseline = PlatformConfig.model_validate(paper_config_payload())
+        payload = paper_config_payload()
+        # Nudge just this one field; stay inside TestRiskBudgetCoherence's
+        # own validator bounds so the change is accepted, not refused.
+        current = Decimal(payload["risk"][field])
+        payload["risk"][field] = str(current + Decimal("0.001"))
+        changed = PlatformConfig.model_validate(payload)
+        assert changed.config_version != baseline.config_version
+
+
 class TestEnvironmentGuardrails:
     def test_paper_must_require_a_demo_account(self) -> None:
         payload = paper_config_payload()
@@ -203,7 +239,7 @@ class TestOverlayMerging:
         config_dir = write_config_dir(tmp_path, base, {"paper": overlay})
         config = load_config(Environment.PAPER, config_dir=config_dir)
         assert config.trading_agent.strategy_id == "baseline_v1"
-        assert config.risk.max_open_positions == 1
+        assert config.risk.max_open_positions == 10
 
     def test_overlay_overrides_a_single_nested_value(self, tmp_path: Path) -> None:
         payload = paper_config_payload()

@@ -56,7 +56,13 @@ class RiskSessionState:
     realized_pnl: Decimal
     max_drawdown_fraction: Decimal
     max_session_loss_fraction: Decimal
-    open_risk_fraction: Decimal
+    open_risk_fraction: Decimal | None
+    """Owner risk policy v1 (D1.4): `None` means the platform could not
+
+    establish it (an open position with untrustworthy stop geometry) —
+    never a function of `open_position_count` alone any more, and never
+    silently treated as zero. Recovery does not read this field
+    (`recover_session()` below), so its only role today is audit."""
     open_position_count: int
     recorded_at_utc: UtcDatetime
     schema_version: int = SCHEMA_VERSION
@@ -71,7 +77,9 @@ class RiskSessionState:
             "realized_pnl": str(self.realized_pnl),
             "max_drawdown_fraction": str(self.max_drawdown_fraction),
             "max_session_loss_fraction": str(self.max_session_loss_fraction),
-            "open_risk_fraction": str(self.open_risk_fraction),
+            "open_risk_fraction": (
+                None if self.open_risk_fraction is None else str(self.open_risk_fraction)
+            ),
             "open_position_count": self.open_position_count,
             "recorded_at_utc": self.recorded_at_utc.isoformat(),
         }
@@ -257,7 +265,7 @@ def snapshot(
     *,
     trading_day: date,
     realized_pnl: Decimal,
-    open_risk_fraction: Decimal,
+    open_risk_fraction: Decimal | None,
     open_position_count: int,
     recorded_at_utc: UtcDatetime,
 ) -> RiskSessionState:

@@ -63,7 +63,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -110,6 +109,7 @@ from crumblr.market_data.synthetic import snapshot_id_for
 from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, session, trading_window
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
+from crumblr.risk.portfolio_risk import OpenRiskAssessment, assess_open_risk
 from crumblr.risk.session import RiskSessionStore
 from crumblr.trading_agent import registry
 from crumblr.trading_agent.base import AgentContext, FeatureEvidence
@@ -436,15 +436,22 @@ class LiveDecisionOrchestrator:
             instrument_specs=self._instrument_specs,
             now=now,
         )
+        # Owner risk policy v1 (D1.4): real portfolio risk, never a
+        # count-based approximation. One account read, shared between the
+        # portfolio carrier and the assessment.
+        account = _account_state_from_snapshot(
+            account_snapshot, is_demo=self._config.account_guard.require_demo_account
+        )
+        open_risk = assess_open_risk(
+            positions, specs={spec.broker_symbol: spec}, equity=account.equity
+        )
         portfolio = policies.PortfolioState(
-            account=_account_state_from_snapshot(
-                account_snapshot, is_demo=self._config.account_guard.require_demo_account
-            ),
+            account=account,
             open_positions=positions,
             ledger=self._ledger,
             orders_in_last_hour=0,
             seen_decision_hashes=frozenset(self._seen_hashes),
-            open_risk_fraction=self._config.risk.max_risk_per_trade * Decimal(len(positions)),
+            open_risk_fraction=open_risk.fraction,
         )
         risk_decision = policies.evaluate(
             intent, snapshot, spec, portfolio, self._risk_context, self._kill_switch, now=now
@@ -486,7 +493,7 @@ class LiveDecisionOrchestrator:
         capsule = self._seal(
             snapshot, spec, features, intent, risk_decision, supervisor_decision, positions
         )
-        self._persist_session(positions, now)
+        self._persist_session(positions, open_risk, now)
         return LiveDecisionOutcome(capsule=capsule)
 
     # ------------------------------------------------------------------ #
@@ -648,14 +655,28 @@ class LiveDecisionOrchestrator:
         )
         self._recorder.flush()
 
-    def _persist_session(self, positions: tuple[PositionState, ...], now: UtcDatetime) -> None:
+    def _persist_session(
+        self,
+        positions: tuple[PositionState, ...],
+        open_risk: OpenRiskAssessment,
+        now: UtcDatetime,
+    ) -> None:
+        """`open_risk` is threaded in from `decide_once()`'s own assessment
+
+        (owner risk policy v1, D1.4) rather than recomputed here: this
+        method has no `InstrumentSpec` in scope on its own (unlike
+        `ReplayOrchestrator`, which holds one fixed spec for the whole
+        run), and its one caller already computed the real figure — so
+        the persisted number is provably the same one Risk judged
+        against, not a second, independently-derived value that could
+        differ if the account snapshot moved between them."""
         if self._ledger is None or self._current_trading_day is None:
             return
         state = session.snapshot(
             self._ledger,
             trading_day=self._current_trading_day,
             realized_pnl=self._ledger.current_equity - self._ledger.starting_equity,
-            open_risk_fraction=self._config.risk.max_risk_per_trade * Decimal(len(positions)),
+            open_risk_fraction=open_risk.fraction,
             open_position_count=len(positions),
             recorded_at_utc=now,
         )
