@@ -25,6 +25,7 @@ from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.risk.kill_switch import KillSwitch
 from tests.conftest import FIXED_NOW
 from tests.integration._execution_fixtures import (
+    APPROVED_CANARY_ACCOUNT_REF,
     FakeMt5,
     fake_position,
     orchestrator,
@@ -43,7 +44,11 @@ def _fully_approved_config(the_spec: Any) -> Any:
         update={
             "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
             "execution": base_config.execution.model_copy(
-                update={"submission_enabled": True, "feedback_2_0_approved": True}
+                update={
+                    "submission_enabled": True,
+                    "feedback_2_0_approved": True,
+                    "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                }
             ),
         }
     )

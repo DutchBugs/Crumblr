@@ -27,6 +27,7 @@ from crumblr.config import (
     TradingAgentConfig,
 )
 from crumblr.domain.enums import Environment
+from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
@@ -42,15 +43,24 @@ from tests.conftest import FIXED_NOW
 SERVER = "Test-Demo"
 CURRENCY = "EUR"
 LEVERAGE = 30
+LOGIN = 5_000_123
 BROKER_SYMBOL = "EURUSD"
 STRATEGY_VERSION = "0.1.0"
+
+APPROVED_CANARY_ACCOUNT_REF = fingerprint({"login": LOGIN, "server": SERVER})[:16]
+"""The `login_hash` a fully-approved test config's `ExecutionConfig
+
+.approved_canary_account_ref` (Phase B item B7) must match for
+`account_info()`'s own default identity — computed the same way
+`AccountState.login_hash` itself is, never hardcoded, so it cannot
+silently drift from `LOGIN`/`SERVER` above."""
 
 
 def account_info(**overrides: Any) -> Any:
     from types import SimpleNamespace
 
     fields: dict[str, Any] = {
-        "login": 5_000_123,
+        "login": LOGIN,
         "server": SERVER,
         "currency": CURRENCY,
         "trade_mode": 0,
@@ -360,7 +370,7 @@ def orchestrator(
     kill_switch: KillSwitch | None = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
-    client.connect(Mt5Credentials(login=5_000_123, password="x", server=SERVER))
+    client.connect(Mt5Credentials(login=LOGIN, password="x", server=SERVER))
     # The adapter's own clock (broker-clock-offset detection against the
     # fake terminal's fixed tick timestamp) stays constant regardless of
     # what the orchestrator's own clock does — the two are independent.

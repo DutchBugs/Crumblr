@@ -16,9 +16,10 @@ tested, ahead of the engine that will one day call it, the same "build the
 approved shape before the schedule pressure" reasoning `ApprovedOrder`/
 `ExecutionResult` were built under back when they were still unbuilt.
 
-Nine required conditions (review 1.15 §14, `review/FEEDBACK.md` F-049),
-**all** required simultaneously — any one false or unknown closes the
-gate:
+Ten required conditions (review 1.15 §14, `review/FEEDBACK.md` F-049;
+condition 10 added by Phase B item B7, `review/adr/ADR-017-account
+-reference-pin.md`), **all** required simultaneously — any one false or
+unknown closes the gate:
 
     1. environment is DEMO-only (never LIVE)
     2. the observed account is genuinely a demo account
@@ -29,14 +30,17 @@ gate:
     7. the execution adapter is explicitly enabled
     8. the terminal reports AlgoTrading enabled
     9. `feedback.2.0` has given its GO
+    10. the observed account is the exact owner-approved canary account
 
 Conditions 6, 7 and 9 read `config.RiskConfig.approved_config_version` /
 `config.ExecutionConfig.submission_enabled` / `config.ExecutionConfig
 .feedback_2_0_approved` — new durable fields, all defaulting to the
-closed/unapproved state, none set by any shipped config file. The gate is
-therefore proven closed against `config/base.yaml`/`config/paper.yaml` as
-they exist today, not merely "designed to be safe" — see
-`tests/unit/test_submission_gate.py`.
+closed/unapproved state, none set by any shipped config file. Condition
+10 reads `config.ExecutionConfig.approved_canary_account_ref` the same
+way — a `login_hash`-style fingerprint, `None` in every shipped config.
+The gate is therefore proven closed against `config/base.yaml`/
+`config/paper.yaml` as they exist today, not merely "designed to be
+safe" — see `tests/unit/test_execution_gates.py::TestSubmissionGate`.
 """
 
 from __future__ import annotations
@@ -83,6 +87,7 @@ class SubmissionGateContext:
     submission_enabled: bool
     terminal_trade_allowed: bool
     feedback_2_0_approved: bool
+    approved_account_ref: str | None
     now: UtcDatetime
 
 
@@ -90,7 +95,7 @@ def evaluate_submission_gate(context: SubmissionGateContext) -> SubmissionGateDe
     """Collects every failing reason rather than short-circuiting, matching
 
     `evaluate_preflight_gate`/`risk/policies.py::evaluate()`'s own
-    philosophy: an operator seeing one of nine closed legs should see all
+    philosophy: an operator seeing one of ten closed legs should see all
     of them, not just the first.
     """
     reasons: list[ReasonCode] = []
@@ -131,6 +136,9 @@ def evaluate_submission_gate(context: SubmissionGateContext) -> SubmissionGateDe
 
     if not context.feedback_2_0_approved:
         reasons.append(ReasonCode.FEEDBACK_2_0_NOT_APPROVED)
+
+    if context.approved_account_ref != context.account.login_hash:
+        reasons.append(ReasonCode.WRONG_ACCOUNT)
 
     if reasons:
         return SubmissionGateDecision(open=False, reason_codes=tuple(reasons))
