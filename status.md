@@ -9682,6 +9682,71 @@ Next:
 
 ---
 
+## Update 2026-09-03 (seventy-third entry) — Phase 0 PR merged; main independently verified green locally
+
+```text
+Component: none (verification only — no source changed)
+Milestone: DEMO canary work order, Phase 0
+Status before: Phase-0 review done; blocked on a human opening the PR
+Status after:  PR #2 merged; Phase 0 substantively complete pending hosted-CI-run confirmation (no gh/API access to check that directly)
+```
+
+**Completed**
+
+- The user merged PR #2 (`agent/contracts` → `main`) directly on
+  GitHub. `origin/main` fast-forwarded to `3e87384` (a plain merge
+  commit, no additional content beyond what was already reviewed at
+  `76a88c7` — diffstat identical, confirmed by `git log`).
+- Independently re-ran the full local quality gate against the merged
+  `main`, rather than relying only on Dev 2's own DB/gate run or the
+  owner's earlier run-#106 report.
+
+**Evidence**
+
+- `uv run ruff check .` / `uv run ruff format --check .` / `uv run
+  mypy` — all clean (185 source files, 201 formatted).
+- `uv run pytest -q` against `crumblr_test_dev1`: **1358 passed, 3
+  skipped, 0 failed** (312.79s) — the same clean count Dev 2 reported
+  against their own database, now independently reproduced against
+  mine. The two previously-failing `test_agent_decision_path.py`
+  assertions are gone; the 3 skips are the same pre-existing
+  platform-dependent ones (directory-permission tests on Windows,
+  `MetaTrader5` importability) seen throughout this session.
+
+**Problems found**
+
+- None.
+
+**Risk impact**
+
+- None — verification only.
+
+**Decision**
+
+- Treating Phase 0 as substantively complete on the engineering side:
+  the merge is real, the merged code was already reviewed for
+  cross-track conflicts (seventy-second entry), and the full local
+  suite is independently green. The one formal Phase-0 acceptance
+  criterion still unconfirmed is the actual *hosted* GitHub Actions run
+  on `main` post-merge — this environment has no `gh`/API access to
+  check that directly, same limitation noted throughout this session
+  (F-056/F-063/F-065/F-067/F-068). Not claiming that specific box
+  checked; naming the gap honestly rather than assuming it from local
+  evidence alone.
+- Not yet starting Phase B — will confirm with the user given its scale
+  (new real-mutation adapter, real submission side-effect chain, real
+  per-ticket close/flatten, exact account pin, one-shot canary permit,
+  shared final-Risk authority with Dev 2) before branching new work,
+  consistent with this session's practice for every prior
+  safety-critical slice.
+
+Next:
+- Confirm with the user whether to proceed into Phase B now (local
+  evidence is green) or wait for an explicit hosted-CI confirmation
+  first.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
