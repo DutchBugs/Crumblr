@@ -555,6 +555,58 @@ each. `event_id` is content-derived from `(flatten_request_id,
 event_type)`, same idempotence discipline as `execution_events`."""
 
 
+canary_permits = Table(
+    "canary_permits",
+    metadata,
+    Column("permit_id", UUID(as_uuid=True), primary_key=True),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("approved_account_ref", String(32), nullable=False),
+    Column("expected_server", String(128), nullable=False),
+    Column("canonical_symbol", String(64), nullable=False),
+    Column("entry_type", String(16), nullable=False),
+    Column("agent_id", UUID(as_uuid=True), nullable=True),
+    Column("assignment_id", UUID(as_uuid=True), nullable=True),
+    Column("strategy_artifact_hash", String(128), nullable=True),
+    Column("max_requested_risk_fraction", Numeric, nullable=False),
+    Column("issued_by", String(128), nullable=False),
+    Column("reason", Text, nullable=False),
+    _utc_column("issued_at_utc", nullable=False),
+    _utc_column("valid_until_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("schema_version", Integer, nullable=False),
+    Index("ix_canary_permits_order", "sequence"),
+)
+"""Operator-issued one-shot DEMO submission permits (Phase B item B8,
+
+`review/adr/ADR-018-canary-permit.md`). Immutable once issued — whether
+one was ever consumed lives in `canary_permit_consumptions`, a separate
+append-only table, never an update to this one."""
+
+
+canary_permit_consumptions = Table(
+    "canary_permit_consumptions",
+    metadata,
+    Column(
+        "permit_id",
+        UUID(as_uuid=True),
+        ForeignKey("canary_permits.permit_id"),
+        primary_key=True,
+    ),
+    Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("order_request_id", UUID(as_uuid=True), nullable=False),
+    _utc_column("consumed_at_utc", nullable=False),
+    _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
+    Column("schema_version", Integer, nullable=False),
+)
+"""At most one row per `permit_id` — `permit_id` as primary key is what
+
+makes `CanaryPermitStore.consume()`'s "exactly one consumption ever
+wins" claim enforceable by the database itself, the identical idiom
+`execution_requests.order_request_id` already uses for its own
+idempotency-key invariant (`persistence/execution.py
+::ExecutionRequestStore._claim`)."""
+
+
 agent_identities = Table(
     "agent_identities",
     metadata,
@@ -731,6 +783,8 @@ APPEND_ONLY_TABLES: tuple[str, ...] = (
     "execution_events",
     "flatten_requests",
     "flatten_events",
+    "canary_permits",
+    "canary_permit_consumptions",
     "agent_identities",
     "agent_credentials",
     "agent_trading_assignments",
@@ -768,6 +822,8 @@ def append_only_grants(role: str = APPLICATION_ROLE) -> tuple[str, ...]:
             "execution_events",
             "flatten_requests",
             "flatten_events",
+            "canary_permits",
+            "canary_permit_consumptions",
             "agent_identities",
             "agent_credentials",
             "agent_trading_assignments",
