@@ -29,6 +29,7 @@ from crumblr.domain.enums import (
     ReconciliationStatus,
     Regime,
     RiskVerdict,
+    Side,
     SupervisorVerdict,
 )
 from crumblr.domain.models import (
@@ -92,18 +93,12 @@ class FakePortfolioStateProvider:
     account: AccountState
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
-    open_risk_fraction: Decimal | None = Decimal("0")
-    """Defaults to a trustworthy zero so existing fixtures keep exercising
-    the happy path -- Owner Work Order D2.2 (`decision_path.py`
-    `PortfolioSnapshot.open_risk_fraction`). Set to `None` to exercise the
-    fail-closed HALT path (`TestOpenRiskFractionUnknown` below)."""
 
     def current(self) -> PortfolioSnapshot:
         return PortfolioSnapshot(
             account=self.account,
             open_positions=self.open_positions,
             reconciliation_status=self.reconciliation_status,
-            open_risk_fraction=self.open_risk_fraction,
         )
 
 
@@ -137,7 +132,6 @@ class Fixture:
     account: AccountState = field(default_factory=make_account_state)
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
-    open_risk_fraction: Decimal | None = Decimal("0")
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     recorder: RecordingRunRecorder = field(default_factory=RecordingRunRecorder)
@@ -162,7 +156,6 @@ class Fixture:
                 account=self.account,
                 open_positions=self.open_positions,
                 reconciliation_status=self.reconciliation_status,
-                open_risk_fraction=self.open_risk_fraction,
             ),
             "session_store": self.session_store,
             "kill_switch": self.kill_switch,
@@ -316,42 +309,83 @@ class TestHaltVerdictsTripTheKillSwitch:
         )
 
 
-class TestOpenRiskFractionUnknown:
-    """Owner Work Order D2.2 (`review/OWNER_WORK_ORDERS_2026-09-02.md`):
+def untrusted_position(**overrides: Any) -> PositionState:
+    """An open position `risk.portfolio_risk.assess_open_risk` cannot
+    honestly value -- no `stop_loss_price` (`NO_PROTECTIVE_STOP`), the
+    same shape `TestOpenRiskUnknown` below exercises. Mirrors
+    `tests/unit/test_portfolio_risk.py::position()`'s own fixture style."""
+    fields: dict[str, Any] = {
+        "ticket": 900001,
+        "broker_symbol": "EURUSD",
+        "side": Side.BUY,
+        "volume": Decimal("0.10"),
+        "open_price": Decimal("1.08500"),
+        "opened_at_utc": FIXED_NOW,
+        "profit": Decimal("0"),
+        "swap": Decimal("0"),
+        "observed_at_utc": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return PositionState(**fields)
+
+
+class TestOpenRiskUnknown:
+    """Owner Work Order D2.2/D1.4 (`review/OWNER_WORK_ORDERS_2026-09-02.md`):
     the count-based `max_risk_per_trade * len(open_positions)`
-    approximation is gone -- `PortfolioSnapshot.open_risk_fraction` is now
-    the caller's own exact figure, and `None` (the caller could not
-    establish one) must fail closed, never fall back to a silent zero."""
+    approximation is gone. `decision_path.py` now calls Core's own
+    `risk.portfolio_risk.assess_open_risk()` directly over the fixture's
+    `open_positions` -- an untrustworthy position (no protective stop)
+    makes the whole book's open-risk figure `None`, and `risk.policies
+    .evaluate()` itself fails closed on that as `OPEN_RISK_UNKNOWN`, a
+    `BLOCK` (deliberately not a `HALT` -- `review/DEVIATIONS.md` D-054
+    gap 1), never a silent zero."""
 
-    def test_none_open_risk_fraction_halts_before_risk_ever_runs(self) -> None:
-        kill_switch = KillSwitch()
-        fixture = Fixture(open_risk_fraction=None, kill_switch=kill_switch)
-        result, _ = fixture.evaluate(agent_intent())
-
-        assert result.risk_decision is not None
-        assert result.risk_decision.verdict is RiskVerdict.HALT
-        assert ReasonCode.SAFETY_STATE_UNKNOWN in result.risk_decision.reason_codes
-        assert kill_switch.is_halted
-
-    def test_none_open_risk_fraction_never_reaches_the_policy_gate(self) -> None:
-        fixture = Fixture(open_risk_fraction=None)
+    def test_an_untrusted_open_position_blocks_before_the_policy_gate(self) -> None:
+        fixture = Fixture(open_positions=(untrusted_position(),))
         result, recorder = fixture.evaluate(agent_intent())
 
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.OPEN_RISK_UNKNOWN in result.risk_decision.reason_codes
         assert result.supervisor_decision is None
         assert result.capsule.supervisor_decision is None
         assert not any(source == "supervisor" for _, _, _, source in recorder.events)
 
-    def test_none_open_risk_fraction_still_seals_a_capsule(self) -> None:
-        fixture = Fixture(open_risk_fraction=None)
+    def test_an_untrusted_open_position_does_not_halt_the_kill_switch(self) -> None:
+        """A BLOCK, not a HALT -- `_trip()` is only ever called on a
+        `RiskVerdict.HALT` (see `evaluate_agent_trade_intent`), so an
+        untrusted-position BLOCK must leave the switch untouched."""
+        kill_switch = KillSwitch()
+        fixture = Fixture(open_positions=(untrusted_position(),), kill_switch=kill_switch)
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert not kill_switch.is_halted
+
+    def test_an_untrusted_open_position_still_seals_a_capsule(self) -> None:
+        fixture = Fixture(open_positions=(untrusted_position(),))
         result, recorder = fixture.evaluate(agent_intent())
 
         assert result.capsule.risk_decision == result.risk_decision
         assert recorder.sealed == [result.capsule]
 
-    def test_a_trustworthy_zero_still_reaches_approve(self) -> None:
-        """Regression guard: `open_risk_fraction=Decimal("0")` is not the
-        same value as `None` and must not be treated as unknown."""
-        fixture = Fixture(open_risk_fraction=Decimal("0"))
+    def test_a_genuinely_flat_book_still_reaches_approve(self) -> None:
+        """Regression guard: an empty `open_positions` is established,
+        trustworthy zero risk (`assess_open_risk(() , ...)`), not
+        `None` -- the common case must not fail closed."""
+        fixture = Fixture(open_positions=())
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+    def test_a_trustworthy_stopped_position_still_reaches_approve(self) -> None:
+        """A position with real protective-stop geometry is established
+        risk, not unknown -- only *untrustworthy* geometry fails closed."""
+        fixture = Fixture(open_positions=(untrusted_position(stop_loss_price=Decimal("1.08000")),))
         result, _ = fixture.evaluate(agent_intent())
 
         assert result.risk_decision is not None

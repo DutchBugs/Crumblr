@@ -61,15 +61,26 @@ before `feedback.2.0` could treat agent-driven submission as real) --
 this narrows the staleness window, it does not close it.
 
 **Exact open risk, not a count-based approximation (Owner Policy v1,
-`review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2).** The owner's superseding
-policy allows multiple, differently-sized open positions within one total
-open-risk budget -- `max_risk_per_trade * len(open_positions)` (this
-module's own earlier approximation, now removed) is structurally wrong
-the moment two positions can carry different risk. `PortfolioSnapshot
-.open_risk_fraction` must be the caller's own exact figure (D1.4's
-Core-owned seam, once it exists); `None` means the caller could not
-establish one, and this module fails closed on that -- a `RiskVerdict.HALT`
-before Risk evaluation ever runs, never a silent zero.
+`review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2, D1.4).** The owner's
+superseding policy allows multiple, differently-sized open positions
+within one total open-risk budget -- `max_risk_per_trade *
+len(open_positions)` (this module's own earlier approximation, now
+removed) is structurally wrong the moment two positions can carry
+different risk. This module now calls Core's own
+`risk.portfolio_risk.assess_open_risk()` directly, the same
+single-authority call `application/live_decision.py` makes, over
+`portfolio.open_positions` and a `{spec.broker_symbol: spec}` mapping --
+correct under today's single-instrument-platform scope, the same
+assumption that call site already relies on. The result (`Decimal |
+None`) flows straight into `policies.PortfolioState.open_risk_fraction`
+unmodified: `policies.evaluate()` itself already fails closed on `None`
+(`ReasonCode.OPEN_RISK_UNKNOWN`, a `BLOCK` -- deliberately not a `HALT`,
+since there is no in-system remediation path for a stopless position
+yet, `review/DEVIATIONS.md` D-054 gap 1). This module does not
+re-implement that fail-closed check itself -- doing so once produced a
+weaker, diverging `HALT`-based version of a decision Core already owns
+correctly (D-052's original design, superseded here now that D1.4
+exists).
 """
 
 from __future__ import annotations
@@ -100,10 +111,10 @@ from crumblr.domain.models import (
     TradeIntent,
     VersionTag,
 )
-from crumblr.domain.money import RiskFraction
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.risk import policies, trading_window
 from crumblr.risk.kill_switch import KillSwitch
+from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import RiskSessionStore, recover_session
 from crumblr.trading_agent.base import FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
@@ -133,21 +144,17 @@ class PortfolioSnapshot:
     """One coherent account/position observation, pre-resolved by the
     caller -- this module never fetches or derives either field itself.
 
-    `open_risk_fraction` must be the exact current total open risk across
-    all positions (Owner Policy v1,
-    `review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2) -- never approximated
-    by this module as `max_risk_per_trade * len(open_positions)`, which is
-    structurally wrong once differently-sized positions are allowed.
-    `None` means the caller could not establish a trustworthy figure (no
-    Core-owned exact-open-risk seam wired up yet, or an open position
-    lacks trustworthy protective-stop/risk geometry) -- see the module
-    docstring for the fail-closed handling that triggers.
+    No `open_risk_fraction` here: this module derives that itself, from
+    `open_positions` plus the current instrument `spec`, via Core's own
+    `risk.portfolio_risk.assess_open_risk()` (see the module docstring's
+    "Exact open risk" section) -- a `PortfolioStateProvider` only ever
+    needs to answer "what does the broker/account currently show", never
+    "what does Risk Policy do with that".
     """
 
     account: AccountState
     open_positions: tuple[PositionState, ...]
     reconciliation_status: ReconciliationStatus
-    open_risk_fraction: RiskFraction | None
 
 
 @dataclass(frozen=True)
@@ -231,46 +238,6 @@ def evaluate_agent_trade_intent(
         source="agent_gateway",
     )
 
-    if portfolio.open_risk_fraction is None:
-        # Owner Policy v1 (D2.2): no honest open-risk figure, no
-        # evaluation -- fail closed before Risk even runs, never a silent
-        # zero. `policies.PortfolioState.open_risk_fraction` is a required
-        # `Decimal`, not optional, so there is no value this module could
-        # pass it that would not misrepresent what is actually known.
-        risk_decision = _open_risk_unknown_decision(intent, config=config, now=now)
-        recorder.record(
-            risk_decision,
-            correlation_id=snapshot.snapshot_id,
-            occurred_at_utc=snapshot.event_time_utc,
-            source="risk_engine",
-        )
-        _trip(
-            kill_switch,
-            recorder,
-            reason_codes=risk_decision.reason_codes,
-            tripped_by="risk_engine",
-            occurred_at_utc=now,
-            correlation_id=snapshot.snapshot_id,
-        )
-        capsule = _seal(
-            outcome_id=outcome_id,
-            snapshot=snapshot,
-            spec=spec,
-            features=features,
-            intent=intent,
-            risk_decision=risk_decision,
-            supervisor_decision=None,
-            positions=portfolio.open_positions,
-            strategy_version=strategy_version,
-            risk_config_version=config.config_version,
-            environment=environment,
-            code_commit=code_commit,
-        )
-        recorder.seal(capsule)
-        return AgentDecisionPathResult(
-            capsule=capsule, risk_decision=risk_decision, supervisor_decision=None
-        )
-
     # AG-012: recovered fresh on every call, deliberately never cached
     # across calls -- see the module docstring.
     recovery = recover_session(
@@ -290,13 +257,25 @@ def evaluate_agent_trade_intent(
             detail=recovery.detail,
         )
 
+    # Owner risk policy v1 (D1.4): the real, whole-book figure, never the
+    # old `max_risk_per_trade * len(open_positions)` approximation.
+    # `{spec.broker_symbol: spec}` mirrors `live_decision.py`'s own call
+    # exactly -- correct today because the platform is single-instrument;
+    # `None` (untrustworthy/missing stop geometry on an open position)
+    # flows straight into `PortfolioState` unmodified and `policies
+    # .evaluate()` fails closed on it itself (see the module docstring).
+    open_risk = assess_open_risk(
+        portfolio.open_positions,
+        specs={spec.broker_symbol: spec},
+        equity=portfolio.account.equity,
+    )
     risk_portfolio = policies.PortfolioState(
         account=portfolio.account,
         open_positions=portfolio.open_positions,
         ledger=recovery.ledger,
         orders_in_last_hour=orders_in_last_hour,
         seen_decision_hashes=seen_decision_hashes,
-        open_risk_fraction=portfolio.open_risk_fraction,
+        open_risk_fraction=open_risk.fraction,
     )
     risk_decision = policies.evaluate(
         intent,
@@ -430,29 +409,6 @@ def _trip(
         source="risk_engine",
     )
     recorder.flush()
-
-
-def _open_risk_unknown_decision(
-    intent: TradeIntent, *, config: PlatformConfig, now: UtcDatetime
-) -> RiskDecision:
-    """Fail-closed HALT when the caller could not establish the exact
-    total open risk (Owner Policy v1, D2.2 / D1.4 -- see the module
-    docstring). Constructed directly rather than via
-    `risk.policies.evaluate()`/its private `_refuse()`: this refusal
-    happens *before* Risk evaluation can even run, since
-    `policies.PortfolioState.open_risk_fraction` is a required `Decimal`,
-    not optional.
-    """
-    return RiskDecision(
-        decision_id=uuid5(
-            NAMESPACE_URL, f"crumblr:agent-risk:{intent.decision_hash}:open_risk_unknown"
-        ),
-        intent_id=intent.intent_id,
-        verdict=RiskVerdict.HALT,
-        reason_codes=(ReasonCode.SAFETY_STATE_UNKNOWN,),
-        decided_at_utc=now,
-        risk_config_version=config.config_version,
-    )
 
 
 def _risk_context(config: PlatformConfig) -> policies.RiskContext:

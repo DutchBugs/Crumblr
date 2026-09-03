@@ -16,6 +16,7 @@ nothing here replaces or feeds them yet.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Self
 from uuid import UUID
@@ -25,7 +26,7 @@ from pydantic import Field, computed_field, model_validator
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import DIRECTIONAL_SIDES, Contract, Symbol, VersionTag
-from crumblr.domain.money import Price, RiskFraction
+from crumblr.domain.money import ExactDecimal, Price, RiskFraction
 from crumblr.domain.timeutils import UtcDatetime
 
 _MAX_REASON_CODES = 20
@@ -57,6 +58,19 @@ Gateway rejects that case itself, as a normal, audited
 (`AgentGateway._evaluate_proposal`), not as a `pydantic.ValidationError`
 at the contract boundary. Only the count ceiling and each individual
 code's own shape are enforced here."""
+
+OpenRiskFraction = Annotated[ExactDecimal, Field(ge=Decimal(0), le=Decimal(1))]
+"""Total open risk across the whole book, in `[0, 1]` — unlike
+`domain.money.RiskFraction` (a *requested* per-trade risk, which cannot
+honestly be zero: `gt=0`), a flat book's total open risk legitimately
+**is** zero. `agent_gateway/market_context.py::AgentPlatformState` used
+to reuse `RiskFraction` for this field, which meant a genuinely flat book
+(`Decimal("0")`) could not even construct — `RiskFraction`'s own `gt=0`
+would reject it — so every caller had nothing to pass but `None`,
+collapsing "flat" and "could not be established" into the same
+wire value (`review/DEVIATIONS.md` D-054 gap 2, flagged by Dev 1 after
+D1.4). `None` still means "could not be established"; `Decimal("0")` now
+means "a trustworthy figure, currently flat.\""""
 
 
 class AgentRole(StrEnum):

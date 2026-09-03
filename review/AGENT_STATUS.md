@@ -1128,6 +1128,99 @@ D2.5 (wiring) is the next concrete, unblocked Dev-2 item.
 
 ---
 
+## 0q. D1.4 landed — real `assess_open_risk` wiring supersedes §0p's interim design, plus an outbound-contract fix (D-054 gap 2) — done 2026-09-03
+
+Dev 1 (`crumblr-68`) shipped D1.4 on `main` (`b2a07a5`/`31c74cf`,
+`risk/portfolio_risk.py::assess_open_risk`) and pinged this track per the
+handshake §0p asked for. Merged `origin/main` into `agent/contracts`
+(`c020051`, one real conflict — both branches had appended a
+`review/DEVIATIONS.md` entry at the same location; resolved by keeping
+both, D-052 then D-053/D-054 in order) rather than leave a citation
+dangling: a self-review pass on an unrelated same-day fix (below) flagged
+that my own draft already cited "D-054 gap 2" before that entry existed
+on this branch, and the honest fix was to actually bring it in, not
+soften the wording around a merge I owed anyway.
+
+**§0p's interim design is now superseded, not merely completed.**
+`PortfolioSnapshot.open_risk_fraction` — the required, caller-supplied
+field §0p added, with its own `RiskVerdict.HALT` pre-check on `None` — is
+gone. D1.4 shipped `assess_open_risk(positions, *, specs, equity) ->
+OpenRiskAssessment`, the exact single-authority whole-book computation
+`application/live_decision.py` itself now calls; `decision_path.py` calls
+it the same way, directly, over `portfolio.open_positions` and
+`{spec.broker_symbol: spec}` (correct today under this platform's
+single-instrument scope — the same assumption `live_decision.py`'s own
+call site relies on), and passes the `Decimal | None` result straight
+into `policies.PortfolioState.open_risk_fraction` unmodified. The interim
+HALT pre-check was deleted, not kept as a belt-and-braces extra: Core's
+own `risk.policies.evaluate()` already fails closed on `None` itself
+(`ReasonCode.OPEN_RISK_UNKNOWN`, a `BLOCK` — deliberately not a `HALT`,
+`review/DEVIATIONS.md` D-054 gap 1's own reasoning: no in-system
+remediation path exists yet for a stopless position, so a HALT would be a
+permanent brick, not a safer outcome). Keeping my own parallel HALT-based
+check would have been a second, weaker, diverging reimplementation of a
+decision Core already owns correctly — exactly what D2.1 ("consume Owner
+Policy v1; do not duplicate it") warns against. `PortfolioSnapshot`
+itself shrank back to `account`/`open_positions`/`reconciliation_status`
+— a `PortfolioStateProvider` only ever answers "what does the
+broker/account show", never "what does Risk Policy do with that", which
+is one field fewer any future genuine LIVE_SHADOW implementation (Dev 1's
+or otherwise) needs to satisfy.
+
+**Separately, D-054 gap 2 (flagged by Dev 1 in the same message):**
+`agent_gateway/market_context.py::AgentPlatformState.open_risk_fraction`
+was typed `domain.money.RiskFraction`, which requires `gt=0` — a
+genuinely flat book (`Decimal("0")`) could never construct, so every
+caller had nothing honest to pass but `None`, collapsing "flat" and
+"could not be established" into the same wire value on the
+agent-visible outbound context. Fixed with a new local type,
+`agent_gateway/contracts.py::OpenRiskFraction`
+(`Annotated[ExactDecimal, Field(ge=0, le=1)]` — composed from the
+existing float-rejecting `ExactDecimal` rather than duplicating that
+validator, verified by hand that the composition actually enforces both
+constraints before relying on it), applied to both
+`AgentPlatformState.open_risk_fraction` and
+`build_agent_market_context_v1`'s matching parameter. Nothing populates
+this field with a real value yet — outbound context issuance
+(`gateway.py::issue_context_bundle` or equivalent) doesn't exist — so
+this closes the representational gap only; wiring a real value through
+is separate, unblocked future work.
+
+Self-review (`/code-review medium`) ran twice this slice: first pass
+correctly caught the dangling `D-054` citation (before the merge) as a
+genuine CLAUDE.md §2/§3 violation — three permanent cross-references to
+an entry that didn't exist on this branch yet; second pass after the
+merge and the `assess_open_risk` rewrite found nothing further.
+
+Evidence: `tests/unit/test_agent_decision_path.py::TestOpenRiskUnknown`
+(rewritten from `TestOpenRiskFractionUnknown` — now exercises the real
+mechanism: an open position with no protective stop drives
+`assess_open_risk` to `None`, proving the resulting `BLOCK`/
+`OPEN_RISK_UNKNOWN`, that it does *not* trip the kill switch (a BLOCK,
+not a HALT — `_trip()` is only ever called on HALT), that a capsule is
+still sealed, that a genuinely flat book reaches `APPROVE`, and that a
+position with real stop geometry reaches `APPROVE` too — untrustworthy
+geometry fails closed, not risk itself);
+`tests/unit/test_agent_market_context.py
+::test_a_genuinely_flat_book_constructs_as_zero_not_none`. Full unit
+suite (including Dev 1's own D1.4 tests, now merged in) **1010 passed**,
+1 skipped (pre-existing, unrelated), 0 failed; ruff/ruff format/mypy
+clean (175 source files). Full gate after (unit + integration against
+`crumblr_test_dev2`): **1280 passed**, 3 skipped (pre-existing,
+unrelated), 0 failed.
+
+`review/DEVIATIONS.md` D-052 marked RESOLVED, D-054 gap 2 marked
+RESOLVED (gap 1 remains Dev 1's own deliberate, unrelated design choice).
+Replied to Dev 1 confirming no numbering collision and flagging the
+`config/paper.yaml` staleness (resolved by their same D1.2 slice, seen
+after replying — no further action needed).
+
+This is D2.1 and D2.2 both now fully, not partially, done — the last
+open item from Owner Work Order D2's "done condition" list this track
+could complete unilaterally.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |

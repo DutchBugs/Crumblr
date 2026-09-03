@@ -42,10 +42,10 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from crumblr.agent_gateway.contracts import PolicyHints
+from crumblr.agent_gateway.contracts import OpenRiskFraction, PolicyHints
 from crumblr.domain.enums import DataQuality, KillSwitchState, ReconciliationStatus, SessionState
 from crumblr.domain.models import Bar, Contract, InstrumentSpec, MarketSnapshot, Symbol, VersionTag
-from crumblr.domain.money import ExactDecimal, Price, RiskFraction, Volume
+from crumblr.domain.money import ExactDecimal, Price, Volume
 from crumblr.domain.timeutils import UtcDatetime
 
 MARKET_CONTEXT_SCHEMA_VERSION: Literal["1.0"] = "1.0"
@@ -121,6 +121,14 @@ class AgentPlatformState(Contract):
     (review finding F-002). `feature_snapshot_id` is the `agent_context_v1`
     binding (AG-006) -- an audit/context-evidence anchor, still not
     strategy analysis.
+
+    `open_risk_fraction` is `OpenRiskFraction`
+    (`agent_gateway/contracts.py`), not `domain.money.RiskFraction` --
+    `RiskFraction` requires `gt=0`, so a genuinely flat book could never
+    construct as `Decimal("0")` and every caller had nothing to pass but
+    `None`, collapsing "flat" and "could not be established" into the
+    same wire value. `None` still means the figure could not be
+    established; a numeric value, including `Decimal("0")`, means it was.
     """
 
     session_state: SessionState
@@ -128,7 +136,7 @@ class AgentPlatformState(Contract):
     reconciliation_status: ReconciliationStatus
     feature_snapshot_id: UUID
     open_position_count: int
-    open_risk_fraction: RiskFraction | None = None
+    open_risk_fraction: OpenRiskFraction | None = None
 
 
 class AgentMarketContextV1(Contract):
@@ -163,7 +171,7 @@ def build_agent_market_context_v1(
     reconciliation_status: ReconciliationStatus,
     feature_snapshot_id: UUID,
     open_position_count: int,
-    open_risk_fraction: RiskFraction | None = None,
+    open_risk_fraction: OpenRiskFraction | None = None,
     policy_hints: PolicyHints | None = None,
     max_bars: int = DEFAULT_MAX_BARS,
 ) -> AgentMarketContextV1:
