@@ -9467,7 +9467,13 @@ Status after:  BUILDING (all 4 items of the work order shipped; item 9 was the l
   ::TestAG012FreshSessionRecoveryEveryCall` failures named in the
   sixty-ninth entry (PL-006) — unrelated to any file this item touches,
   unchanged in count or identity. 1336 - 1317 (PL-006's own baseline) =
-  19, exactly the new tests added here; no other regression.
+  19, exactly the new tests added here; no other regression. **Update
+  same day, via Dev 2:** already fixed on their side, pushed as
+  `d62722d` on `agent/contracts` — held there deliberately (not merged
+  to `main` pending their own review), so `main`'s own suite correctly
+  still shows the pre-fix assertions failing against PL-006's new
+  behavior until that branch merges. Not stale or untracked; just not
+  yet on `main`.
 - Determinism: `scripts/run_replay.py --bars 600` run twice via
   PowerShell (`2>$null | Out-File`, stdout only — the Bash tool's own
   console codepage cannot encode the script's box-drawing output when
