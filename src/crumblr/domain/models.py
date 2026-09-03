@@ -10,7 +10,7 @@ actually immutable all the way down.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Self
 from uuid import UUID
@@ -968,3 +968,90 @@ class DecisionCapsule(Contract):
                 ),
             }
         )
+
+
+class CanaryPermit(Contract):
+    """An operator-issued, one-shot permission to attempt exactly one
+
+    real DEMO submission (Phase B item B8,
+    `review/adr/ADR-018-canary-permit.md`). Never itself a trading
+    decision — a narrow, revocable-by-expiry operational restriction
+    layered on top of every other gate that must independently also
+    pass. Durable, never mutated: `persistence/canary_permit.py
+    ::CanaryPermitStore.consume()` records whether it was used in a
+    separate, append-only row (`CanaryPermitConsumption`), never by
+    updating this one.
+    """
+
+    permit_id: UUID
+    approved_account_ref: str
+    """`login_hash`-style fingerprint (`fingerprint({"login": ...,
+
+    "server": ...})[:16]`), matching `ExecutionConfig
+    .approved_canary_account_ref` (Phase B item B7) exactly — never the
+    raw account number."""
+    expected_server: Annotated[str, Field(min_length=1, max_length=128)]
+    canonical_symbol: str
+    entry_type: EntryType
+
+    agent_id: UUID | None = None
+    assignment_id: UUID | None = None
+    strategy_artifact_hash: VersionTag | None = None
+    """Set together, or not at all: an agent-driven canary binds all
+
+    three; a canary driven by an internal strategy (`baseline_v1`/
+    `ict_v1`) binds none of them. A partial identity binding would scope
+    nothing."""
+
+    max_requested_risk_fraction: RiskFraction
+    """The owner-chosen cap for this one attempt. Never defaulted or
+
+    inferred from `RiskConfig.max_risk_per_trade` — the reviewer's own
+    0.25%-of-equity recommendation is explicitly not owner-approved
+    policy, so this field is never given a value anywhere in this
+    codebase; an operator supplies it at issuance time only."""
+
+    issued_by: Annotated[str, Field(min_length=1, max_length=128)]
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+    issued_at_utc: UtcDatetime
+    valid_until_utc: UtcDatetime
+
+    @model_validator(mode="after")
+    def _check_permit(self) -> Self:
+        if self.canonical_symbol != "EUR/USD":
+            raise ValueError("the first canary is EUR/USD only")
+        if self.entry_type is not EntryType.MARKET:
+            raise ValueError("the first canary is MARKET-entry only")
+        agent_fields = (self.agent_id, self.assignment_id, self.strategy_artifact_hash)
+        if any(agent_fields) and not all(agent_fields):
+            raise ValueError(
+                "agent_id/assignment_id/strategy_artifact_hash must be all-set "
+                "(agent-driven canary) or all-None (internally-strategy-driven) "
+                "-- a partial identity binding scopes nothing"
+            )
+        if self.valid_until_utc <= self.issued_at_utc:
+            raise ValueError("valid_until_utc must be after issued_at_utc")
+        if self.valid_until_utc - self.issued_at_utc > timedelta(hours=24):
+            raise ValueError(
+                "canary permit validity window exceeds 24h -- 'a short "
+                "validity window' per the owner's own wording; a longer "
+                "window is a new engineering decision, not a config typo "
+                "(mirrors D-053's own engineering-chosen-not-owner-policy "
+                "framing)"
+            )
+        return self
+
+
+class CanaryPermitConsumption(Contract):
+    """The one durable record of a canary permit having been used
+
+    (Phase B item B8). At most one of these can ever exist per
+    `permit_id` — `CanaryPermitStore.consume()`'s atomic
+    `INSERT ... ON CONFLICT DO NOTHING RETURNING`, mirroring
+    `persistence/execution.py::ExecutionRequestStore._claim`, is what
+    enforces that, not this model.
+    """
+
+    permit_id: UUID
+    order_request_id: UUID
+    consumed_at_utc: UtcDatetime

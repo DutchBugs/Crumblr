@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `939acf8` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), independently re-verified green locally. **Phase B slice 1 (B4, `ADR-015`) shipped** — ambiguous-recovery fails closed/HALTs on >1 matching broker positions. **Phase B slice 2 (B1+B2, `ADR-016`) shipped** — `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real, tested `order_send` adapter, deliberately **not wired into `ExecutionOrchestrator`** yet. **Phase B slice 3 (B7, `ADR-017`) shipped** — `SubmissionGate` tenth condition, an owner-approval-gated exact account-reference pin (`login_hash`-style fingerprint, never the raw account number); found and routed around a real landmine (D-046: setting the general `AccountGuardConfig.expected_login` would silently block the live `LiveReader`/`live_decision.py` path — confirmed 4 of 5 `RiskContext` call sites hardcode `expected_login=None`, only replay reads it) by scoping the new leg to `SubmissionGateContext`'s own fresh per-pass account read instead; also caught and fixed a second F-062-shaped `config_version` circularity before shipping. Full suite 1380 passed/3 skips/0 failed. B3/B5/B8 remain (B6 explicitly deferred by the work order until continuous-DEMO promotion), plus Phase C/AG-012 before B1+B2's adapter can be wired in. NEXT: decide and plan the next Phase B slice with the user (B8 canary permit, B3 outcome normalization, or B5 real close/flatten). BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, 4 of 6 slices shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine — setting the general `AccountGuardConfig.expected_login` would've silently blocked the live `LiveReader` path) · B8 (`ADR-018`, durable atomic one-shot canary permit — `CanaryPermitStore`, proven race-safe under real concurrency; a real PostgreSQL grant constraint, append-only-only tables, meant consumption had to be a second row, never an update). All four deliberately **not wired into `ExecutionOrchestrator`** — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet. Full suite 1403 passed/3 skips/0 failed. B3 (outcome normalization) and B5 (real close/flatten) remain (B6 explicitly deferred by the work order until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (B3 or B5). BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -10105,6 +10105,115 @@ Next:
   normalization), B5 (real per-ticket close/flatten), B8 (one-shot
   canary permit) remain, plus Phase C/AG-012 before B1+B2's adapter can
   be wired in.
+
+---
+
+## Update 2026-09-03 (seventy-seventh entry) — Phase B slice 4: one-shot DEMO canary permit (B8)
+
+```text
+Component: domain/models.py, persistence/schema.py, persistence/canary_permit.py (new), migrations/versions/20260903_e91f4a7c2b53
+Milestone: DEMO canary work order, Phase B, item B8 — slice 4 of the Phase-B punch list
+Status before: B1/B2/B4/B7 shipped; B3/B5/B8 not started
+Status after:  B8 shipped; B3/B5 remain, plus Phase C/AG-012 before B1+B2's adapter can be wired in
+```
+
+**A structural constraint that shaped the design.** Confirmed by direct
+read: `persistence/schema.py::APPEND_ONLY_TABLES`/`append_only_grants()`
+is a real PostgreSQL grant restriction (`GRANT SELECT, INSERT` only) for
+**every** current table — no table's application role may ever `UPDATE`.
+"Consuming" a permit therefore cannot be an in-place update of the
+issued row; it is a second, append-only fact
+(`canary_permit_consumptions`, `permit_id` as its own primary key),
+mirroring `execution_requests.order_request_id`'s own idempotency-key
+enforcement exactly (`ExecutionRequestStore._claim`).
+
+**Completed**
+
+- New `domain/models.py::CanaryPermit`/`CanaryPermitConsumption`.
+  `CanaryPermit`'s own validator refuses at construction time: a
+  non-EUR/USD symbol, a non-MARKET entry type, a partial agent/
+  assignment/strategy-artifact identity binding (all-set or all-None —
+  a partial binding scopes nothing), a `valid_until_utc` not after
+  `issued_at_utc`, and a validity window longer than 24h (a named,
+  reversible engineering choice, not owner policy — same framing as
+  D-053's `max_open_positions`). Reuses `RiskFraction`
+  (`domain/money.py`) directly for the risk cap — no new numeric type.
+  `approved_account_ref` reuses B7's own `login_hash`-style fingerprint,
+  never the raw account number.
+- New `persistence/canary_permit.py::CanaryPermitStore` —
+  `issue()`/`permit_for()`/`consumption_for()`/`consume()`.
+  `consume()` reads the permit first and refuses `EXPIRED` *before*
+  attempting any insert (an expired permit can never be consumed, even
+  by the first caller to try) — then attempts the atomic
+  `INSERT ... ON CONFLICT (permit_id) DO NOTHING RETURNING`, mirroring
+  `ExecutionRequestStore._claim` exactly; a loss reads back the existing
+  row and reports which `order_request_id` actually holds it, never
+  silently succeeding for the loser of a race.
+- Two new append-only tables (`canary_permits`,
+  `canary_permit_consumptions`) + Alembic migration
+  `20260903_e91f4a7c2b53`, both added to `APPEND_ONLY_TABLES` — picked
+  up automatically by `test_migrations.py`'s own generic, table-list-
+  driven coverage (confirmed by running it, not assumed).
+- `review/adr/ADR-018-canary-permit.md` written — checked against
+  `build.md`'s own "Gate P4 — guarded live canary" section (one symbol,
+  one strategy, tight risk budget, manual approval) before concluding
+  this item implements the spec rather than departing from it; no new
+  `review/DEVIATIONS.md` entry.
+- **Zero touches to `application/execution.py` or `agent_gateway/`** —
+  confirmed directly via `git status`/`git diff --stat`, not merely
+  intended: this item stays exactly as unwired as B1+B2, for the
+  identical reason (Phase C/AG-012 doesn't exist yet).
+
+**Evidence**
+
+- New tests: `tests/unit/test_canary_permit.py` — 14 (every validator
+  branch, both agent-driven and internal-strategy-driven permits
+  constructing cleanly). `tests/integration/test_canary_permit_store.py`
+  — 9, including a real-concurrency proof (10 threads racing
+  `consume()` on one permit against real PostgreSQL, exactly 1
+  `CONSUMED` / 9 `ALREADY_CONSUMED`, exactly 1 row ever inserted),
+  mirroring `test_agent_gateway_store.py
+  ::TestRateLimitIsAtomicUnderRealConcurrency`'s own shape. 23 new tests
+  total.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (190 source files).
+- Full suite: **1403 passed, 3 pre-existing skips, 0 failed** (294.65s)
+  — 1380 (post-B7 baseline) + 23 new, exactly accounted for.
+- Determinism: `scripts/run_replay.py --bars 600` run twice (PowerShell,
+  stdout only), MD5 identical (`704967823f258496922a9b16c4d29788` — same
+  hash as every prior slice).
+- `tests/integration/test_migrations.py` run directly to validate the
+  new migration against real PostgreSQL before trusting the full-suite
+  run alone — 8 passed.
+
+**Problems found**
+
+- None specific to this item's own logic.
+
+**Risk impact**
+
+- None: no shipped config or code path references `CanaryPermitStore`
+  anywhere; the tables exist and are fully tested, but nothing durable
+  is ever written to them by any real run today.
+- The mechanism itself is a genuine forward-looking safety asset:
+  atomicity/expiry are proven under real concurrency now, ahead of the
+  wiring that will depend on them being correct.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/phase-b-4-canary-permit` branch, `[core]`
+  prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational — no
+  cross-track surface change expected).
+- Plan and implement the next Phase B slice — B3 (durable outcome
+  normalization) or B5 (real per-ticket close/flatten) remain, plus
+  Phase C/AG-012 before B1+B2's adapter can be wired in. B6 stays
+  explicitly deferred by the work order until continuous-DEMO
+  promotion.
 
 ---
 
