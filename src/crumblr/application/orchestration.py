@@ -564,6 +564,8 @@ class ReplayOrchestrator:
             live_equity=self._broker.equity,
             live_open_positions=len(self._broker.positions()),
             market_day=trading_day(first.event_time_utc),
+            max_daily_loss=self._config.risk.max_daily_loss,
+            max_drawdown=self._config.risk.max_drawdown,
         )
         self._ledger = recovery.ledger
         self._current_trading_day = recovery.trading_day

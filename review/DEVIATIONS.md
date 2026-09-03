@@ -1281,6 +1281,46 @@ mean anything should start here.
 - **Gate affected:** before any real DEMO canary run that could cross a
   market holiday.
 
+### D-058 — Restart recovery did not check the recovered loss/drawdown maxima against policy (PL-006)
+- **Status:** RESOLVED 2026-09-03
+- **Spec:** Owner Shared-Core work order 2026-09-03 item 3 (PL-006);
+  `review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`
+- **Code:** `risk/session.py::recover_session()`/`_halt()`,
+  `application/execution.py`, `application/orchestration.py`,
+  `application/live_decision.py`, `application/paper_lite.py`,
+  `agent_gateway/decision_path.py`
+- **Original gap:** `recover_session()` (review F-019) already
+  reconstructed `max_drawdown_fraction`/`max_session_loss_fraction`
+  correctly on restart — seeded with the worse of the record and live
+  equity, only ever widened afterward. But it never *checked* those
+  recovered maxima against the configured `risk.max_drawdown`/
+  `risk.max_daily_loss` thresholds before allowing recovery to proceed.
+  The live per-tick gate only ever reads the *current* instantaneous
+  fraction, correct within one continuous run but not a second line of
+  defense at the restart boundary — a session whose recorded worst
+  already breached policy had no mechanism of its own saying so, relying
+  entirely on the `KillSwitch`'s separately-persisted halt state.
+  Confirmed real, not theoretical: `application/paper_lite.py` (Dev 3's
+  track) had already independently discovered and hand-patched this
+  exact gap as local PAPER_LITE glue before this fix landed.
+- **Current state:** `recover_session()` gains two new required
+  parameters (`max_daily_loss`, `max_drawdown`) and halts recovery
+  outright — with `ReasonCode.MAX_DRAWDOWN`/`DAILY_LOSS_LIMIT`, both
+  together if both apply — when the recovered maxima already meet or
+  exceed them. All five call sites updated
+  (`orchestration.py`/`live_decision.py`/`execution.py`/
+  `application/paper_lite.py` directly; `agent_gateway/decision_path.py`
+  initially deferred to Dev 2 per cross-session coordination, then fixed
+  directly the same day once the full suite showed PAPER_LITE's own
+  tests call through that exact line and were failing on `main` — see
+  ADR-013 §2.4). PAPER_LITE's own local duplicate check
+  (`_recover_risk_session`'s `exhausted` block) removed in favor of the
+  shared authority, per the owner's own "not PAPER_LITE glue" instruction.
+- **Watch for:** any *new* caller of `recover_session()` must supply real
+  configured thresholds, never a permissive placeholder — the whole point
+  of this fix is that these two parameters carry real policy weight.
+- **Gate affected:** none directly; a restart-safety hardening fix.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

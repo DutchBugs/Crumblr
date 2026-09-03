@@ -420,6 +420,8 @@ class ExecutionOrchestrator:
             live_equity=observation.account_state.equity,
             live_open_positions=len(observation.position_states),
             market_day=trading_day(final_now),
+            max_daily_loss=self._config.risk.max_daily_loss,
+            max_drawdown=self._config.risk.max_drawdown,
         )
         if session_recovery.must_halt:
             if not self._kill_switch.is_halted:

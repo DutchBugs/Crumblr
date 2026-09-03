@@ -754,24 +754,23 @@ class PaperLiteOrchestrator:
             live_equity=account.equity,
             live_open_positions=len(positions),
             market_day=market_day,
+            max_daily_loss=self._config.risk.max_daily_loss,
+            max_drawdown=self._config.risk.max_drawdown,
         )
         self._risk_ledger = recovery.ledger
         self._risk_trading_day = recovery.trading_day
         if recovery.must_halt:
+            # PL-006 (owner Shared-Core work order 2026-09-03 item 3): this
+            # now also covers a recovered session whose own recorded worst
+            # already exhausted the daily-loss/drawdown limit -
+            # `risk/session.py::recover_session()` checks that itself, as
+            # normal Core Risk semantics rather than PAPER_LITE-local glue.
+            # A prior version of this method re-checked
+            # `recovery.ledger.max_session_loss_fraction`/
+            # `max_drawdown_fraction` by hand here; that duplicate check is
+            # removed now that the shared function does it.
             self._trip_risk_session(recovery.reason_codes, snapshot, recovery.detail)
             return
-
-        exhausted: list[ReasonCode] = []
-        if recovery.ledger.max_session_loss_fraction >= self._config.risk.max_daily_loss:
-            exhausted.append(ReasonCode.DAILY_LOSS_LIMIT)
-        if recovery.ledger.max_drawdown_fraction >= self._config.risk.max_drawdown:
-            exhausted.append(ReasonCode.MAX_DRAWDOWN)
-        if exhausted:
-            self._trip_risk_session(
-                tuple(exhausted),
-                snapshot,
-                "persisted PAPER_LITE risk-session maximum reached an Owner Policy limit",
-            )
 
     def _persist_risk_session(self) -> None:
         if (

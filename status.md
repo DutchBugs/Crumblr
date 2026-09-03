@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `6dd2c7c` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01). **Owner-reported 2026-09-03: F-067's unpinned `postgresql-client` resolved to a different major than the `postgres:17` service, so `pg_dump` still refused to run — fixed same day (F-068), now pinned to `postgresql-client-17` via the official PGDG apt repo.** Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), **owner session policy v1 (D1.5, `ADR-012`, O-009)** — weekday overnight now permitted, only the Friday trading day restricted (entry cutoff T-15, mandatory flat T-5 against the weekly close), weekend exposure still forbidden, one calendar authority (`trading_agent/sessions.py::weekly_close`), a real pre-existing `trading_day()` weekend-fabrication bug fixed in scope (D-055), new `ReasonCode.FLATTEN_STATE_UNKNOWN` HALT when flat state can't be confirmed by the deadline. Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) **PL-006** structural fix in Shared Risk (persisted `max_session_loss_fraction`/`max_drawdown_fraction` must not be forgotten on restart once equity recovers) — not yet started; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: PL-006. BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), **PL-006 restart-recovery hardening (`ADR-013`)** — `risk/session.py::recover_session()` now halts a restart outright when the recovered `max_drawdown_fraction`/`max_session_loss_fraction` already breach the configured owner-policy thresholds, closing a real gap PAPER_LITE had independently hand-patched as local glue (now removed in favor of the shared fix). Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) PL-006 — done; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: item 9. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9232,6 +9232,160 @@ Next:
 - Market holidays (D-057, ADR-012 §7) — open question, not fixed;
   revisit before any real DEMO canary run that could cross a holiday
   week.
+
+---
+
+## Update 2026-09-03 (sixty-ninth entry) — PL-006: restart recovery must not forget an already-breached loss/drawdown limit
+
+Component: `risk/session.py`, `application/execution.py`, `application/orchestration.py`, `application/live_decision.py`, `application/paper_lite.py`, `agent_gateway/decision_path.py`, `review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`
+Milestone: Owner Shared-Core work order 2026-09-03 item 3 (PL-006), after D1.5 shipped
+Status before: `risk/session.py::recover_session()` correctly reconstructed the historical `max_drawdown_fraction`/`max_session_loss_fraction` on restart (F-019, never lost, only ever widened) but never checked those recovered maxima against the configured owner-policy thresholds before allowing recovery to proceed — the live per-tick gate only ever reads the *current* instantaneous fraction, leaving no second line of defense specifically at the restart boundary
+Status after: `recover_session()` halts recovery outright (`MAX_DRAWDOWN`/`DAILY_LOSS_LIMIT`, both together if both apply) when the recovered maxima already meet or exceed the configured thresholds — fixed once, in the one shared function every track calls, per the owner's own "normal Core Risk semantics, not PAPER_LITE glue" instruction
+
+Completed:
+- Direct code read (not agent-report-trusted) confirmed the gap: traced
+  `EquityLedger.resumed()`'s seeding, `update()`'s widen-only behavior,
+  `recover_session()`'s four existing halt legs (none of which checked
+  the recovered maxima against policy), and the live gate's own
+  instantaneous-fraction-only checks in `orchestration.py
+  ::_check_loss_gates` and `risk/policies.py::evaluate()`.
+- Grepped every caller of `recover_session()` before designing the fix —
+  found five, not the two or three assumed at first glance:
+  `orchestration.py`, `live_decision.py`, `execution.py`, and, from the
+  PAPER_LITE merge earlier today, `application/paper_lite.py` and (via
+  its own reuse of the shared decision path) `agent_gateway
+  /decision_path.py`.
+- Found direct, concrete evidence the gap was real: `application/
+  paper_lite.py::_recover_risk_session()` already contained a hand-rolled
+  local workaround for exactly this gap — independently discovered and
+  patched as PAPER_LITE-local glue, precisely the shape the owner's
+  instruction warns against. Strong validation of both the bug and the
+  planned fix shape.
+- Before implementing: asked the user how to handle the one call site
+  under `agent_gateway/` (Dev 2's track, never touched all session) given
+  the new signature is not source-compatible — user chose "message Dev 2
+  first, wait for their OK." Sent a full cross-session brief; Dev 2
+  replied they'd rather update their own call site on their next `main`
+  sync (mid-commit in that file themselves) — agreed, planned to leave it
+  untouched.
+- Implemented: `recover_session()` gains two new required keyword
+  parameters (`max_daily_loss`, `max_drawdown`); `_halt()`'s signature
+  widened from a single `ReasonCode` to a tuple so both limits can be
+  reported together; the four owned call sites updated; `paper_lite.py`'s
+  local duplicate check removed in favor of the shared one.
+- Ran the full test suite before pushing (standing practice) — this
+  surfaced new information that changed the `agent_gateway/` plan: 10 of
+  `application/paper_lite.py`'s own tests were failing, because PAPER_LITE
+  calls straight through `agent_gateway::evaluate_agent_trade_intent`
+  into the exact unfixed line. The signature break was not merely "Dev
+  2's own future problem" as both Dev 2 and I had assumed — it was
+  already failing tests on `main`, for everyone, today. Made the one-line
+  mechanical fix directly (`config.risk.max_daily_loss`/
+  `config.risk.max_drawdown`, identical shape to the other four sites,
+  nothing else touched in that file) rather than leave `main` red, and
+  told Dev 2 immediately what changed and why. Dev 2 confirmed this was
+  the right call given the new evidence.
+- `tests/unit/test_risk_session.py`: extended the `recover()` test helper
+  with wide-open default thresholds (0.5/0.5) so the file's own pre-
+  existing amplitude tests (which deliberately swing `live_equity` by
+  double digits to prove "recovery only ever tightens", unrelated to
+  PL-006) are not accidentally caught by the new check — caught this
+  during the first test run (two failures) rather than shipping tight
+  defaults that silently changed those tests' meaning. New
+  `TestAnAlreadyExhaustedLimitHaltsRecovery` class (7 tests): drawdown/
+  daily-loss each at and just under the threshold, both breached
+  together, and the property the owner actually named — equity moving
+  back near the recorded peak does not erase a halt the recorded worst
+  already earned. Extended `TestRecoveryOnlyEverTightens` with one more
+  test proving the daily reset still correctly clears yesterday's
+  exhausted allowance (PL-006 must not reach across a genuine day
+  boundary).
+
+Evidence:
+- tests: `tests/unit/test_risk_session.py` — 26 passed (18 pre-existing +
+  8 new/extended). `tests/unit/test_paper_lite.py` +
+  `test_paper_lite_agent.py` + `test_paper_lite_broker.py` — 38 passed,
+  confirming the local-check removal regressed nothing.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (185 source files) — including `agent_gateway/decision_path.py`
+  after the direct fix.
+- Full suite: **1317 passed, 2 known failures, 3 pre-existing skips.**
+  The two failures are `tests/unit/test_agent_decision_path.py
+  ::TestAG012FreshSessionRecoveryEveryCall
+  ::test_a_recorded_prior_loss_this_session_reaches_the_daily_loss_gate`
+  and `::test_two_calls_against_different_stores_are_fully_independent`
+  — not a bug in this fix, a real behavior-timing change it exposes in
+  Dev 2's own test file (see "Problems found"). Coordinated directly with
+  Dev 2: they will fix the two assertions on their side once they merge
+  and see the real failure themselves, rather than guess blind against a
+  description. Deliberately pushed with these two known, named failures
+  rather than held back — they are isolated to `agent_gateway/`'s own
+  test file, do not indicate a defect in the fix itself (confirmed: the
+  kill switch trips correctly, with the correct reason, strictly earlier
+  than before), and Core's own equivalent paths all pass.
+
+Problems found:
+- The `agent_gateway/` coordination plan changed mid-flight once the full
+  suite run surfaced that PAPER_LITE's own tests depended on the exact
+  line being fixed — not a mistake in the original coordination (asking
+  first was the right call given what was known then), but a case where
+  new evidence legitimately changed the right action, and Dev 2 was told
+  the reasoning immediately rather than the change being made silently.
+- Two `test_risk_session.py` tests broke on first run once the new check
+  existed — not a design flaw, the intended check correctly catching
+  test fixtures that happened to swing equity past the (too-tight)
+  default thresholds I picked initially. Fixed by widening the test
+  helper's defaults rather than narrowing the tests' own scenarios.
+- **A real, subtle interaction with an existing design convention,
+  found by the full suite, not by design review.** `risk/policies.py
+  ::evaluate()`'s documented convention
+  (`test_risk_engine.py::test_adr001_7`'s own docstring: "an already-
+  halted system is enforced as a BLOCK, not a fresh HALT escalation —
+  the halt already happened when the kill switch was tripped") means a
+  decision evaluated *after* the kill switch is already halted for any
+  reason reads as `BLOCK`/`SYSTEM_HALTED`, never re-deriving the
+  original trip's specific reason code. Before this fix, a recorded
+  prior loss was only ever caught *live*, inside `evaluate()`'s own
+  loss-gate leg, in the same call that discovered it — producing a
+  direct `DAILY_LOSS_LIMIT`/`HALT` in that one decision. Now,
+  `recover_session()` catches the identical condition *earlier*, during
+  recovery itself, before `evaluate()` ever runs — so by the time a
+  decision is evaluated, the system is already halted, and that
+  established convention correctly downgrades it to `BLOCK`/
+  `SYSTEM_HALTED`. This is strictly earlier and more correct (recovery
+  now refuses the moment the problem is known, rather than waiting for a
+  live decision attempt to independently rediscover it), not a
+  regression — but two of Dev 2's tests asserted the *old* timing's
+  specific verdict/reason shape. Not fixed here (Dev 2's own file, and
+  Dev 2 asked to fix it against the real failure on their side rather
+  than a description) — flagged explicitly, not silently left red.
+
+Risk impact:
+- None to structural inertness: `order_send`/`close_all_positions`
+  remain unconditional `ExecutionDisabledError` raises, untouched.
+- This is a genuine safety tightening (a restart can no longer silently
+  forget an already-breached limit), not a relaxation — exactly the
+  direction the owner asked for.
+
+Decision:
+- Fixed the shared `recover_session()` function rather than any
+  per-caller workaround, per the owner's explicit "not PAPER_LITE glue"
+  instruction — and removed PAPER_LITE's own pre-existing local
+  duplicate in favor of it.
+- Made the `agent_gateway/decision_path.py` fix directly once the full
+  suite showed a live, shared-`main` breakage, reversing the original
+  "wait for Dev 2" plan — informed by new evidence, not by overriding
+  Dev 2's stated preference without reason.
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/pl-006-restart-recovery` branch, `[core]`
+  prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after rebasing onto current `origin/main`
+  if it has moved; notify Dev 2 once it is actually on `main` (already
+  told them it was not yet pushed when they asked).
+- Core critical path **item 9** (broker-side SL verification) — item 4 of
+  the owner's work order, the last one, not yet started.
 
 ---
 

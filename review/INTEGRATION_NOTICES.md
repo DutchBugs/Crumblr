@@ -598,3 +598,66 @@ payloads by the crossed_rollover key, it must also handle
 crossed_weekly_close for rows written from this change onward.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: risk/session.py::recover_session() signature - two new required
+keyword parameters, max_daily_loss: Decimal and max_drawdown: Decimal
+(PL-006, owner Shared-Core work order 2026-09-03 item 3,
+review/adr/ADR-013-restart-recovery-loss-drawdown-check.md). NOT
+source-compatible - every caller must now pass the configured
+thresholds. Also: recover_session()'s internal _halt() helper widened
+from a single ReasonCode to a tuple, so a recovered session can report
+both MAX_DRAWDOWN and DAILY_LOSS_LIMIT together when both are breached.
+Impact: five call sites existed at the time this landed.
+orchestration.py/live_decision.py/execution.py/application/paper_lite.py
+updated directly (all already had self._config.risk/config.risk in
+scope). agent_gateway/decision_path.py:213 was ALSO updated directly
+(config.risk.max_daily_loss/config.risk.max_drawdown, identical shape)
+after coordinating with Dev 2 first - originally left for Dev 2 to pick
+up on their own schedule since it's their owned file, but the full test
+suite showed application/paper_lite.py's own decision path calls
+straight through agent_gateway::evaluate_agent_trade_intent into that
+exact line, so the unfixed signature was already failing 10 of
+PAPER_LITE's own tests on main, not just a break waiting on Dev 2's next
+pull. Dev 2 confirmed comfortable with the direct fix once informed.
+Action required: any future caller of recover_session() (a new track, a
+new call site) must supply real configured max_daily_loss/max_drawdown -
+these carry real safety weight, never pass a placeholder/permissive
+value "to make it compile."
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: nothing further to decision_path.py itself, but pushing the
+above surfaced 2 known-failing tests in tests/unit
+/test_agent_decision_path.py::TestAG012FreshSessionRecoveryEveryCall
+(test_a_recorded_prior_loss_this_session_reaches_the_daily_loss_gate,
+test_two_calls_against_different_stores_are_fully_independent) - not a
+defect, a real interaction with risk/policies.py::evaluate()'s own
+documented convention (test_risk_engine.py::test_adr001_7: "an
+already-halted system is enforced as a BLOCK, not a fresh HALT
+escalation"). recover_session() now catches a recorded prior
+loss/drawdown breach earlier (during recovery) than evaluate()'s own
+live loss-gate leg used to, so by the time a decision is evaluated the
+system is already halted and correctly downgrades to BLOCK/
+SYSTEM_HALTED instead of directly re-deriving DAILY_LOSS_LIMIT/HALT.
+The kill switch itself still trips with the correct specific reason
+(visible in kill_switch.active_reasons) - this is earlier and more
+correct, not a regression.
+Impact: full suite is 1317 passed / 2 known failures / 3 pre-existing
+skips on this push - not fully green, deliberately, per direct
+coordination with Dev 2 (see cross-session messages same day).
+Action required: Dev 2 to update the two assertions in
+test_agent_decision_path.py on their side once they merge and see the
+real failure - kill_switch.is_halted + kill_switch.active_reasons for
+the real reason, risk_decision.verdict is BLOCK with SYSTEM_HALTED in
+reason_codes, per the adr001_7 convention. Full detail in
+review/adr/ADR-013-restart-recovery-loss-drawdown-check.md SS2.5.
+Relevant commit: (this commit)
+```
