@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from crumblr.application.reconciliation import (
@@ -17,14 +18,16 @@ from crumblr.application.reconciliation import (
     ExpectedState,
     ReconciliationResult,
     reconcile,
+    verify_protective_stops,
 )
 from crumblr.config import AccountGuardConfig
-from crumblr.domain.enums import ReconciliationStatus, SnapshotCompleteness
+from crumblr.domain.enums import ReasonCode, ReconciliationStatus, Side, SnapshotCompleteness
 from crumblr.domain.models import (
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
     BrokerPositionSnapshot,
     InstrumentSpec,
+    PositionState,
 )
 from crumblr.domain.timeutils import UtcDatetime
 from tests.conftest import (
@@ -466,3 +469,106 @@ class TestResultPayload:
         assert payload["status"] == "MATCHED"
         assert payload["snapshot_id"] == str(account.snapshot_id)
         assert payload["reasons"] == []
+
+
+def position(**overrides: Any) -> PositionState:
+    fields: dict[str, Any] = {
+        "ticket": 900001,
+        "broker_symbol": "EURUSD",
+        "side": Side.BUY,
+        "volume": Decimal("0.05"),
+        "open_price": Decimal("1.08500"),
+        "current_price": Decimal("1.08600"),
+        "stop_loss_price": Decimal("1.08300"),
+        "take_profit_price": Decimal("1.08900"),
+        "opened_at_utc": FIXED_NOW - timedelta(hours=2),
+        "profit": Decimal("5.00"),
+        "swap": Decimal("0.00"),
+        "magic": 12345,
+        "observed_at_utc": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return PositionState(**fields)
+
+
+class TestVerifyProtectiveStops:
+    """Core critical path item 9: `verify_protective_stops`, deliberately
+
+    decoupled from `reconcile()`'s own MATCHED/MISMATCHED verdict — see
+    the function's own docstring and `review/DEVIATIONS.md` D-051 gap 3.
+    """
+
+    def test_no_attributed_tickets_means_no_issues(self) -> None:
+        issues = verify_protective_stops(
+            (), attributed=frozenset(), expected_stop_loss_price=Decimal("1.08300")
+        )
+        assert issues == ()
+
+    def test_a_matching_stop_loss_raises_no_issue(self) -> None:
+        positions = (position(ticket=900001, stop_loss_price=Decimal("1.08300")),)
+        issues = verify_protective_stops(
+            positions, attributed=frozenset({900001}), expected_stop_loss_price=Decimal("1.08300")
+        )
+        assert issues == ()
+
+    def test_a_missing_broker_side_stop_is_reported(self) -> None:
+        positions = (position(ticket=900001, stop_loss_price=None),)
+        issues = verify_protective_stops(
+            positions, attributed=frozenset({900001}), expected_stop_loss_price=Decimal("1.08300")
+        )
+        assert len(issues) == 1
+        assert issues[0].ticket == 900001
+        assert issues[0].reason is ReasonCode.PROTECTIVE_STOP_MISSING
+        assert issues[0].expected == Decimal("1.08300")
+        assert issues[0].observed is None
+
+    def test_a_mismatched_broker_side_stop_is_reported(self) -> None:
+        positions = (position(ticket=900001, stop_loss_price=Decimal("1.08000")),)
+        issues = verify_protective_stops(
+            positions, attributed=frozenset({900001}), expected_stop_loss_price=Decimal("1.08300")
+        )
+        assert len(issues) == 1
+        assert issues[0].ticket == 900001
+        assert issues[0].reason is ReasonCode.PROTECTIVE_STOP_MISMATCH
+        assert issues[0].expected == Decimal("1.08300")
+        assert issues[0].observed == Decimal("1.08000")
+
+    def test_no_determinable_expected_stop_is_reported_as_missing(self) -> None:
+        """`expected_stop_loss_price=None` means the platform's own
+
+        durable intended stop could not be established at all — treated
+        as `PROTECTIVE_STOP_MISSING`, never silently skipped."""
+        positions = (position(ticket=900001, stop_loss_price=Decimal("1.08300")),)
+        issues = verify_protective_stops(
+            positions, attributed=frozenset({900001}), expected_stop_loss_price=None
+        )
+        assert len(issues) == 1
+        assert issues[0].reason is ReasonCode.PROTECTIVE_STOP_MISSING
+        assert issues[0].expected is None
+        assert issues[0].observed == Decimal("1.08300")
+
+    def test_multiple_attributed_tickets_report_every_issue_no_short_circuit(self) -> None:
+        positions = (
+            position(ticket=900001, stop_loss_price=Decimal("1.08300")),
+            position(ticket=900002, stop_loss_price=None),
+            position(ticket=900003, stop_loss_price=Decimal("1.09999")),
+        )
+        issues = verify_protective_stops(
+            positions,
+            attributed=frozenset({900001, 900002, 900003}),
+            expected_stop_loss_price=Decimal("1.08300"),
+        )
+        by_ticket = {issue.ticket: issue for issue in issues}
+        assert 900001 not in by_ticket
+        assert by_ticket[900002].reason is ReasonCode.PROTECTIVE_STOP_MISSING
+        assert by_ticket[900003].reason is ReasonCode.PROTECTIVE_STOP_MISMATCH
+
+    def test_a_ticket_not_attributed_is_never_checked(self) -> None:
+        positions = (
+            position(ticket=900001, stop_loss_price=Decimal("1.08300")),
+            position(ticket=900002, stop_loss_price=None),
+        )
+        issues = verify_protective_stops(
+            positions, attributed=frozenset({900001}), expected_stop_loss_price=Decimal("1.08300")
+        )
+        assert issues == ()

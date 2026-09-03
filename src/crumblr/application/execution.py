@@ -67,7 +67,9 @@ from crumblr.application.reconciliation import (
     BrokerStateSource,
     ExpectedState,
     InstrumentSpecSource,
+    ProtectiveStopIssue,
     reconcile,
+    verify_protective_stops,
 )
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
@@ -1025,6 +1027,41 @@ class ExecutionOrchestrator:
                 detail="position book could not be confirmed flat by the Friday deadline",
             )
 
+    def _trip_protective_stop_issue(
+        self,
+        order_request_id: UUID,
+        issues: tuple[ProtectiveStopIssue, ...],
+        now: UtcDatetime,
+    ) -> None:
+        """Core critical path item 9: broker truth disagrees with, or
+
+        cannot confirm, this platform's own intended protective stop for
+        a position it attributes to itself. Same idempotent-trip shape as
+        `_trip_overnight_exposure`/`_trip_flatten_state_unknown` — a
+        no-op once already halted. `tripped_by="reconciliation_driver"`
+        distinguishes this producer in the audit log. Deliberately does
+        not touch `reconcile()`'s own MATCHED/MISMATCHED/UNKNOWN verdict
+        (`review/DEVIATIONS.md` D-051 gap 3's scope boundary) — this is a
+        dedicated, narrowly-scoped escalation, not a re-derivation of the
+        book-level status.
+        """
+        if not self._kill_switch.is_halted:
+            reason_codes = tuple(sorted({issue.reason for issue in issues}, key=lambda r: r.value))
+            detail = "; ".join(
+                f"ticket={issue.ticket} {issue.reason.value} "
+                f"expected={issue.expected} observed={issue.observed}"
+                for issue in issues
+            )
+            self._kill_switch.trip(
+                reason_codes=reason_codes,
+                tripped_by="reconciliation_driver",
+                occurred_at_utc=now,
+                detail=(
+                    f"order_request_id {order_request_id} protective-stop verification "
+                    f"failed: {detail}"
+                ),
+            )
+
     def _append_flatten(
         self,
         flatten_request_id: UUID,
@@ -1149,6 +1186,16 @@ class ExecutionOrchestrator:
                     )
             closed_by_flatten = raw_matching - attributed
 
+            protective_stop_issues = verify_protective_stops(
+                observation.position_states,
+                attributed=attributed,
+                expected_stop_loss_price=exposure.expected_stop_loss_by_request.get(
+                    order_request_id
+                ),
+            )
+            if protective_stop_issues:
+                self._trip_protective_stop_issue(order_request_id, protective_stop_issues, now)
+
             self._append(
                 order_request_id,
                 ExecutionEventType.RECONCILED,
@@ -1159,6 +1206,15 @@ class ExecutionOrchestrator:
                     "closed_tickets": sorted(closed_by_flatten),
                     "expected_pending_order_ids": [],
                     "book_status": result.status.value,
+                    "protective_stop_issues": [
+                        {
+                            "ticket": issue.ticket,
+                            "reason": issue.reason.value,
+                            "expected": str(issue.expected) if issue.expected is not None else None,
+                            "observed": str(issue.observed) if issue.observed is not None else None,
+                        }
+                        for issue in protective_stop_issues
+                    ],
                 },
             )
             outcomes.append(

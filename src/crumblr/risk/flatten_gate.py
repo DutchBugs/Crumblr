@@ -116,14 +116,25 @@ from crumblr.domain.timeutils import UtcDatetime
 from crumblr.risk.kill_switch import KillSwitch
 
 _TOLERATED_HALT_REASONS: frozenset[ReasonCode] = frozenset(
-    {ReasonCode.OVERNIGHT_EXPOSURE, ReasonCode.FLATTEN_STATE_UNKNOWN}
+    {
+        ReasonCode.OVERNIGHT_EXPOSURE,
+        ReasonCode.FLATTEN_STATE_UNKNOWN,
+        ReasonCode.PROTECTIVE_STOP_MISSING,
+        ReasonCode.PROTECTIVE_STOP_MISMATCH,
+    }
 )
 """Halt reasons that do not, by themselves, close this gate. See the
 
 module docstring's "condition 7" section for why: becoming flat is the
 safe resolution of exactly these halts, not a further risk — and
 condition 5 (position book completeness) independently still closes the
-gate whenever `FLATTEN_STATE_UNKNOWN`'s own trigger genuinely applies."""
+gate whenever `FLATTEN_STATE_UNKNOWN`'s own trigger genuinely applies.
+`PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH` (core critical path
+item 9) join this set for the same reason: a position whose protection
+cannot be trusted is exactly the position flattening exists to close,
+and excluding it here would leave that position permanently un-remediable
+in-system the moment the halt trips — the same brick `OPEN_RISK_UNKNOWN`'s
+own BLOCK-not-HALT choice was designed to avoid."""
 
 
 @dataclass(frozen=True)
