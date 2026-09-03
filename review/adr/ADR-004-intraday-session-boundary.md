@@ -1,6 +1,11 @@
 # ADR-004 — Intraday-only trading and the session boundary
 
-**Status:** ACCEPTED — partially implemented, remainder is M5
+**Status:** ACCEPTED — **§1's "no overnight" rule and §6's replay-halts-on-
+survival claim superseded 2026-09-03 by
+`review/adr/ADR-012-owner-session-policy-v1.md` (D1.5, owner risk policy
+v1) — weekday overnight is now permitted; only the approach to the weekly
+close is restricted.** The 17:00 America/New_York boundary mechanism
+itself (§2-§3) is reused, not replaced — see ADR-012 §2.1.
 **Date:** 2026-08-18
 **Drivers:** owner decision O-003 (`review/feedback.1.5.md` §1), review finding
 F-025 (`review/feedback.1.6.md` §4)
@@ -12,7 +17,8 @@ F-025 (`review/feedback.1.6.md` §4)
 
 ## 1. The decision being recorded
 
-The owner has fixed, for v1:
+**Superseded 2026-09-03 — see the Status line above and ADR-012.** The
+owner's original v1 decision:
 
 ```text
 Overnight positions: NOT ALLOWED
@@ -152,9 +158,12 @@ keep.** A policy that claimed otherwise would be worse than one that says so.
 
 ## 6. Consequences
 
-- A replay whose position survives the flatten deadline now halts. That is a
+- **Superseded 2026-09-03 — see ADR-012 §2.7/§4.** A replay whose position
+  survives the flatten deadline now halts. That is a
   behaviour change to the prototype and it is correct: under O-003 that run was
-  doing something it is not permitted to do.
+  doing something it is not permitted to do. Under the weekly policy this is
+  narrower — surviving a *weekday* rollover is permitted; only surviving the
+  weekly close halts.
 - The intraday policy interacts with the killzones. London Open and New York AM
   both sit well inside the trading day, so the cutoff does not shorten either
   in practice — but this stops being true if the killzone windows are ever

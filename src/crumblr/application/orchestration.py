@@ -64,7 +64,7 @@ from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionStore
 from crumblr.trading_agent import registry
 from crumblr.trading_agent.base import AgentContext, FeatureEvidence
-from crumblr.trading_agent.sessions import trading_day
+from crumblr.trading_agent.sessions import trading_day, weekly_close
 
 MAX_HISTORY_BARS = 400
 """Rolling window handed to the feature pipeline."""
@@ -630,6 +630,10 @@ class ReplayOrchestrator:
         Without this the "daily" limit measures loss since the start of the
         run, so it behaves as a total-loss cap: once tripped it can never
         clear, and every later window is refused as SYSTEM_HALTED.
+
+        Deliberately still daily under owner risk policy v1 (D1.5): the
+        owner's weekly redesign is the *session/flatten* policy, not the
+        daily-loss limit — `max_daily_loss` stays a daily gate.
         """
         day = trading_day(tick.event_time_utc)
         if self._current_trading_day is None:
@@ -639,36 +643,35 @@ class ReplayOrchestrator:
             self._ledger.start_new_session()
 
     def _check_session_boundary(self, tick: GeneratedTick) -> None:
-        """Halt if exposure outlived its flatten deadline (O-003).
+        """Halt if exposure outlived its weekly deadline (owner risk
+
+        policy v1, D1.5).
 
         Checked per tick rather than only inside a decision window, because a
         position can sit through the boundary during windows where the
         strategy proposed nothing at all — which is most of them.
 
         This detects; it does not close. Closing needs the execution path
-        (M5), and ADR-004 records what has to be built there. Detecting and
-        halting is the part that can be honest today: review 1.6 §4 requires
-        that failing to prove flatness never quietly becomes permission to
-        hold overnight, and a halt is the only refusal strong enough for that.
+        (item 7, `ADR-009`, already built) — this per-tick check exists
+        because a position can sit through the boundary during a window the
+        execution service's own `flatten_once()` pass has not yet reached.
+        Review 1.6 §4's original requirement carries forward: failing to
+        prove flatness never quietly becomes permission to hold past the
+        weekly close, and a halt is the only refusal strong enough for that.
+
+        Uses `risk/policies.py::overnight_breach` — the one shared
+        implementation of "past deadline or crossed the weekly close" —
+        rather than re-inlining it, so this site and `live_decision.py`'s
+        identical check cannot drift from each other or from the risk
+        gateway's own leg.
         """
         if self._kill_switch.is_halted:
             return
         positions = self._broker.positions()
         policy = self._risk_context.intraday
-        if not positions or not policy.enabled:
+        if not policies.overnight_breach(positions, tick.event_time_utc, policy):
             return
-        # Two ways to breach O-003, and the second is why the first is not
-        # enough: at the rollover `requires_flat` goes quiet for the new day,
-        # and a position that survived the old one would stop looking like a
-        # breach a second after becoming one.
-        past_deadline = trading_window.requires_flat(tick.event_time_utc, policy)
-        crossed = any(
-            trading_window.has_crossed_rollover(position.opened_at_utc, tick.event_time_utc)
-            for position in positions
-        )
-        if not (past_deadline or crossed):
-            return
-        closes_at = trading_window.session_close(tick.event_time_utc)
+        closes_at = weekly_close(tick.event_time_utc)
         self._trip(
             reason_codes=(ReasonCode.OVERNIGHT_EXPOSURE,),
             tripped_by="risk_engine",
@@ -677,7 +680,7 @@ class ReplayOrchestrator:
             detail=(
                 f"{len(positions)} position(s) still open at "
                 f"{tick.event_time_utc.isoformat()}, past the flatten deadline for the "
-                f"trading day ending {closes_at.isoformat()}"
+                f"trading week ending {closes_at.isoformat()}"
             ),
         )
 

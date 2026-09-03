@@ -25,16 +25,17 @@ execution:
   order_timeout_ms: 5000
   max_slippage_points: 20
 
-# Owner decision O-003: v1 holds nothing overnight. The session boundary is
-# 17:00 New York and is not configurable — see src/crumblr/risk/trading_window.py.
-#
-# PROVISIONAL OFFSETS. The exact cut-off times are an owner decision that
-# review 1.6 §4 requires before M5. These values are placeholders chosen to be
-# conservative, not agreed policy; confirming them is a status.md §10 row.
+# Owner risk policy v1, session/weekend policy (D1.5, O-009, 2026-09-03) —
+# supersedes O-003's original "v1 holds nothing overnight" rule. Weekday
+# overnight holding is now permitted; the offsets below apply only on the
+# Friday trading day, measured back from the one weekly close (Friday 17:00
+# New York, not configurable — see src/crumblr/trading_agent/sessions.py
+# ::weekly_close and src/crumblr/risk/trading_window.py). Weekend exposure
+# stays forbidden. See review/adr/ADR-012-owner-session-policy-v1.md.
 intraday:
   enabled: true
-  last_entry_minutes_before_close: 60   # no new entries inside the last hour
-  flatten_minutes_before_close: 15      # must be flat a quarter of an hour out
+  last_entry_minutes_before_close: 15   # Friday only: no new entries inside T-15
+  flatten_minutes_before_close: 5       # Friday only: must be flat by T-5
 
 # Pepperstone MT5 demo (owner decision O-001, server supplied 2026-08-18).
 #

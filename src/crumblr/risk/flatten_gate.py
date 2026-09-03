@@ -22,7 +22,8 @@ legs, reused because the same environment/account/AlgoTrading/risk-config/
     4. the terminal reports AlgoTrading enabled
     5. the position book was observed COMPLETE this pass
     6. reconciliation is not UNKNOWN (see §"not MATCHED" below)
-    7. not halted for any reason *other than* OVERNIGHT_EXPOSURE
+    7. not halted for any reason *other than* OVERNIGHT_EXPOSURE or
+       FLATTEN_STATE_UNKNOWN
     8. a flatten is actually required right now
     9. the owner has approved this exact risk-config version
     10. flatten submission is explicitly enabled
@@ -62,18 +63,29 @@ under either expectation — so keeping `flat()` here does not weaken §5.3
 by even one leg. See ADR-010 §2.3 for the full reasoning and D-051 for
 the trigger condition to revisit this.
 
-**Condition 7 tolerates an `OVERNIGHT_EXPOSURE`-only halt, deliberately.**
-The existing detection path (`risk/policies.py::_overnight_breach`,
+**Condition 7 tolerates an `OVERNIGHT_EXPOSURE`- or
+`FLATTEN_STATE_UNKNOWN`-only halt, deliberately.** The existing
+detection path (`risk/policies.py::overnight_breach`,
 `application/orchestration.py`/`application/live_decision.py
 ::_check_session_boundary`) already trips `OVERNIGHT_EXPOSURE` on the
 identical condition this gate exists to resolve. A plain "not halted" leg
 would make the gate permanently closed by the very condition it is meant
 to answer — becoming flat is the *safe resolution* of an
-overnight-exposure halt, not a further risk to refuse. A halt for any
-*other* reason (drawdown, reconciliation mismatch, manual, MT5 connection
-failure) still closes the gate: those say the platform's picture of the
-world is untrustworthy, which is exactly ADR-004 §5.3's warning, and
-applies to a flatten exactly as it does to any other action.
+overnight-exposure halt, not a further risk to refuse.
+`FLATTEN_STATE_UNKNOWN` (owner risk policy v1, D1.5 — tripped by
+`application/execution.py::flatten_once()` itself when the book cannot
+be confirmed flat by the Friday deadline) is tolerated for the same
+reason: the flatten machinery must still be able to *attempt* a
+commitment despite this specific halt, or it could never recover once
+tripped. This is safe rather than circular because condition 5 (the
+position book observed COMPLETE) independently closes the gate whenever
+the book genuinely is incomplete — tolerating the halt does not bypass
+that leg, it only stops this halt *duplicating* what condition 5 already
+enforces. A halt for any *other* reason (drawdown, reconciliation
+mismatch, manual, MT5 connection failure) still closes the gate: those
+say the platform's picture of the world is untrustworthy, which is
+exactly ADR-004 §5.3's warning, and applies to a flatten exactly as it
+does to any other action.
 
 Conditions 9, 10 and 11 read `config.RiskConfig.approved_config_version`
 / `config.ExecutionConfig.flatten_submission_enabled` /
@@ -103,11 +115,15 @@ from crumblr.domain.models import AccountState
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.risk.kill_switch import KillSwitch
 
-_TOLERATED_HALT_REASONS: frozenset[ReasonCode] = frozenset({ReasonCode.OVERNIGHT_EXPOSURE})
+_TOLERATED_HALT_REASONS: frozenset[ReasonCode] = frozenset(
+    {ReasonCode.OVERNIGHT_EXPOSURE, ReasonCode.FLATTEN_STATE_UNKNOWN}
+)
 """Halt reasons that do not, by themselves, close this gate. See the
 
 module docstring's "condition 7" section for why: becoming flat is the
-safe resolution of exactly this halt, not a further risk."""
+safe resolution of exactly these halts, not a further risk — and
+condition 5 (position book completeness) independently still closes the
+gate whenever `FLATTEN_STATE_UNKNOWN`'s own trigger genuinely applies."""
 
 
 @dataclass(frozen=True)

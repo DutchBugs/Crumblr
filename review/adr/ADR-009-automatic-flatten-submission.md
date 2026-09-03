@@ -85,9 +85,17 @@ New Alembic migration off head `d4b6e2f81a37` (confirmed via `alembic
 heads` before creating it, and confirmed with Dev 2 that no migration
 was in flight, per instruction §8's traffic-control rule).
 
-**Keyed on the policy occurrence, not the observed book.** The idempotency
+**Keyed on the trading day, not the observed book — deliberately finer than
+the policy occurrence since ADR-012 (D1.5).** The idempotency
 key is `(environment, canonical_symbol, trading_day)` — one flatten
-commitment per trading day per symbol, ever. Keying on the observed
+commitment per trading day per symbol, ever. Since owner risk policy v1's
+weekly session redesign (`review/adr/ADR-012-owner-session-policy-v1.md`
+§2.5), the *policy* occurrence this key protects is weekly, not daily —
+kept at trading-day granularity anyway, because a weekend-spanning breach
+that survives Friday deserves its own fresh Monday-dated commitment record
+(fresh evidence the breach is *still* unresolved) rather than being folded
+into a resolved-or-blocked Friday one, and it needs no schema change.
+Keying on the observed
 position book would mint a new key every time a position's volume changed
 between passes, which is a resubmission mechanism ADR-003 §6 forbids. The
 request's `fingerprint` covers the *policy* (offsets, deadline), so an
@@ -213,10 +221,12 @@ immediately without touching the broker at all. Only a still-open
 `FLATTEN_SUBMISSION_STARTED` commitment, or no occurrence claimed yet,
 reads the broker.
 
-`intraday.enabled=False` (every shipped config's default, and every
-existing test's `platform_config()`) short-circuits before any of this —
-which is what keeps this item provably inert for the pre-existing,
-capsule-focused test suite: confirmed by re-running
+`intraday.enabled=False` (every existing test's `platform_config()`, but
+**not** `config/paper.yaml`, which has always shipped `enabled: true` —
+this ADR overstated that at the time it was written; corrected in
+`review/adr/ADR-012-owner-session-policy-v1.md` §2/§4) short-circuits
+before any of this — which is what keeps this item provably inert for the
+pre-existing, capsule-focused test suite: confirmed by re-running
 `test_execution_orchestrator.py`'s full 14-test file unchanged before and
 after this item, identical result both times.
 

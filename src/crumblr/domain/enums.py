@@ -171,13 +171,36 @@ class ReasonCode(StrEnum):
     path emits this any more."""
     MAX_DRAWDOWN = "MAX_DRAWDOWN"
     SESSION_BLACKOUT = "SESSION_BLACKOUT"
-    OVERNIGHT_EXPOSURE = "OVERNIGHT_EXPOSURE"
-    """O-003: exposure survived the flatten deadline.
+    """`risk/trading_window.py::permits_new_entry` refused a new entry —
 
-    A halt rather than a warning. Review 1.6 §4 is explicit that failing to
-    prove flatness at the boundary must not silently become permission to hold
-    overnight, and the only refusal strong enough to prevent that is one that
-    stops the system until a person looks."""
+    either the market is genuinely closed (the weekend gap), or, on the
+    Friday trading day only, `moment` is inside the last-entry cutoff
+    before the weekly close (owner risk policy v1, D1.5). Monday through
+    Thursday this can only mean the market is closed, since the weekly
+    close is always too far away to trigger it. A BLOCK, not a HALT — a
+    session boundary refuses this one entry; it says nothing about the
+    system's own safety."""
+    OVERNIGHT_EXPOSURE = "OVERNIGHT_EXPOSURE"
+    """Exposure survived the weekly close, or the flatten deadline leading
+
+    up to it (owner risk policy v1, D1.5, `review/adr/ADR-012-owner
+    -session-policy-v1.md`; originally O-003, which forbade *any*
+    overnight hold — D1.5 narrows this to a weekend-close breach only,
+    since weekday overnight is now explicitly permitted).
+
+    A halt rather than a warning. Review 1.6 §4's original requirement
+    carries forward unchanged under the weekly policy: failing to prove
+    flatness at the boundary must not silently become permission to
+    hold, and the only refusal strong enough to prevent that is one that
+    stops the system until a person looks.
+
+    The name is kept even though "overnight" now overstates what this
+    detects (a normal weekday hold no longer triggers it) —
+    `ReasonCode` values are reconstructed from persisted rows
+    (`ReasonCode(code)` in `persistence/execution.py`,
+    `persistence/flatten.py`, `persistence/safety_state.py`), the same
+    constraint that forced `SYMBOL_EXPOSURE_EXISTS` above to be
+    retained rather than renamed."""
     INTENT_EXPIRED = "INTENT_EXPIRED"
     DUPLICATE_INTENT = "DUPLICATE_INTENT"
     ORDER_FREQUENCY_LIMIT = "ORDER_FREQUENCY_LIMIT"
@@ -215,6 +238,23 @@ class ReasonCode(StrEnum):
     verification) is the correctly-scoped future owner of that
     system-level judgement — this code names the gap, item 9 escalates
     it."""
+
+    FLATTEN_STATE_UNKNOWN = "FLATTEN_STATE_UNKNOWN"
+    """Owner risk policy v1 (D1.5, `review/adr/ADR-012-owner-session
+
+    -policy-v1.md`): the position book could not be confirmed flat by
+    the mandatory Friday flatten deadline — the broker's position read
+    was incomplete at or past that point, so an empty result cannot be
+    trusted as genuinely flat. Never treated as "no positions, nothing
+    to do": the work order is explicit that an unconfirmed flat state
+    must HALT and surface the incident rather than assume success, and
+    under the weekly policy the cost of getting this wrong is a full
+    unmonitored weekend, not a day that self-corrects tomorrow. Same
+    F-002 "absence of evidence is not evidence of safety" discipline as
+    `OPEN_RISK_UNKNOWN` above, and tolerated in `flatten_gate.py
+    ::_TOLERATED_HALT_REASONS` alongside `OVERNIGHT_EXPOSURE` — the
+    flatten machinery must still be able to attempt a commitment despite
+    this specific halt, or it could never recover once tripped."""
 
     # §10.1 — supervisor pre-trade envelope checks.
     UNKNOWN_REGIME = "UNKNOWN_REGIME"
@@ -297,11 +337,13 @@ class ReasonCode(StrEnum):
     a position book this platform cannot currently see in full."""
 
     FLATTEN_NOT_REQUIRED = "FLATTEN_NOT_REQUIRED"
-    """`FlattenGate`: neither `trading_window.requires_flat` nor
+    """`FlattenGate`: neither `trading_window.requires_flat` (unchanged)
 
-    `has_crossed_rollover` currently holds. Names the precondition the
-    gate exists to check, so a context built with a stale or wrong clock
-    fails with a legible reason rather than silently doing nothing."""
+    nor `has_crossed_weekly_close` (owner risk policy v1, D1.5 —
+    replaces the old daily `has_crossed_rollover`) currently holds.
+    Names the precondition the gate exists to check, so a context built
+    with a stale or wrong clock fails with a legible reason rather than
+    silently doing nothing."""
 
     FLATTEN_SUBMISSION_NOT_ENABLED = "FLATTEN_SUBMISSION_NOT_ENABLED"
     """`FlattenGate`: `config.ExecutionConfig.flatten_submission_enabled`

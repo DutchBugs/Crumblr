@@ -75,15 +75,20 @@ class TestBuildFlattenPlan:
         assert instruction.magic == 555
         assert instruction.opened_at_utc == opened
 
-    def test_a_position_from_an_earlier_trading_day_is_marked_crossed_rollover(self) -> None:
-        opened_yesterday = FIXED_NOW - timedelta(days=1)
-        plan = _build(positions=[position(opened_at_utc=opened_yesterday)], past_deadline=False)
-        assert plan.instructions[0].crossed_rollover is True
-        assert plan.crossed_rollover is True
+    def test_a_position_from_before_the_weekly_close_is_marked_crossed_weekly_close(self) -> None:
+        """`FIXED_NOW` is a Monday; four days earlier is the prior week's
 
-    def test_a_position_opened_today_is_not_marked_crossed_rollover(self) -> None:
+        Thursday — a genuine weekend crossing, not merely an earlier
+        calendar day (owner risk policy v1, D1.5: an ordinary weekday
+        rollover is no longer a breach, only a weekly-close crossing is)."""
+        opened_last_week = FIXED_NOW - timedelta(days=4)
+        plan = _build(positions=[position(opened_at_utc=opened_last_week)], past_deadline=False)
+        assert plan.instructions[0].crossed_weekly_close is True
+        assert plan.crossed_weekly_close is True
+
+    def test_a_position_opened_today_is_not_marked_crossed_weekly_close(self) -> None:
         plan = _build(positions=[position(opened_at_utc=FIXED_NOW - timedelta(minutes=5))])
-        assert plan.instructions[0].crossed_rollover is False
+        assert plan.instructions[0].crossed_weekly_close is False
 
     def test_an_empty_position_tuple_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="at least one position"):

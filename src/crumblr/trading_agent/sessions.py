@@ -17,7 +17,7 @@ that; deriving either from a fixed UTC offset does not.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
@@ -112,11 +112,39 @@ def trading_day(moment: UtcDatetime) -> date:
     limit has to be measured against — measuring from the start of a run makes
     the limit a total-loss cap wearing a daily label, and it would trip once
     and never reset.
+
+    A moment inside the closed weekend gap (Friday 17:00 ET through Sunday
+    17:00 ET) belongs to no trading day at all — it is bucketed into the next
+    one that will actually open, Monday, rather than into a fabricated
+    Saturday or Sunday. Getting this right here matters beyond this function's
+    own callers: `persistence/flatten.py::flatten_request_id_for()` is keyed
+    on this value alone, so a version that invented weekend dates produced up
+    to two spurious extra flatten-request rows across every real weekend, and
+    `application/orchestration.py::_roll_session` reset the daily-loss ledger
+    the same extra number of times — both fixed by this function alone being
+    correct, not by a second calendar authority elsewhere.
     """
     local = moment.astimezone(NEW_YORK)
+    if not is_market_open(moment):
+        return (local + timedelta(days=(7 - local.weekday()) % 7)).date()
     if local.hour >= WEEK_CLOSE_HOUR_ET:
         return (local + timedelta(days=1)).date()
     return local.date()
+
+
+def weekly_close(moment: UtcDatetime) -> datetime:
+    """Friday 17:00 America/New_York ending the trading week `moment`'s
+
+    trading day belongs to — the FX week's only close, and therefore the
+    one boundary a weekly session policy (owner risk policy v1, D1.5) is
+    measured against. Derived from `trading_day()` alone, the platform's
+    one calendar authority, rather than an independent week computation
+    that would have to agree with it."""
+    day = trading_day(moment)
+    monday = day - timedelta(days=day.weekday())
+    friday = monday + timedelta(days=4)
+    local_close = datetime.combine(friday, time(WEEK_CLOSE_HOUR_ET, 0), tzinfo=NEW_YORK)
+    return local_close.astimezone(moment.tzinfo)
 
 
 def london_local_hour(moment: UtcDatetime) -> int:
