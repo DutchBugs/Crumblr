@@ -51,18 +51,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID
 
 from crumblr.application.expected_state import DerivedExposure
 from crumblr.config import AccountGuardConfig
-from crumblr.domain.enums import ReconciliationStatus, SnapshotCompleteness
+from crumblr.domain.enums import ReasonCode, ReconciliationStatus, SnapshotCompleteness
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import (
     BrokerAccountSnapshot,
     BrokerPendingOrderSnapshot,
     BrokerPositionSnapshot,
     InstrumentSpec,
+    PositionState,
 )
 from crumblr.domain.timeutils import UtcDatetime
 
@@ -362,6 +364,91 @@ def _position_mismatches(
                 f"{position.canonical_symbol!r} != expected {expectation.canonical_symbol!r}"
             )
     return mismatches
+
+
+@dataclass(frozen=True)
+class ProtectiveStopIssue:
+    """Core critical path item 9: one broker-reported protective stop that
+
+    could not be trusted for a ticket this platform attributes to itself.
+    `reason` is always `ReasonCode.PROTECTIVE_STOP_MISSING` or
+    `ReasonCode.PROTECTIVE_STOP_MISMATCH` — never any other code.
+    """
+
+    ticket: int
+    reason: ReasonCode
+    expected: Decimal | None
+    observed: Decimal | None
+
+
+def verify_protective_stops(
+    positions: tuple[PositionState, ...],
+    *,
+    attributed: frozenset[int],
+    expected_stop_loss_price: Decimal | None,
+) -> tuple[ProtectiveStopIssue, ...]:
+    """Core critical path item 9 (`review/feedback.1.26.md`: *"Verify
+
+    broker-side SL after a fill; absence/mismatch fails closed and
+    escalates."*). Deliberately **not** part of `reconcile()`'s own
+    MATCHED/MISMATCHED/UNKNOWN verdict, and deliberately not fed into
+    `_position_mismatches()` above — `review/DEVIATIONS.md` D-051 gap 3
+    records that whether a *generic* reconciliation mismatch should
+    itself halt is a separate, deliberately deferred policy question.
+    This function's own result drives a dedicated, narrowly-scoped halt
+    (`execution.py::ExecutionOrchestrator._trip_protective_stop_issue`)
+    instead.
+
+    Called only for `attributed` tickets already confirmed open this
+    pass (`execution.py::reconcile_once`'s own `attributed - open_tickets`
+    check) — every ticket in `attributed` is therefore guaranteed to have
+    a matching `PositionState` in `positions`. `expected_stop_loss_price
+    is None` means the platform's own durable intended stop could not be
+    established at all (`expected_state.py::_stop_loss_price_of`
+    returned `None` — `ApprovedOrder.stop_loss_price` is a required
+    field, so this should be unreachable, but is still treated as a
+    fail-closed `PROTECTIVE_STOP_MISSING`, never silently skipped).
+
+    No tolerance/epsilon: exact `Decimal` equality, matching this
+    module's other comparisons (canonical symbol, ticket-set membership)
+    — the broker reports back exactly what this platform's own sizing
+    already respects to the instrument's tick size.
+    """
+    if not attributed:
+        return ()
+    positions_by_ticket = {position.ticket: position for position in positions}
+    issues: list[ProtectiveStopIssue] = []
+    for ticket in sorted(attributed):
+        if expected_stop_loss_price is None:
+            issues.append(
+                ProtectiveStopIssue(
+                    ticket=ticket,
+                    reason=ReasonCode.PROTECTIVE_STOP_MISSING,
+                    expected=None,
+                    observed=positions_by_ticket[ticket].stop_loss_price,
+                )
+            )
+            continue
+        observed = positions_by_ticket[ticket].stop_loss_price
+        if observed is None:
+            issues.append(
+                ProtectiveStopIssue(
+                    ticket=ticket,
+                    reason=ReasonCode.PROTECTIVE_STOP_MISSING,
+                    expected=expected_stop_loss_price,
+                    observed=None,
+                )
+            )
+        elif observed != expected_stop_loss_price:
+            issues.append(
+                ProtectiveStopIssue(
+                    ticket=ticket,
+                    reason=ReasonCode.PROTECTIVE_STOP_MISMATCH,
+                    expected=expected_stop_loss_price,
+                    observed=observed,
+                )
+            )
+    return tuple(issues)
 
 
 def _instrument_spec_mismatches(expected_spec_version: str, current: InstrumentSpec) -> list[str]:

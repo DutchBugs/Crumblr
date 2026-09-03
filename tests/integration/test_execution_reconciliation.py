@@ -17,11 +17,12 @@ import pytest
 from sqlalchemy import Engine
 
 from crumblr.application import execution
-from crumblr.domain.enums import Environment, ExecutionEventType, FlattenEventType
+from crumblr.domain.enums import Environment, ExecutionEventType, FlattenEventType, ReasonCode
 from crumblr.domain.hashing import mt5_magic_number
 from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
 from crumblr.persistence.flatten import FlattenEventStore, FlattenRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
+from crumblr.risk.kill_switch import KillSwitch
 from tests.conftest import FIXED_NOW
 from tests.integration._execution_fixtures import (
     FakeMt5,
@@ -252,7 +253,231 @@ class TestReconcileOnce:
         assert len(outcomes) == 1
 
 
+def _seed_determined_request(
+    engine: Engine,
+    config: Any,
+    *,
+    ticket: int = 900042,
+    stop_loss_price: str | None = "1.08300",
+) -> Any:
+    """Seed a durable, determined, submitted request directly through the
+
+    stores — same pattern as
+    `TestReconcileOnce::test_a_resolved_flatten_removes_its_tickets_from_the_expectation`
+    — so `reconcile_once()` can be exercised in isolation without driving
+    `run_once()` through the full capsule/submission machinery.
+    """
+    capsule = sealed_capsule(engine, config)
+    order_request_id = uuid4()
+    assert capsule.trade_intent is not None
+    ExecutionRequestStore(engine).claim(
+        order_request_id=order_request_id,
+        capsule_id=capsule.capsule_id,
+        intent_id=capsule.trade_intent.intent_id,
+        fingerprint="fp-1",
+        claimed_by="test-worker",
+        now=FIXED_NOW,
+    )
+    request_events = ExecutionEventStore(engine)
+    submission_payload: dict[str, Any] = {"entry_type": "MARKET"}
+    if stop_loss_price is not None:
+        submission_payload["stop_loss_price"] = stop_loss_price
+    request_events.append(
+        order_request_id=order_request_id,
+        event_type=ExecutionEventType.SUBMISSION_STARTED,
+        occurred_at_utc=FIXED_NOW,
+        payload=submission_payload,
+    )
+    request_events.append(
+        order_request_id=order_request_id,
+        event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+        occurred_at_utc=FIXED_NOW,
+        payload={
+            "magic_number": mt5_magic_number(order_request_id),
+            "submitted": True,
+            "matching_position_count": 1,
+            "matching_tickets": [ticket],
+        },
+    )
+    return order_request_id
+
+
+class TestVerifyProtectiveStopsIntegration:
+    """Core critical path item 9, end to end: `reconcile_once()` calling
+
+    `verify_protective_stops` against a real, durably-seeded request and
+    a fake broker position — mirrors `TestReconcileOnce`'s own shape.
+    """
+
+    def test_a_matching_broker_side_stop_trips_nothing(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_determined_request(engine, config, stop_loss_price="1.08300")
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=1.08300),)
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+        )
+        orch.reconcile_once()
+
+        assert not kill_switch.is_halted
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        reconciled = events[-1]
+        assert reconciled.event_type == ExecutionEventType.RECONCILED
+        assert reconciled.payload is not None
+        assert reconciled.payload["protective_stop_issues"] == []
+
+    def test_a_missing_broker_side_stop_trips_the_kill_switch(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_determined_request(engine, config, stop_loss_price="1.08300")
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=0.0),)
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+        )
+        orch.reconcile_once()
+
+        assert kill_switch.is_halted
+        assert ReasonCode.PROTECTIVE_STOP_MISSING in kill_switch.active_reasons
+
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        reconciled = events[-1]
+        assert reconciled.event_type == ExecutionEventType.RECONCILED
+        assert reconciled.payload is not None
+        issues = reconciled.payload["protective_stop_issues"]
+        assert len(issues) == 1
+        assert issues[0]["ticket"] == 900042
+        assert issues[0]["reason"] == "PROTECTIVE_STOP_MISSING"
+        assert issues[0]["observed"] is None
+
+    def test_a_mismatched_broker_side_stop_trips_the_kill_switch(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_determined_request(engine, config, stop_loss_price="1.08300")
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=1.07000),)
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+        )
+        orch.reconcile_once()
+
+        assert kill_switch.is_halted
+        assert ReasonCode.PROTECTIVE_STOP_MISMATCH in kill_switch.active_reasons
+
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        reconciled = events[-1]
+        assert reconciled.event_type == ExecutionEventType.RECONCILED
+        assert reconciled.payload is not None
+        issues = reconciled.payload["protective_stop_issues"]
+        assert len(issues) == 1
+        assert issues[0]["reason"] == "PROTECTIVE_STOP_MISMATCH"
+        assert issues[0]["expected"] == "1.08300"
+
+    def test_an_undeterminable_expected_stop_trips_as_missing(self, engine: Engine) -> None:
+        """`ApprovedOrder.stop_loss_price` is required, so a determined,
+
+        submitted request with no recoverable intended stop should be
+        unreachable in practice — but the durable record is still read
+        defensively, and its absence still fails closed."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_determined_request(engine, config, stop_loss_price=None)
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=1.08300),)
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+        )
+        orch.reconcile_once()
+
+        assert kill_switch.is_halted
+        assert ReasonCode.PROTECTIVE_STOP_MISSING in kill_switch.active_reasons
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        assert events[-1].event_type == ExecutionEventType.RECONCILED
+
+    def test_a_second_pass_is_a_no_op_trip_once_already_halted(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        _seed_determined_request(engine, config, stop_loss_price="1.08300")
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=0.0),)
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=None, kill_switch=kill_switch
+        )
+        orch.reconcile_once()
+        assert kill_switch.is_halted
+        first_reasons = kill_switch.active_reasons
+
+        # Already-reconciled: a second pass has nothing left to determine
+        # and does not touch the broker or the kill switch again.
+        orch.reconcile_once()
+        assert kill_switch.is_halted
+        assert kill_switch.active_reasons == first_reasons
+
+    def test_order_send_and_close_all_positions_stay_unreachable(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        _seed_determined_request(engine, config, stop_loss_price="1.08300")
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(ticket=900042, sl=0.0),)
+
+        orch = orchestrator(engine, config, fake, activation_watermark=None)
+        orch.reconcile_once()
+
+        assert fake.order_send_calls == 0
+        assert fake.close_all_positions_calls == 0
+
+
 class TestStillInert:
+    def test_protective_stop_verification_never_fires_via_the_ordinary_run_once_path(
+        self, engine: Engine
+    ) -> None:
+        """Core critical path item 9 is structurally inert today for the
+
+        same reason item 8 is: `verify_protective_stops` only ever sees a
+        non-empty `attributed` set for a request whose durable history
+        reached `AMBIGUOUS_OUTCOME_RESOLVED{submitted=True}` — which
+        nothing can write while `order_send` stays an unconditional raise
+        (`OrderCheckMt5Gateway.order_send`). Driving the real
+        `run_once()`/`reconcile_once()` path end to end (not the manual
+        `_seed_determined_request` seeding the tests above use) proves
+        this directly: the kill switch never trips from this producer.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            kill_switch=kill_switch,
+        )
+        orch.run_once()
+        orch.run_once()
+
+        assert not kill_switch.is_halted
+
     def test_order_send_and_close_all_positions_are_never_called(self, engine: Engine) -> None:
         the_spec = spec()
         InstrumentSpecStore(engine).record(the_spec)

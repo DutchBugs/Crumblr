@@ -11,7 +11,12 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
-Last updated 2026-09-02 — D-051 added: post-fill reconciliation (core
+Last updated 2026-09-03 — D-051 gap 3 amended: core critical path item 9
+(broker-side SL verification, ADR-014) narrows the gap to cover
+protective-stop absence/mismatch specifically via its own dedicated halt
+producer; the generic book-level MISMATCHED-halt question remains
+unconsumed and deferred. D-051 originally added 2026-09-02 — post-fill
+reconciliation (core
 critical path item 8, ADR-010) names three adjacent gaps (no OrderState
 transition guard, live_decision.py's flat() forward hazard, the
 unconsumed halt_on_reconciliation_mismatch flag); D-049/D-050 both gain
@@ -1138,6 +1143,17 @@ mean anything should start here.
   explicit, separate decision — whether a book-level `MISMATCHED`
   (independent of any per-request `RECONCILED`) should itself halt —
   belongs to whoever owns that policy question, not assumed here.
+  **Update 2026-09-03 (item 9, `review/adr/ADR-014-broker-side-stop
+  -loss-verification.md`):** the narrow subset of this gap covering
+  protective-stop absence/mismatch is now covered — `ReasonCode
+  .PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH` give
+  `application/reconciliation.py::verify_protective_stops` its own
+  dedicated halt producer, deliberately *not* wired through
+  `halt_on_reconciliation_mismatch` or through `_position_mismatches()`'s
+  book-level `reasons`. The trigger above — whether a *generic*
+  book-level `MISMATCHED` should itself halt — remains exactly as
+  deferred and unconsumed as before; item 9 narrows this gap, it does
+  not close it.
 - **Watch for:** none of the three is silently handled by item 8 —
   `reconcile_once()`'s own book-level `MISMATCHED`/`UNKNOWN` results are
   visible via `scripts/reconcile.py` and the durable `RECONCILED`

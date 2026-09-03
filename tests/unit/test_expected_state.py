@@ -6,6 +6,7 @@ database, the same pattern item 6's own fixtures use one layer up.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -179,6 +180,86 @@ class TestPerRequestExposure:
     def test_every_execution_event_type_has_a_declared_exposure_meaning(self) -> None:
         for member in ExecutionEventType:
             assert member in _EXPOSURE_BY_EVENT, f"{member} has no declared exposure meaning"
+
+
+class TestExpectedStopLossDerivation:
+    """Core critical path item 9: `DerivedExposure.expected_stop_loss_by_request`."""
+
+    def test_a_resolution_of_submitted_expects_its_intended_stop_loss(self) -> None:
+        request_id = uuid4()
+        history = [
+            event(
+                ExecutionEventType.SUBMISSION_STARTED,
+                payload={"entry_type": "MARKET", "stop_loss_price": "1.23456"},
+            ),
+            event(
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                payload={"submitted": True, "matching_tickets": [900001]},
+            ),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.expected_stop_loss_by_request[request_id] == Decimal("1.23456")
+
+    def test_a_numeric_stop_loss_payload_is_read_via_str_not_float_precision(self) -> None:
+        request_id = uuid4()
+        history = [
+            event(
+                ExecutionEventType.SUBMISSION_STARTED,
+                payload={"entry_type": "MARKET", "stop_loss_price": "1.10000"},
+            ),
+            event(
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                payload={"submitted": True, "matching_tickets": [900001]},
+            ),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.expected_stop_loss_by_request[request_id] == Decimal("1.10000")
+
+    def test_a_missing_stop_loss_in_the_submission_payload_is_absent_not_none(self) -> None:
+        """Fail-closed: a request with no recoverable intended stop is
+
+        simply absent from the mapping — `verify_protective_stops`
+        treats that absence as `PROTECTIVE_STOP_MISSING`, not as "no
+        stop was intended"."""
+        request_id = uuid4()
+        history = [
+            event(ExecutionEventType.SUBMISSION_STARTED, payload={"entry_type": "MARKET"}),
+            event(
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                payload={"submitted": True, "matching_tickets": [900001]},
+            ),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert request_id not in exposure.expected_stop_loss_by_request
+
+    def test_a_missing_stop_loss_does_not_add_an_undetermined_reason(self) -> None:
+        """Deliberately not folded into `undetermined_reasons` — that
+
+        list feeds the whole-book MATCHED/MISMATCHED/UNKNOWN verdict,
+        which item 9's own halt must stay decoupled from
+        (`review/DEVIATIONS.md` D-051 gap 3)."""
+        request_id = uuid4()
+        history = [
+            event(ExecutionEventType.SUBMISSION_STARTED, payload={"entry_type": "MARKET"}),
+            event(
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                payload={"submitted": True, "matching_tickets": [900001]},
+            ),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.undetermined_reasons == ()
+
+    def test_a_resolution_of_not_submitted_records_no_expected_stop_loss(self) -> None:
+        request_id = uuid4()
+        history = [
+            event(
+                ExecutionEventType.SUBMISSION_STARTED,
+                payload={"entry_type": "MARKET", "stop_loss_price": "1.23456"},
+            ),
+            event(ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED, payload={"submitted": False}),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert request_id not in exposure.expected_stop_loss_by_request
 
 
 class TestFlattenInteraction:

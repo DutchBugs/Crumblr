@@ -256,6 +256,41 @@ class ReasonCode(StrEnum):
     flatten machinery must still be able to attempt a commitment despite
     this specific halt, or it could never recover once tripped."""
 
+    PROTECTIVE_STOP_MISSING = "PROTECTIVE_STOP_MISSING"
+    """Core critical path item 9 (`review/feedback.1.26.md`: *"Verify
+
+    broker-side SL after a fill; absence/mismatch fails closed and
+    escalates."*): a position this platform attributes to itself has no
+    broker-reported protective stop (`PositionState.stop_loss_price is
+    None`), or the platform's own durably-recorded intended stop for the
+    owning request could not be established at all. `ApprovedOrder
+    .stop_loss_price` is a required field — every order this platform
+    ever approves carries a real intended stop — so either condition is
+    a fail-closed signal, never treated as "no stop configured, nothing
+    to protect." This is the escalation `OPEN_RISK_UNKNOWN` above names
+    as its own correctly-scoped future owner: a position whose
+    protection cannot be trusted is exactly the case `assess_open_risk`
+    could not value either.
+
+    Deliberately a *separate*, narrowly-scoped halt producer from the
+    book-level `RECONCILIATION_MISMATCH`/`RECONCILIATION_UNKNOWN`
+    verdict above — `review/DEVIATIONS.md` D-051 gap 3 records that
+    whether a *generic* reconciliation mismatch should itself halt
+    remains a deliberately deferred, separate policy question. This
+    reason fulfils `build.md` §8.2's "reconciliation mismatch" HALT
+    trigger for this one specific, well-defined case only; the generic
+    case stays exactly as deferred as D-051 left it."""
+
+    PROTECTIVE_STOP_MISMATCH = "PROTECTIVE_STOP_MISMATCH"
+    """Sibling to `PROTECTIVE_STOP_MISSING` above: the broker-reported
+
+    protective stop on a position this platform attributes to itself
+    does not match the stop the platform's own durable
+    `SUBMISSION_STARTED` record says it intended. Same escalation, same
+    D-051 gap 3 scope boundary, same rationale — the stop that is
+    actually protecting the position is not the one this platform
+    believes it placed."""
+
     # §10.1 — supervisor pre-trade envelope checks.
     UNKNOWN_REGIME = "UNKNOWN_REGIME"
     CONFIDENCE_OUT_OF_RANGE = "CONFIDENCE_OUT_OF_RANGE"

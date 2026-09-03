@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -97,6 +98,17 @@ class DerivedExposure:
     undetermined_reasons: tuple[str, ...] = ()
     tickets_by_request: Mapping[UUID, frozenset[int]] = field(default_factory=dict)
     determined_request_ids: frozenset[UUID] = frozenset()
+    expected_stop_loss_by_request: Mapping[UUID, Decimal] = field(default_factory=dict)
+    """Core critical path item 9: the platform's own durably-recorded
+
+    intended stop-loss for each determined, submitted request, read from
+    `SUBMISSION_STARTED`'s own persisted `ApprovedOrder` payload. A
+    request absent from this mapping (rather than present with some
+    fallback value) means its intended stop could not be established
+    from durable history — deliberately not folded into
+    `undetermined_reasons` (which feeds the whole-book MATCHED/MISMATCHED
+    verdict); the absence itself is the fail-closed signal `application
+    /reconciliation.py::verify_protective_stops` consumes."""
 
     @classmethod
     def empty(cls) -> DerivedExposure:
@@ -171,6 +183,7 @@ def derive_expected_exposure(
     determined_request_ids: set[UUID] = set()
     reasons: list[str] = []
     all_tickets: set[int] = set()
+    stop_loss_by_request: dict[UUID, Decimal] = {}
 
     for order_request_id, events in request_histories:
         classification = _last_exposure_relevant(events)
@@ -201,6 +214,10 @@ def derive_expected_exposure(
             tickets_by_request[order_request_id] = tickets
             all_tickets |= tickets
 
+            stop_loss_price = _stop_loss_price_of(events)
+            if stop_loss_price is not None:
+                stop_loss_by_request[order_request_id] = stop_loss_price
+
             entry_type = _entry_type_of(events)
             if entry_type is not None and entry_type is not EntryType.MARKET:
                 # D-049: `magic` is not tracked for pending orders at any
@@ -228,6 +245,7 @@ def derive_expected_exposure(
         undetermined_reasons=tuple(reasons),
         tickets_by_request=tickets_by_request,
         determined_request_ids=frozenset(determined_request_ids),
+        expected_stop_loss_by_request=stop_loss_by_request,
     )
 
 
@@ -237,4 +255,22 @@ def _entry_type_of(events: Sequence[ExecutionEventRecord]) -> EntryType | None:
             raw = event.payload.get("entry_type")
             if raw is not None:
                 return EntryType(raw)
+    return None
+
+
+def _stop_loss_price_of(events: Sequence[ExecutionEventRecord]) -> Decimal | None:
+    """Core critical path item 9: the platform's own intended stop-loss
+
+    for a request, as durably recorded in `SUBMISSION_STARTED`'s full
+    `ApprovedOrder` payload (`execution.py::_start_submission`). Mirrors
+    `_entry_type_of` above exactly. `stop_loss_price` is a required
+    `ApprovedOrder` field, so a `None` return here is a durable-history
+    data-integrity gap, not an expected outcome — callers must treat it
+    as fail-closed, not as "no stop was intended."
+    """
+    for event in events:
+        if event.event_type is ExecutionEventType.SUBMISSION_STARTED and event.payload:
+            raw = event.payload.get("stop_loss_price")
+            if raw is not None:
+                return Decimal(str(raw))
     return None

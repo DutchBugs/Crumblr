@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `b3068c0` |
+| **`main` HEAD** | `eb63c50` |
 | **Last hosted CI result** | Run 60: dependency install/ruff lint/Windows tests/secret scan all PASS — F-063 genuinely fixed. Linux job still failed at `ruff format --check` (F-065, fixed 2026-09-01). Self-discovered while working the punch list: the backup/restore proof (F-023) had never actually run in any hosted CI — silently skipped, not failed — no `postgresql-client` on the runner and a dump/restore connection-parameter bug underneath that even (F-067, fixed 2026-09-01). **Owner-reported 2026-09-03: F-067's unpinned `postgresql-client` resolved to a different major than the `postgres:17` service, so `pg_dump` still refused to run — fixed same day (F-068), now pinned to `postgresql-client-17` via the official PGDG apt repo.** Hosted confirmation still pending — no `gh`/Actions access in this environment |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), **PL-006 restart-recovery hardening (`ADR-013`)** — `risk/session.py::recover_session()` now halts a restart outright when the recovered `max_drawdown_fraction`/`max_session_loss_fraction` already breach the configured owner-policy thresholds, closing a real gap PAPER_LITE had independently hand-patched as local glue (now removed in favor of the shared fix). Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) PL-006 — done; (4) core critical path item 9 (broker-side SL verification) — not yet started. Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: item 9. BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), **item 9 broker-side SL verification (`ADR-014`)** — `verify_protective_stops()` compares broker-reported protective stops against the platform's own durably-recorded intent for every attributed, open ticket; absence/mismatch fails closed and escalates via a dedicated, narrowly-scoped kill-switch producer (`PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH`), deliberately decoupled from `reconcile()`'s own generic MATCHED/MISMATCHED verdict (D-051 gap 3 amended, not resolved). Owner's Shared-Core work order 2026-09-03: (1) hosted CI green — F-068 done, confirmation pending; (2) D1.5 — done; (3) PL-006 — done; (4) item 9 — done. All four items of the work order shipped (pending commit/push). Explicitly not to do: make `order_send` reachable, build PAPER_LITE-specific logic in Core, take over external Supervisor logic. NEXT: awaiting new instructions — no further owner punch-list item open. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9386,6 +9386,141 @@ Next:
   told them it was not yet pushed when they asked).
 - Core critical path **item 9** (broker-side SL verification) — item 4 of
   the owner's work order, the last one, not yet started.
+
+---
+
+## Update 2026-09-03 (seventieth entry) — broker-side SL verification (core critical path item 9)
+
+```text
+Component: application/expected_state.py, application/reconciliation.py, application/execution.py, domain/enums.py, risk/flatten_gate.py
+Milestone: Dev-1 Shared-Core work order 2026-09-03, item 4 (item 9) — the last item on the owner's original punch list
+Status before: BUILDING (items 1-3 of the work order shipped)
+Status after:  BUILDING (all 4 items of the work order shipped; item 9 was the last core critical path item on the owner's original punch list)
+```
+
+**Completed**
+
+- `DerivedExposure.expected_stop_loss_by_request: Mapping[UUID, Decimal]`
+  — a new `_stop_loss_price_of()` helper (mirrors `_entry_type_of()`)
+  reads the platform's own intended stop-loss for each determined,
+  submitted request out of `SUBMISSION_STARTED`'s existing durable
+  `ApprovedOrder` payload. A request with no recoverable stop is simply
+  absent from the mapping — deliberately not folded into
+  `undetermined_reasons`.
+- `application/reconciliation.py::verify_protective_stops()` — a new,
+  pure, deliberately *separate* comparison function (not part of
+  `reconcile()`'s own MATCHED/MISMATCHED/UNKNOWN verdict): for each
+  attributed, currently-open ticket, compares the broker-reported
+  `PositionState.stop_loss_price` against the platform's own intended
+  stop, exact `Decimal` equality, reporting every issue (never
+  short-circuiting).
+- Two new `ReasonCode` members: `PROTECTIVE_STOP_MISSING`,
+  `PROTECTIVE_STOP_MISMATCH` — the escalation `OPEN_RISK_UNKNOWN`'s own
+  docstring (D1.4, ADR-011) already named item 9 as the correctly-scoped
+  future owner of.
+- `execution.py::reconcile_once()` calls `verify_protective_stops()`
+  inline, in the same pass and against the same already-captured broker
+  observation item 8's own `RECONCILED` loop uses — zero extra broker
+  read. A new `_trip_protective_stop_issue()`, mirroring
+  `_trip_overnight_exposure()`/`_trip_flatten_state_unknown()`'s exact
+  idempotent-trip shape, escalates on any issue. `RECONCILED`'s own
+  payload gains a `protective_stop_issues` field for audit visibility;
+  its book-level `book_status` is untouched.
+- `risk/flatten_gate.py::_TOLERATED_HALT_REASONS` gains both new reason
+  codes, alongside `OVERNIGHT_EXPOSURE`/`FLATTEN_STATE_UNKNOWN` — the
+  safe resolution of an untrusted protective stop is closing the
+  position, not a further risk; without this, the halt would be a
+  permanent, un-remediable brick, exactly what `OPEN_RISK_UNKNOWN`'s own
+  BLOCK-not-HALT choice was designed to avoid.
+- `review/adr/ADR-014-broker-side-stop-loss-verification.md` written.
+  `review/DEVIATIONS.md` D-051 gap 3 amended in place (not superseded):
+  the SL-specific subset of "reconciliation mismatch" is now covered;
+  the generic book-level case remains exactly as deferred as before.
+  `build.md` §8.2 already lists "reconciliation mismatch" as an
+  Automatic HALT trigger — item 9 fulfils that trigger for this one
+  case, introducing no new deviation of its own.
+- Confirmed by grep, not assumed: `application/paper_lite.py` never
+  references `ExecutionOrchestrator`/`reconcile_once`/
+  `AMBIGUOUS_OUTCOME_RESOLVED` — item 9 has zero PAPER_LITE interaction,
+  matching items 6-8/D1.5's own Core-only scope.
+
+**Evidence**
+
+- tests: `tests/unit/test_expected_state.py` — 5 new (present, string-
+  precision, missing-is-absent, missing-adds-no-undetermined-reason,
+  not-submitted-records-nothing). `tests/unit/test_reconciliation.py` —
+  7 new (`TestVerifyProtectiveStops`: no-attributed, matching, missing,
+  mismatch, no-determinable-expected, multiple-tickets-no-short-circuit,
+  ticket-not-attributed-never-checked). `tests/integration
+  /test_execution_reconciliation.py` — 7 new (`TestVerifyProtectiveStopsIntegration`:
+  matching trips nothing, missing trips
+  `PROTECTIVE_STOP_MISSING`, mismatch trips `PROTECTIVE_STOP_MISMATCH`,
+  undeterminable-expected trips as missing, second pass is a no-op trip,
+  `order_send`/`close_all_positions` stay unreachable;
+  `TestStillInert`: the ordinary `run_once()` path never fires this
+  producer). 19 new tests total, all passing.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (185 source files).
+- Full suite: **1336 passed, 2 known failures, 3 pre-existing skips**
+  (577s). The 2 failures are the exact same, already-documented,
+  pre-existing `tests/unit/test_agent_decision_path.py
+  ::TestAG012FreshSessionRecoveryEveryCall` failures named in the
+  sixty-ninth entry (PL-006) — unrelated to any file this item touches,
+  unchanged in count or identity. 1336 - 1317 (PL-006's own baseline) =
+  19, exactly the new tests added here; no other regression. **Update
+  same day, via Dev 2:** already fixed on their side, pushed as
+  `d62722d` on `agent/contracts` — held there deliberately (not merged
+  to `main` pending their own review), so `main`'s own suite correctly
+  still shows the pre-fix assertions failing against PL-006's new
+  behavior until that branch merges. Not stale or untracked; just not
+  yet on `main`.
+- Determinism: `scripts/run_replay.py --bars 600` run twice via
+  PowerShell (`2>$null | Out-File`, stdout only — the Bash tool's own
+  console codepage cannot encode the script's box-drawing output when
+  piped, an environment quirk unrelated to this change), MD5 identical
+  both runs (`704967823f258496922a9b16c4d29788`).
+- Grep the diff: zero `.order_send(`/`.close_all_positions(` calls,
+  zero edits under `agent_gateway/`.
+
+**Problems found**
+
+- None specific to this item's own logic — the 2 known failures predate
+  it and are already tracked against PL-006/Dev 2's own coordination.
+
+**Risk impact**
+
+- None to structural inertness: `order_send`/`close_all_positions`
+  remain unconditional `ExecutionDisabledError` raises, untouched;
+  `verify_protective_stops` is provably unreachable with a non-empty
+  `attributed` set today (proven directly by a new structural guard
+  test), same as items 6-8/D1.5.
+- Genuine safety tightening: a position whose broker-side protective
+  stop is missing or wrong now fails closed and escalates, per the
+  owner's explicit requirement — the last item on their original
+  execution-safety punch list.
+
+**Decision**
+
+- Kept the new halt fully decoupled from `reconcile()`'s own generic
+  MATCHED/MISMATCHED verdict and from `halt_on_reconciliation_mismatch`
+  — a dedicated, narrowly-scoped producer, preserving D-051 gap 3's
+  deliberately deferred scope rather than silently resolving it.
+- Added both new reason codes to `flatten_gate.py`'s
+  `_TOLERATED_HALT_REASONS` — a design decision not explicit in the
+  approved plan, made during implementation once `OPEN_RISK_UNKNOWN`'s
+  own "avoid a permanent brick" rationale was found to apply directly;
+  documented in ADR-014 §2.5.
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/item-9-protective-stop-verification` branch,
+  `[core]` prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main` hasn't
+  moved past `8505fd2`; notify Dev 2 once pushed (informational — no
+  cross-track call-site signature changes).
+- All four items of the 2026-09-03 Shared-Core work order are now
+  shipped (pending commit/push). No further owner punch-list item
+  remains open as of this entry.
 
 ---
 
