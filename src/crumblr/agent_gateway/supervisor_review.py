@@ -30,6 +30,17 @@ reason naming which binding failed, the same "verify, never assume"
 discipline `static_agent_translate.py::translate_no_trade_response()`
 already applies to the Static Agent bridge.
 
+**Known gap: `risk_decision_id`/`policy_gate_decision_id` are not
+checked here** (`review/AGENT_FEEDBACK.md` AG-003), even though
+`contracts.py::SupervisorReview` documents them as completing "the audit
+chain from the external review back to the exact internal decisions it
+was reviewing." Both are optional on the contract ("a review may be
+requested before either has run"), so a strict equality check needs an
+explicit answer for the unset case this module does not yet have --
+tracked, not silently assumed safe. A review's own two binding-relevant
+fields (`proposal_id`/`trade_intent_id`/`trade_intent_decision_hash`)
+are the only ones enforced today.
+
 **No HTTP client here, deliberately.** Unlike the Static Agent fork
 (`static_agent_client.py`), there is no real, existing external Supervisor
 service to build and prove a transport client against yet -- writing one

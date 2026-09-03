@@ -1396,6 +1396,46 @@ mean anything should start here.
   of this fix is that these two parameters carry real policy weight.
 - **Gate affected:** none directly; a restart-safety hardening fix.
 
+### D-059 — The reference external Supervisor runs in-process, not yet as a separate process
+- **Status:** deliberate, interim — explicitly authorized by the owner
+  for this stage
+- **Spec:** `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` Phase C:
+  "If no Supervisor service exists yet, a deterministic reference
+  Supervisor **in a separate process** is acceptable for the first DEMO
+  canary, provided it has zero MT5/DB credentials and the exact same
+  APPROVE/VETO/UNKNOWN authority limits."
+- **Code:** `agent_gateway/reference_supervisor.py::ReferenceSupervisor`,
+  `agent_gateway/decision_path.py::ExternalSupervisorProvider`
+- **Original gap:** no external Supervisor service exists yet to build a
+  real transport client against (AG-003's long-standing blocker this
+  session). The work order's explicit permission to build a
+  deterministic reference implementation removed that blocker, but the
+  same sentence frames it as running "in a separate process" — matters
+  for the real DEMO canary trust boundary (an external check genuinely
+  independent of the process making the decision).
+- **Current state:** `ReferenceSupervisor` is a real, deterministic,
+  fully tested implementation of `ExternalSupervisorProvider`, called
+  in-process (a direct method call, not a network request) via
+  `decision_path.py`'s dependency injection. No HTTP transport exists
+  for it yet — the same "no HTTP client here, deliberately... writing
+  one against an unspecified target would be speculative" reasoning
+  `supervisor_review.py`'s own module docstring already gives for why
+  the evaluation core has no transport client, applied here too: nothing
+  yet requires out-of-process deployment (no real DEMO canary attempt is
+  authorized regardless -- `order_send` stays NO-GO), so building one now
+  would be exactly the speculative-code pattern this track avoids.
+- **Watch for:** before any real DEMO canary attempt, this needs either
+  (a) an HTTP transport mirroring `static_agent_client.py`'s pattern so
+  `ReferenceSupervisor` can run as an actual separate process, or (b) a
+  genuine third-party/AI Supervisor service to build a client against
+  instead. Do not treat in-process authority limits alone as satisfying
+  Phase C's "separate process" requirement once a real canary is being
+  prepared.
+- **Gate affected:** blocks nothing today (Phase C wiring proof only,
+  zero broker writes reachable); would block Phase F's first real DEMO
+  canary readiness checklist item 7 ("genuine external Supervisor
+  binding") if attempted as-is.
+
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
 - **Spec:** §8.2 requires a halt to survive; §7 invariant 9 requires read-only

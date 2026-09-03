@@ -81,6 +81,39 @@ re-implement that fail-closed check itself -- doing so once produced a
 weaker, diverging `HALT`-based version of a decision Core already owns
 correctly (D-052's original design, superseded here now that D1.4
 exists).
+
+**External Supervisor (AG-003, Phase C
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`).** A second,
+distinct veto layer from the strategy-neutral Policy Gate above -- "Do
+not overwrite or relabel the platform Policy decision as the external
+Supervisor approval" (Phase C's own instruction). Runs only after the
+Policy Gate itself `APPROVE`s (asking an already-refused proposal for a
+second opinion is pointless), and only when the caller supplies both a
+`proposal` and an `external_supervisor` provider -- both default to
+`None`, so a caller with nothing to ask (PAPER_LITE's explicit
+Supervisor-skip, or any not-yet-updated caller) is entirely unaffected,
+exactly as before this was added. `supervisor_review.py
+::evaluate_supervisor_review()` -- already built, previously unwired --
+does the actual binding/expiry/self-reported-`UNKNOWN` enforcement; this
+module only supplies it a `SupervisorReview | None` via the injected
+`ExternalSupervisorProvider` (the same "no HTTP client here, no MT5
+here" injection discipline `PortfolioStateProvider` already follows) and
+builds a normalized `ExternalSupervisorReviewRecord`, regardless of
+whether a genuine review arrived. Both are returned on
+`AgentDecisionPathResult` (`external_supervisor_outcome`/
+`external_supervisor_record`), deliberately **not** durably recorded by
+this module itself via `recorder.record()`: `ExternalSupervisorReviewRecord`
+is an agent_gateway-owned `Contract`, and Core's event journal
+(`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry of
+Core-owned payload types -- registering it there would require
+`domain/` to import from `agent_gateway/`, inverting this codebase's
+one-way dependency direction (`agent_gateway` depends on `domain`, never
+the reverse). Nor is it folded into `DecisionCapsule`, which has no
+field for it yet -- a Core-owned type this module does not modify
+unilaterally. A caller that needs this durably kept persists it through
+its own appropriate mechanism (e.g. `AgentDecisionOutcomeStore
+.append_event`) until either a proper cross-track extension to the
+event journal or a capsule field exists.
 """
 
 from __future__ import annotations
@@ -89,6 +122,15 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from crumblr.agent_gateway.contracts import (
+    ExternalSupervisorReviewRecord,
+    SupervisorReview,
+    TradeProposal,
+)
+from crumblr.agent_gateway.supervisor_review import (
+    SupervisorReviewOutcome,
+    evaluate_supervisor_review,
+)
 from crumblr.application.recording import RunRecorder
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
@@ -157,17 +199,50 @@ class PortfolioSnapshot:
     reconciliation_status: ReconciliationStatus
 
 
+class ExternalSupervisorProvider(Protocol):
+    """A source of external-Supervisor review for one proposal/intent
+    pair.
+
+    Deliberately injected, not called via HTTP from inside this module --
+    the same "no MT5, no HTTP client here" discipline `PortfolioStateProvider`
+    and `supervisor_review.py` already follow. `reference_supervisor.py
+    ::ReferenceSupervisor` is a real, deterministic, in-process
+    implementation; a future transport-backed implementation may return
+    `None` for a genuine timeout/transport failure -- `evaluate_supervisor_review()`
+    already treats that identically to any other missing response.
+    """
+
+    def review(
+        self,
+        *,
+        proposal: TradeProposal,
+        intent: TradeIntent,
+        risk_decision_id: UUID,
+        policy_gate_decision_id: UUID,
+        now: UtcDatetime,
+    ) -> SupervisorReview | None: ...
+
+
 @dataclass(frozen=True)
 class AgentDecisionPathResult:
     """What one Risk -> Policy -> capsule evaluation produced.
 
     `capsule` is always populated -- NO_TRADE, a Risk BLOCK/HALT and a
     Supervisor VETO/HALT are each still sealed as evidence, never dropped.
+    `external_supervisor_outcome`/`external_supervisor_record` are
+    populated only when the caller supplied both a `proposal` and an
+    `external_supervisor` provider and the Policy Gate `APPROVE`d -- see
+    the module docstring's "External Supervisor" section.
+    `external_supervisor_record` is not durably persisted by this module
+    itself (see the same section) -- a caller that needs it kept must
+    persist it through its own mechanism.
     """
 
     capsule: DecisionCapsule
     risk_decision: RiskDecision | None
     supervisor_decision: SupervisorDecision | None
+    external_supervisor_outcome: SupervisorReviewOutcome | None = None
+    external_supervisor_record: ExternalSupervisorReviewRecord | None = None
 
 
 def evaluate_agent_trade_intent(
@@ -189,6 +264,8 @@ def evaluate_agent_trade_intent(
     seen_decision_hashes: frozenset[str] = frozenset(),
     orders_in_last_hour: int = 0,
     incident_status: IncidentStatus = IncidentStatus.UNKNOWN,
+    proposal: TradeProposal | None = None,
+    external_supervisor: ExternalSupervisorProvider | None = None,
 ) -> AgentDecisionPathResult:
     """Evaluate one Gateway-constructed `TradeIntent` (or NO_TRADE,
     `intent=None`) through intent-time Risk and the strategy-neutral
@@ -208,6 +285,11 @@ def evaluate_agent_trade_intent(
     `evaluator.pretrade.SupervisorContext` uses, so a caller that has not
     wired up a real incident read gets a refusal rather than an unearned
     approval (review finding F-002's rule, restated).
+
+    `proposal`/`external_supervisor` both default to `None` -- omitting
+    either (or both) skips the external Supervisor step entirely, with no
+    other change in behaviour; see the module docstring's "External
+    Supervisor" section.
     """
     portfolio = portfolio_state.current()
 
@@ -350,6 +432,54 @@ def evaluate_agent_trade_intent(
             correlation_id=snapshot.snapshot_id,
         )
 
+    external_supervisor_outcome: SupervisorReviewOutcome | None = None
+    external_supervisor_record: ExternalSupervisorReviewRecord | None = None
+    if (
+        supervisor_decision.verdict is SupervisorVerdict.APPROVE
+        and proposal is not None
+        and external_supervisor is not None
+    ):
+        # Deliberately not folded into the Policy Gate check above: asking
+        # the external Supervisor about a proposal the Policy Gate already
+        # refused would be pointless (a HALT/VETO already blocks it), and
+        # "Do not overwrite or relabel the platform Policy decision as the
+        # external Supervisor approval" (Phase C) means the two must stay
+        # visibly separate here too, never merged into one verdict.
+        raw_review = external_supervisor.review(
+            proposal=proposal,
+            intent=intent,
+            risk_decision_id=risk_decision.decision_id,
+            policy_gate_decision_id=supervisor_decision.decision_id,
+            now=now,
+        )
+        external_supervisor_outcome = evaluate_supervisor_review(
+            raw_review,
+            proposal_id=proposal.proposal_id,
+            trade_intent_id=intent.intent_id,
+            trade_intent_decision_hash=intent.decision_hash,
+            now=now,
+        )
+        # Not `recorder.record(...)`: `ExternalSupervisorReviewRecord` is
+        # an agent_gateway-owned Contract, and Core's event journal
+        # (`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry
+        # of Core-owned payload types that `domain/` cannot import
+        # agent_gateway types into without inverting this codebase's own
+        # one-way dependency direction (agent_gateway -> domain, never the
+        # reverse -- self-review finding: the original design would have
+        # raised `ValueError: ... is not a registered event payload`
+        # against the real `JournalRecorder` the moment any real caller
+        # supplied a provider). Returned on the result instead; a caller
+        # that wants this durably persisted does so through its own
+        # appropriate mechanism (e.g. `AgentDecisionOutcomeStore
+        # .append_event`, or a future capsule field once Dev 1 adds one).
+        external_supervisor_record = _external_supervisor_record(
+            external_supervisor_outcome,
+            proposal_id=proposal.proposal_id,
+            trade_intent_id=intent.intent_id,
+            trade_intent_decision_hash=intent.decision_hash,
+            now=now,
+        )
+
     capsule = _seal(
         outcome_id=outcome_id,
         snapshot=snapshot,
@@ -366,7 +496,11 @@ def evaluate_agent_trade_intent(
     )
     recorder.seal(capsule)
     return AgentDecisionPathResult(
-        capsule=capsule, risk_decision=risk_decision, supervisor_decision=supervisor_decision
+        capsule=capsule,
+        risk_decision=risk_decision,
+        supervisor_decision=supervisor_decision,
+        external_supervisor_outcome=external_supervisor_outcome,
+        external_supervisor_record=external_supervisor_record,
     )
 
 
@@ -411,6 +545,53 @@ def _trip(
         source="risk_engine",
     )
     recorder.flush()
+
+
+def _external_supervisor_record(
+    outcome: SupervisorReviewOutcome,
+    *,
+    proposal_id: UUID,
+    trade_intent_id: UUID,
+    trade_intent_decision_hash: str,
+    now: UtcDatetime,
+) -> ExternalSupervisorReviewRecord:
+    """A normalized record of one external-Supervisor evaluation, ready
+    for a caller to persist -- built whether a genuine review arrived or
+    not, so `UNKNOWN` is exactly as representable as `APPROVE`/`VETO`.
+    This module does not persist it itself (see the module docstring's
+    "External Supervisor" section for why).
+
+    `record_id` is keyed on `proposal_id`, `trade_intent_decision_hash`
+    *and* the outcome's own full content (`verdict`, `reason_codes` and
+    the underlying review's id when one exists) -- not
+    `trade_intent_decision_hash` alone, and not `verdict`/`review_id`
+    alone either (self-review found a first fix that still collided: two
+    different `UNKNOWN` outcomes -- e.g. `NO_SUPERVISOR_RESPONSE` on a
+    timeout, `REVIEW_EXPIRED` on a later retry -- share `verdict="UNKNOWN"`
+    and `review_id=None`, so `reason_codes` has to be part of the key too,
+    not just the two fields that happen to distinguish `APPROVE`/`VETO`
+    from `UNKNOWN`). Two evaluations of the identical proposal/intent pair
+    can genuinely produce different outcomes over time; keying on full
+    content the same way `_platform_policy_decision` already folds
+    `verdict.value` into its own `decision_id` means each distinct outcome
+    gets its own durable identity rather than silently colliding on one
+    `record_id`.
+    """
+    review_id = outcome.review.review_id if outcome.review is not None else None
+    return ExternalSupervisorReviewRecord(
+        record_id=uuid5(
+            NAMESPACE_URL,
+            f"crumblr:external-supervisor-record:{proposal_id}:{trade_intent_decision_hash}:"
+            f"{outcome.verdict.value}:{review_id}:{','.join(outcome.reason_codes)}",
+        ),
+        proposal_id=proposal_id,
+        trade_intent_id=trade_intent_id,
+        trade_intent_decision_hash=trade_intent_decision_hash,
+        verdict=outcome.verdict,
+        reason_codes=outcome.reason_codes,
+        review_id=review_id,
+        evaluated_at_utc=now,
+    )
 
 
 def _risk_context(config: PlatformConfig) -> policies.RiskContext:

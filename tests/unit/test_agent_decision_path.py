@@ -10,19 +10,31 @@ broker-state capture instead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from crumblr.agent_gateway.contracts import (
+    ExternalSupervisorReviewRecord,
+    ExternalSupervisorVerdict,
+    SupervisorReview,
+    TradeProposal,
+)
 from crumblr.agent_gateway.decision_path import (
     AgentDecisionPathResult,
     PortfolioSnapshot,
     evaluate_agent_trade_intent,
 )
 from crumblr.agent_gateway.evidence import build_agent_context_evidence
+from crumblr.agent_gateway.reference_supervisor import (
+    LOW_CONFIDENCE,
+    ReferenceSupervisor,
+    ReferenceSupervisorConfig,
+)
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
+    EntryType,
     Environment,
     IncidentStatus,
     ReasonCode,
@@ -177,6 +189,33 @@ def agent_intent(**overrides: Any) -> Any:
     }
     fields.update(overrides)
     return make_intent(**fields)
+
+
+def agent_proposal(**overrides: Any) -> TradeProposal:
+    """A `TradeProposal` for the external-Supervisor wiring tests below --
+    content need not match any particular `agent_intent()`, since the
+    wiring binds proposal and intent explicitly by id/hash, not by
+    field-for-field agreement."""
+    fields: dict[str, Any] = {
+        "proposal_id": uuid4(),
+        "agent_id": uuid4(),
+        "assignment_id": uuid4(),
+        "context_hash": "context-hash-abc",
+        "strategy_artifact_hash": "abc123",
+        "side": Side.BUY,
+        "entry_type": EntryType.MARKET,
+        "reference_price": Decimal("1.08500"),
+        "stop_loss_price": Decimal("1.08000"),
+        "take_profit_price": Decimal("1.09000"),
+        "confidence": 0.8,
+        "requested_risk_fraction": Decimal("0.005"),
+        "reason_codes": ("sweep_and_shift",),
+        "evidence_refs": (),
+        "submitted_at_utc": FIXED_NOW,
+        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+    }
+    fields.update(overrides)
+    return TradeProposal.model_validate(fields)
 
 
 class TestNoTrade:
@@ -578,3 +617,235 @@ class TestStrategyNeutrality:
         assert result.risk_decision.verdict is RiskVerdict.PASS
         assert result.supervisor_decision is not None
         assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+
+class CountingSupervisor:
+    """Wraps a real `ExternalSupervisorProvider` and counts calls -- used
+    to prove the external Supervisor is never asked about a proposal the
+    Policy Gate already refused."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.call_count = 0
+
+    def review(self, **kwargs: Any) -> Any:
+        self.call_count += 1
+        return self._inner.review(**kwargs)
+
+
+class NeverReturnsSupervisor:
+    """Simulates a transport-backed Supervisor that never got a response
+    (a timeout) -- returns `None`, exactly like a real HTTP client would
+    on a failed call."""
+
+    def review(self, **kwargs: Any) -> None:
+        return None
+
+
+class TestExternalSupervisorWiring:
+    """AG-003 (`review/AGENT_FEEDBACK.md`), Phase C
+    (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`): the external
+    Supervisor is a second, distinct veto layer from the strategy-neutral
+    Policy Gate, wired in via an injected `ExternalSupervisorProvider` --
+    never called via HTTP from inside this module."""
+
+    def test_omitting_proposal_and_provider_skips_the_step_entirely(self) -> None:
+        """Backward compatibility: every existing caller (PAPER_LITE
+        included) that does not pass `proposal`/`external_supervisor`
+        must see zero behaviour change."""
+        fixture = Fixture()
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.external_supervisor_outcome is None
+        assert result.external_supervisor_record is None
+        assert not any(source == "external_supervisor" for _, _, _, source in recorder.events)
+
+    def test_a_provider_without_a_proposal_is_also_skipped(self) -> None:
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(agent_intent(), external_supervisor=supervisor)
+        assert result.external_supervisor_outcome is None
+
+    def test_an_approving_reference_supervisor_reaches_approve(self) -> None:
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, recorder = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(confidence=0.9), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.APPROVE
+        assert result.external_supervisor_record is not None
+        assert result.external_supervisor_record.verdict is ExternalSupervisorVerdict.APPROVE
+        # Not durably recorded by decision_path.py itself -- see the
+        # module docstring's "External Supervisor" section for why.
+        assert not any(
+            isinstance(payload, ExternalSupervisorReviewRecord) for payload, *_ in recorder.events
+        )
+
+    def test_a_vetoing_reference_supervisor_does_not_change_risk_or_policy(self) -> None:
+        """The external Supervisor's own VETO is recorded and exposed, but
+        never overwrites/relabels the Policy Gate's own APPROVE -- "two
+        different veto layers" (Phase C's own instruction), never merged
+        into one."""
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.99)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(confidence=0.1), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.VETO
+        assert LOW_CONFIDENCE in result.external_supervisor_outcome.reason_codes
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+    def test_a_missing_supervisor_response_is_unknown_not_a_silent_approval(self) -> None:
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=NeverReturnsSupervisor()
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert result.external_supervisor_record is not None
+        assert result.external_supervisor_record.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert result.external_supervisor_record.review_id is None
+
+    def test_two_different_outcomes_for_the_same_proposal_get_different_record_ids(self) -> None:
+        """Self-review regression: `record_id` must not collide when the
+        same proposal/intent pair produces two different outcomes over
+        time (e.g. a timeout on one attempt, a real APPROVE on a retry) --
+        keyed on outcome content, not only `trade_intent_decision_hash`."""
+        intent = agent_intent()
+        the_proposal = agent_proposal()
+        fixture = Fixture()
+
+        unknown_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=NeverReturnsSupervisor()
+        )
+        approve_result, _ = fixture.evaluate(
+            intent,
+            proposal=the_proposal,
+            external_supervisor=ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            ),
+        )
+
+        assert unknown_result.external_supervisor_record is not None
+        assert approve_result.external_supervisor_record is not None
+        assert (
+            unknown_result.external_supervisor_record.record_id
+            != approve_result.external_supervisor_record.record_id
+        )
+
+    def test_two_different_unknown_reasons_also_get_different_record_ids(self) -> None:
+        """Self-review regression, second pass: the first fix keyed
+        `record_id` on `verdict`/`review_id` alone, which still collides
+        for two different `UNKNOWN` outcomes -- both have `verdict=
+        "UNKNOWN"` and `review_id=None` regardless of *why* they are
+        `UNKNOWN`. `reason_codes` has to be part of the key too."""
+
+        class WrongProposalSupervisor:
+            def review(self, *, proposal: Any, intent: Any, **kwargs: Any) -> SupervisorReview:
+                return ReferenceSupervisor(
+                    ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+                ).review(proposal=agent_proposal(proposal_id=uuid4()), intent=intent, **kwargs)
+
+        intent = agent_intent()
+        the_proposal = agent_proposal()
+        fixture = Fixture()
+
+        no_response_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=NeverReturnsSupervisor()
+        )
+        mismatch_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=WrongProposalSupervisor()
+        )
+
+        no_response_outcome = no_response_result.external_supervisor_outcome
+        mismatch_outcome = mismatch_result.external_supervisor_outcome
+        assert no_response_outcome is not None
+        assert mismatch_outcome is not None
+        assert no_response_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert mismatch_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert no_response_outcome.reason_codes != mismatch_outcome.reason_codes
+        assert no_response_result.external_supervisor_record is not None
+        assert mismatch_result.external_supervisor_record is not None
+        assert (
+            no_response_result.external_supervisor_record.record_id
+            != mismatch_result.external_supervisor_record.record_id
+        )
+
+    def test_the_supervisor_is_never_asked_when_the_policy_gate_does_not_approve(self) -> None:
+        supervisor = CountingSupervisor(
+            ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            )
+        )
+        fixture = Fixture(reconciliation_status=ReconciliationStatus.UNKNOWN)
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.HALT
+        assert supervisor.call_count == 0
+        assert result.external_supervisor_outcome is None
+
+    def test_the_supervisor_is_never_asked_when_risk_blocks(self) -> None:
+        supervisor = CountingSupervisor(
+            ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            )
+        )
+        fixture = Fixture()
+        intent = agent_intent(requested_risk_fraction=Decimal("0.05"))
+        result, _ = fixture.evaluate(
+            intent, proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert supervisor.call_count == 0
+
+    def test_the_provider_is_passed_the_exact_risk_and_policy_decision_ids(self) -> None:
+        """Proves `evaluate_agent_trade_intent` threads the real
+        `risk_decision.decision_id`/`supervisor_decision.decision_id`
+        into the `ExternalSupervisorProvider.review()` call, and that
+        `ReferenceSupervisor` correctly echoes them into the
+        `SupervisorReview` it builds -- **not** that
+        `evaluate_supervisor_review()` would reject a review carrying the
+        wrong ones. It does not check `risk_decision_id`/
+        `policy_gate_decision_id` at all (self-review finding, tracked as
+        a known gap in `review/AGENT_FEEDBACK.md` AG-003 rather than
+        silently expanded here): those two fields are documented as
+        optional/audit-completing on `SupervisorReview`, not part of the
+        binding `evaluate_supervisor_review()` enforces today
+        (`proposal_id`/`trade_intent_id`/`trade_intent_decision_hash`/
+        expiry only)."""
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        review = result.external_supervisor_outcome.review
+        assert review is not None
+        assert result.risk_decision is not None
+        assert result.supervisor_decision is not None
+        assert result.capsule.trade_intent is not None
+        assert review.risk_decision_id == result.risk_decision.decision_id
+        assert review.policy_gate_decision_id == result.supervisor_decision.decision_id
+        assert review.trade_intent_id == result.capsule.trade_intent.intent_id

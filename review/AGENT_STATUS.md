@@ -1406,6 +1406,116 @@ dedicated Dev-2 database as the work order specifies): **1358 passed**,
 3 skipped (pre-existing, unrelated), 0 failed. ruff/ruff format/mypy
 clean.
 
+**Update, same day:** the owner opened and merged PR #2
+(`3e87384`, "Merge pull request #2 from DutchBugs/agent/contracts") —
+Phase 0 is fully complete. `agent/contracts` fast-forwarded to match
+`main` exactly, re-pushed.
+
+---
+
+## 0u. External Supervisor wired into the decision path (AG-003 closed), a deterministic reference implementation — done 2026-09-03
+
+Phase C (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`), the task
+the user asked to start after confirming Phase 0's PR merged: "Zijn er
+in de tussentijd voor jou nog openstaande punten?" — the answer was yes,
+and this was the one that did not depend on Dev 1 or the Static Agent
+developer.
+
+`agent_gateway/decision_path.py::evaluate_agent_trade_intent` gained two
+new optional parameters, `proposal: TradeProposal | None = None` and
+`external_supervisor: ExternalSupervisorProvider | None = None` (a new
+`Protocol`, injected the same "no HTTP client here, no MT5 here" way
+`PortfolioStateProvider` already is). Both default to `None`, so every
+existing caller — including PAPER_LITE's two call sites in
+`application/paper_lite.py`, confirmed unmodified — sees zero behaviour
+change; the full unit suite proves this (no existing test needed a
+single edit). When both are supplied, the external Supervisor is asked
+**only** after the strategy-neutral Policy Gate itself `APPROVE`s (never
+before — asking about an already-refused proposal is pointless, and
+"Do not overwrite or relabel the platform Policy decision as the
+external Supervisor approval," Phase C's own instruction, means the two
+must stay visibly separate always, never merged into one verdict).
+`supervisor_review.py::evaluate_supervisor_review()` — built earlier
+this session, never wired anywhere until now — does the actual
+binding/expiry/self-reported-`UNKNOWN` enforcement.
+
+**`agent_gateway/reference_supervisor.py` (new): a real, deterministic,
+in-process Supervisor implementation.** Phase C explicitly permits this
+for the first canary: "If no Supervisor service exists yet, a
+deterministic reference Supervisor in a separate process is acceptable...
+provided it has zero MT5/DB credentials and the exact same
+APPROVE/VETO/UNKNOWN authority limits." `ReferenceSupervisor` checks
+only what a mechanical stand-in can honestly check without domain
+judgment or strategy semantics: that the proposal carries non-empty
+`reason_codes` (auditable rationale) and clears an operator-configured
+`confidence` floor — both already-defined, strategy-neutral
+`TradeProposal` fields. Never reads Risk/Policy state, never sizes,
+mutates, waives Risk, resets HALT or executes. **In-process today, not
+yet a separate process** — the work order's "separate process" framing
+matters for the real DEMO canary trust boundary; an HTTP transport that
+lets this run out-of-process (mirroring `static_agent_client.py`) is
+deliberately deferred, since nothing yet requires it and writing one
+now would be exactly the speculative-code pattern this track avoids.
+
+**Self-review (`/code-review medium`) ran three times this slice and
+found four real issues, all fixed before commit:**
+
+1. `_external_supervisor_record()` tried to durably persist
+   `ExternalSupervisorReviewRecord` via `recorder.record()` — but that
+   type is agent_gateway-owned, and Core's event journal
+   (`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry that
+   cannot reference it without `domain/` importing from `agent_gateway/`,
+   inverting this codebase's one-way dependency direction. Against the
+   real `JournalRecorder`, this would have raised `ValueError: ... is
+   not a registered event payload` the first time any real caller
+   supplied a provider — caught before shipping, not after. Fixed by
+   **not** persisting it from this module at all: both
+   `external_supervisor_outcome` and the new
+   `external_supervisor_record` are returned on
+   `AgentDecisionPathResult` instead, for a caller to persist through
+   its own mechanism. Tracked as AG-022 (`review/AGENT_FEEDBACK.md`) —
+   a real cross-track design question (a generic Core "extension event"
+   mechanism, or routing through `AgentDecisionOutcomeStore`), not
+   decided unilaterally here.
+2. `record_id`'s first draft was keyed on `verdict`/`review_id` only —
+   still collided for two different `UNKNOWN` outcomes (e.g.
+   `NO_SUPERVISOR_RESPONSE` on a timeout, then `REVIEW_EXPIRED` on a
+   retry both share `verdict="UNKNOWN"`/`review_id=None`). Fixed by
+   folding `reason_codes` into the key too; regression-tested with two
+   deliberately different `UNKNOWN` causes for the identical
+   proposal/intent pair.
+3. A test named `test_the_review_binds_to_the_exact_risk_and_policy_
+   decision_ids` actually only proved this module correctly *passes*
+   `risk_decision_id`/`policy_gate_decision_id` to the provider and that
+   `ReferenceSupervisor` echoes them back — not that
+   `evaluate_supervisor_review()` would *reject* a mismatch (it doesn't
+   check those two fields at all). Renamed to
+   `test_the_provider_is_passed_the_exact_risk_and_policy_decision_ids`
+   and documented the real gap honestly in `supervisor_review.py`'s own
+   module docstring rather than silently expanding that module's
+   enforcement scope. Tracked as AG-021.
+4. (Earlier pass) confirmed no correctness bug in the `intent`
+   non-`None` narrowing at the external-Supervisor call site — NO_TRADE
+   returns early before any intent-dependent code runs.
+
+Evidence: `tests/unit/test_reference_supervisor.py` (12 tests — config
+validation, confidence-floor boundary behaviour, binding fields, never
+returns `None`). `tests/unit/test_agent_decision_path.py
+::TestExternalSupervisorWiring` (11 tests — skip-when-omitted,
+skip-without-a-proposal, approve, veto-does-not-change-Risk/Policy,
+missing-response-is-UNKNOWN-not-approval, never-asked-when-Policy-
+refuses and never-asked-when-Risk-blocks via a call-counting spy, exact
+decision-id binding, two `record_id`-collision regressions). Full
+`tests/unit` **1101 passed**, 1 skipped (pre-existing, unrelated), 0
+failed; ruff/ruff format/mypy clean (187 source files). Full gate after
+(unit + integration against `crumblr_test_dev2`): **1380 passed**, 3
+skipped (pre-existing, unrelated), 0 failed.
+
+`review/AGENT_FEEDBACK.md`: AG-003 closed. AG-021 (Supervisor-review
+binding gap) and AG-022 (no durable persistence path yet) opened,
+both LOW severity — order_send stays unreachable from this path
+regardless, so neither is exploitable today.
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
