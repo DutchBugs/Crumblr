@@ -333,6 +333,65 @@ class TestAssignmentScope:
         assert any(event.event_type is AgentDecisionEventType.RECEIVED for event in events)
 
 
+class TestStrategyArtifactBinding:
+    """A `TradeProposal` must be bound to the exact, immutable
+    `StrategyArtifact` its `TradingAssignment` actually names -- not merely
+    consistent with it after the fact. `_build_trade_intent` already
+    sources `TradeIntent.strategy_version` from `assignment
+    .strategy_artifact_hash` alone, so a mismatched claim could never
+    corrupt a constructed `TradeIntent` -- but silently ignoring the
+    disagreement would let an agent run artifact B, report B's hash, and
+    be audited entirely as artifact A. This is the adversarial proof: a
+    fully valid identity/assignment/context/proposal except for the one
+    field that must not silently pass."""
+
+    def test_a_wrong_strategy_artifact_hash_is_rejected_with_zero_trade_intent(
+        self, gateway: AgentGateway
+    ) -> None:
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        mismatched = proposal(
+            context_hash=bundle.content_hash, strategy_artifact_hash="wrong-artifact-hash"
+        )
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=mismatched, now=FIXED_NOW
+        )
+        assert result.accepted is False
+        assert result.reason is AgentRejectionReason.STRATEGY_ARTIFACT_MISMATCH
+        assert result.trade_intent is None
+
+    def test_a_matching_strategy_artifact_hash_is_accepted(self, gateway: AgentGateway) -> None:
+        """Positive control: `assignment()`/`proposal()` both default to
+        `"abc123"` -- the mismatch above is the only thing that changed."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        assert result.accepted is True
+        assert result.trade_intent is not None
+
+    def test_a_strategy_artifact_mismatch_is_still_durably_audited(
+        self, gateway: AgentGateway, outcomes: InMemoryAgentDecisionOutcomeStore
+    ) -> None:
+        """Guide §9: a legitimate refusal is still an auditable row, not a
+        silently dropped disagreement."""
+        _registered(gateway)
+        bundle = _with_context(gateway)
+        mismatched = proposal(
+            context_hash=bundle.content_hash, strategy_artifact_hash="wrong-artifact-hash"
+        )
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=mismatched, now=FIXED_NOW
+        )
+        events = outcomes.events_for(result.outcome_id)
+        assert any(event.event_type is AgentDecisionEventType.REJECTED for event in events)
+        assert any(event.event_type is AgentDecisionEventType.RECEIVED for event in events)
+
+
 class TestContext:
     """ADR-005 §7 "Expiry" row, context half."""
 

@@ -160,6 +160,17 @@ class TestPlatformState:
         context = build()
         assert context.platform_state.open_risk_fraction is None
 
+    def test_a_genuinely_flat_book_constructs_as_zero_not_none(self) -> None:
+        """Regression (`review/DEVIATIONS.md` D-054 gap 2): `open_risk_fraction`
+        used to be typed `domain.money.RiskFraction`, which requires `gt=0`
+        -- a caller with a real, trustworthy, exactly-flat book had nothing
+        it could honestly pass but `None`, indistinguishable from "could
+        not be established". `OpenRiskFraction` allows zero, so a flat book
+        is now representable as the exact value it is."""
+        context = build(open_position_count=0, open_risk_fraction=Decimal("0"))
+        assert context.platform_state.open_risk_fraction == Decimal("0")
+        assert context.platform_state.open_risk_fraction is not None
+
 
 class TestStrategyNeutrality:
     """The exact negative list `feedback.1.28.md` section 3 names: none of

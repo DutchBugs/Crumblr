@@ -29,6 +29,7 @@ from crumblr.domain.enums import (
     ReconciliationStatus,
     Regime,
     RiskVerdict,
+    Side,
     SupervisorVerdict,
 )
 from crumblr.domain.models import (
@@ -308,12 +309,110 @@ class TestHaltVerdictsTripTheKillSwitch:
         )
 
 
+def untrusted_position(**overrides: Any) -> PositionState:
+    """An open position `risk.portfolio_risk.assess_open_risk` cannot
+    honestly value -- no `stop_loss_price` (`NO_PROTECTIVE_STOP`), the
+    same shape `TestOpenRiskUnknown` below exercises. Mirrors
+    `tests/unit/test_portfolio_risk.py::position()`'s own fixture style."""
+    fields: dict[str, Any] = {
+        "ticket": 900001,
+        "broker_symbol": "EURUSD",
+        "side": Side.BUY,
+        "volume": Decimal("0.10"),
+        "open_price": Decimal("1.08500"),
+        "opened_at_utc": FIXED_NOW,
+        "profit": Decimal("0"),
+        "swap": Decimal("0"),
+        "observed_at_utc": FIXED_NOW,
+    }
+    fields.update(overrides)
+    return PositionState(**fields)
+
+
+class TestOpenRiskUnknown:
+    """Owner Work Order D2.2/D1.4 (`review/OWNER_WORK_ORDERS_2026-09-02.md`):
+    the count-based `max_risk_per_trade * len(open_positions)`
+    approximation is gone. `decision_path.py` now calls Core's own
+    `risk.portfolio_risk.assess_open_risk()` directly over the fixture's
+    `open_positions` -- an untrustworthy position (no protective stop)
+    makes the whole book's open-risk figure `None`, and `risk.policies
+    .evaluate()` itself fails closed on that as `OPEN_RISK_UNKNOWN`, a
+    `BLOCK` (deliberately not a `HALT` -- `review/DEVIATIONS.md` D-054
+    gap 1), never a silent zero."""
+
+    def test_an_untrusted_open_position_blocks_before_the_policy_gate(self) -> None:
+        fixture = Fixture(open_positions=(untrusted_position(),))
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.OPEN_RISK_UNKNOWN in result.risk_decision.reason_codes
+        assert result.supervisor_decision is None
+        assert result.capsule.supervisor_decision is None
+        assert not any(source == "supervisor" for _, _, _, source in recorder.events)
+
+    def test_an_untrusted_open_position_does_not_halt_the_kill_switch(self) -> None:
+        """A BLOCK, not a HALT -- `_trip()` is only ever called on a
+        `RiskVerdict.HALT` (see `evaluate_agent_trade_intent`), so an
+        untrusted-position BLOCK must leave the switch untouched."""
+        kill_switch = KillSwitch()
+        fixture = Fixture(open_positions=(untrusted_position(),), kill_switch=kill_switch)
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert not kill_switch.is_halted
+
+    def test_an_untrusted_open_position_still_seals_a_capsule(self) -> None:
+        fixture = Fixture(open_positions=(untrusted_position(),))
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.capsule.risk_decision == result.risk_decision
+        assert recorder.sealed == [result.capsule]
+
+    def test_a_genuinely_flat_book_still_reaches_approve(self) -> None:
+        """Regression guard: an empty `open_positions` is established,
+        trustworthy zero risk (`assess_open_risk(() , ...)`), not
+        `None` -- the common case must not fail closed."""
+        fixture = Fixture(open_positions=())
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+    def test_a_trustworthy_stopped_position_still_reaches_approve(self) -> None:
+        """A position with real protective-stop geometry is established
+        risk, not unknown -- only *untrustworthy* geometry fails closed."""
+        fixture = Fixture(open_positions=(untrusted_position(stop_loss_price=Decimal("1.08000")),))
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+
 class TestAG012FreshSessionRecoveryEveryCall:
     """AG-012's accepted interim mitigation: the risk session is recovered
     fresh from the store on every call, never cached -- proven here by a
     loss gate that could only trip if the store's carried-forward
     `session_start_equity` genuinely participated in this call's
-    evaluation, since nothing else in the fixture implies a loss."""
+    evaluation, since nothing else in the fixture implies a loss.
+
+    PL-006 (`review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`):
+    `recover_session()` now catches an already-breached
+    `max_daily_loss`/`max_drawdown` itself, during recovery -- before
+    `policies.evaluate()` ever runs -- rather than relying solely on
+    `evaluate()`'s own live loss-gate leg to catch it. The kill switch is
+    tripped with the real reason (`DAILY_LOSS_LIMIT`/`MAX_DRAWDOWN`)
+    during recovery; `evaluate()` then runs against an already-halted
+    switch and reports `BLOCK`/`SYSTEM_HALTED` per its own
+    already-halted-system convention (`test_risk_engine.py
+    ::test_adr001_7_a_kill_switch_tripped_since_approval_is_refused`),
+    not a fresh `HALT`/`DAILY_LOSS_LIMIT` escalation -- the halt already
+    happened, earlier and more correctly than before PL-006."""
 
     def test_a_recorded_prior_loss_this_session_reaches_the_daily_loss_gate(self) -> None:
         risk = config().risk
@@ -338,10 +437,11 @@ class TestAG012FreshSessionRecoveryEveryCall:
         fixture = Fixture(account=account, session_store=session_store, kill_switch=kill_switch)
         result, _ = fixture.evaluate(agent_intent())
 
-        assert result.risk_decision is not None
-        assert result.risk_decision.verdict is RiskVerdict.HALT
-        assert ReasonCode.DAILY_LOSS_LIMIT in result.risk_decision.reason_codes
         assert kill_switch.is_halted
+        assert ReasonCode.DAILY_LOSS_LIMIT in kill_switch.active_reasons
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in result.risk_decision.reason_codes
 
     def test_two_calls_against_different_stores_are_fully_independent(self) -> None:
         """No object here is reused/mutated between calls -- proves there
@@ -365,10 +465,20 @@ class TestAG012FreshSessionRecoveryEveryCall:
                 recorded_at_utc=FIXED_NOW,
             )
         )
-        second_fixture = Fixture(session_store=stale_store)
+        second_kill_switch = KillSwitch()
+        second_fixture = Fixture(session_store=stale_store, kill_switch=second_kill_switch)
         second, _ = second_fixture.evaluate(agent_intent())
+
+        assert second_kill_switch.is_halted
+        # The stale store's max_drawdown_fraction=0.5 and
+        # max_session_loss_fraction=0.5 both exceed their configured
+        # thresholds (max_drawdown=0.08, max_daily_loss=0.04) -- both
+        # reasons, not either/or, so both must survive recovery.
+        assert ReasonCode.MAX_DRAWDOWN in second_kill_switch.active_reasons
+        assert ReasonCode.DAILY_LOSS_LIMIT in second_kill_switch.active_reasons
         assert second.risk_decision is not None
-        assert second.risk_decision.verdict is RiskVerdict.HALT
+        assert second.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in second.risk_decision.reason_codes
 
 
 class TestReplaySafety:

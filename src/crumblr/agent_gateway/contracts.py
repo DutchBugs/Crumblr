@@ -16,6 +16,7 @@ nothing here replaces or feeds them yet.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Self
 from uuid import UUID
@@ -25,8 +26,51 @@ from pydantic import Field, computed_field, model_validator
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import DIRECTIONAL_SIDES, Contract, Symbol, VersionTag
-from crumblr.domain.money import Price, RiskFraction
+from crumblr.domain.money import ExactDecimal, Price, RiskFraction
 from crumblr.domain.timeutils import UtcDatetime
+
+_MAX_REASON_CODES = 20
+_MAX_REASON_CODE_LENGTH = 128
+
+ReasonCodeToken = Annotated[
+    str, Field(min_length=1, max_length=_MAX_REASON_CODE_LENGTH, pattern=r"^[\x20-\x7E]+$")
+]
+"""One opaque, strategy-local reason string (feedback.1.28.md section 5:
+"`TradeProposal.reason_codes`/`NoTradeDecision.reason_codes` must be
+treated as opaque, bounded, auditable strategy-local strings, not as a
+vocabulary Crumblr understands semantically... Crumblr must not maintain a
+global whitelist of strategy reason codes"). Deliberately no whitelist and
+no required casing/vocabulary here -- only the structural bounds that
+review explicitly does authorize Crumblr to enforce: "non-empty [each
+individual code], maximum count, maximum string length, safe
+character/encoding rules." `[\\x20-\\x7E]` is printable ASCII with no
+control characters/newlines -- broad enough for any agent's own token
+style (`"MARKET_DATA_STALE"`, `"outside_killzone:LONDON_OPEN"`,
+`"a-totally-different-vocabulary"` all pass), narrow enough to keep a
+malformed/hostile response from smuggling binary or log-injection content
+into an audited field."""
+
+ReasonCodes = Annotated[tuple[ReasonCodeToken, ...], Field(max_length=_MAX_REASON_CODES)]
+"""No `min_length` at the tuple level, deliberately: an *empty* tuple must
+still construct successfully on `TradeProposal`/`NoTradeDecision` — the
+Gateway rejects that case itself, as a normal, audited
+`AgentRejectionReason.MISSING_REASON_CODES` outcome
+(`AgentGateway._evaluate_proposal`), not as a `pydantic.ValidationError`
+at the contract boundary. Only the count ceiling and each individual
+code's own shape are enforced here."""
+
+OpenRiskFraction = Annotated[ExactDecimal, Field(ge=Decimal(0), le=Decimal(1))]
+"""Total open risk across the whole book, in `[0, 1]` — unlike
+`domain.money.RiskFraction` (a *requested* per-trade risk, which cannot
+honestly be zero: `gt=0`), a flat book's total open risk legitimately
+**is** zero. `agent_gateway/market_context.py::AgentPlatformState` used
+to reuse `RiskFraction` for this field, which meant a genuinely flat book
+(`Decimal("0")`) could not even construct — `RiskFraction`'s own `gt=0`
+would reject it — so every caller had nothing to pass but `None`,
+collapsing "flat" and "could not be established" into the same
+wire value (`review/DEVIATIONS.md` D-054 gap 2, flagged by Dev 1 after
+D1.4). `None` still means "could not be established"; `Decimal("0")` now
+means "a trustworthy figure, currently flat.\""""
 
 
 class AgentRole(StrEnum):
@@ -242,7 +286,7 @@ class TradeProposal(Contract):
     the internal path. An agent cannot ask for a lot size, only for "up to
     this fraction of equity," and even that can be refused or reduced
     downstream."""
-    reason_codes: tuple[str, ...]
+    reason_codes: ReasonCodes
     evidence_refs: tuple[UUID, ...]
     """References into an already-ingested, content-addressed evidence
 
@@ -330,7 +374,7 @@ class NoTradeDecision(Contract):
     agent_id: UUID
     assignment_id: UUID
     context_hash: str
-    reason_codes: tuple[str, ...]
+    reason_codes: ReasonCodes
     decided_at_utc: UtcDatetime
 
     @computed_field  # type: ignore[prop-decorator]
@@ -420,7 +464,7 @@ class SupervisorReview(Contract):
     supervisor_runtime_version: VersionTag
     policy_version: VersionTag
     verdict: ExternalSupervisorVerdict
-    reason_codes: tuple[str, ...]
+    reason_codes: ReasonCodes
     evidence_claims: tuple[UUID, ...]
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     calibration_notes: Annotated[str, Field(max_length=2000)] | None = None

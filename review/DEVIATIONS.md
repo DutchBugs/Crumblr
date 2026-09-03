@@ -1162,6 +1162,54 @@ mean anything should start here.
   `feedback.2.0`'s submission authorization, gaps 1 and 3 are independent
   of any specific gate.
 
+### D-052 — Agent decision path fails closed (HALT-only) until D1.4's exact open-risk seam exists
+- **Status:** RESOLVED 2026-09-03 — D1.4 shipped (`b2a07a5`/`31c74cf` on
+  `main`, `risk/portfolio_risk.py::assess_open_risk`) and `agent_gateway
+  /decision_path.py` now calls it directly; see the remaining gap this
+  entry closed into
+- **Spec:** Owner Work Order D2.2: "The current agent decision path must
+  not model open risk as `max_risk_per_trade * len(open_positions)`...
+  Consume the Core-owned exact open-risk seam/value from D1.4 (or another
+  reviewed equivalent). If exact open risk cannot be established from
+  trusted state, fail closed."
+- **Code:** `agent_gateway/decision_path.py`
+- **Original gap:** the owner's Risk Policy v1 allows multiple,
+  differently-sized open EUR/USD positions within one total open-risk
+  budget (`max_open_risk=0.03`) — this module's own prior
+  `max_risk_per_trade * len(open_positions)` approximation is structurally
+  wrong the instant two open positions carry different risk.
+- **Interim state (2026-09-02, now superseded):** `PortfolioSnapshot`
+  gained a required `open_risk_fraction: RiskFraction | None` the caller
+  had to supply, with a `RiskVerdict.HALT` pre-check on `None`. Correct
+  under D2.2's own instruction, but D1.4 did not exist yet, so every real
+  caller had nothing trustworthy to pass but `None` — the agent path was
+  HALT-only for any directional intent.
+- **Current state:** D1.4 shipped `risk/portfolio_risk.py
+  ::assess_open_risk(positions, *, specs, equity) -> OpenRiskAssessment`,
+  the same single-authority whole-book computation
+  `application/live_decision.py` now also calls. `decision_path.py` calls
+  it directly — over `portfolio.open_positions` and
+  `{spec.broker_symbol: spec}` (correct today under the platform's
+  single-instrument scope, the same assumption `live_decision.py`'s own
+  call site relies on) — and passes the resulting `Decimal | None`
+  straight into `policies.PortfolioState.open_risk_fraction` unmodified.
+  `PortfolioSnapshot` no longer carries `open_risk_fraction` at all: a
+  `PortfolioStateProvider` only ever answers "what does the broker/account
+  show", never "what does Risk Policy do with that." The interim
+  module-level `RiskVerdict.HALT` pre-check was removed entirely —
+  `risk.policies.evaluate()` already fails closed on `open_risk_fraction
+  =None` itself, as `ReasonCode.OPEN_RISK_UNKNOWN`, a `BLOCK` (see D-054
+  gap 1) — re-implementing that check here a second time, weaker and
+  diverging (`HALT` instead of `BLOCK`), would have been exactly the kind
+  of duplicated authority D2.1 warns against.
+- **Watch for:** the `{spec.broker_symbol: spec}` single-spec mapping is
+  correct only because the platform is single-instrument today
+  (`config.enabled_symbols()` is EUR/USD-only); a future multi-instrument
+  agent path would need every open position's own spec supplied, not just
+  the current trade's.
+- **Gate affected:** none remaining — this was the hard functional
+  ceiling on Owner Work Order D2's "done condition" item 1, now met.
+
 ### D-053 — `max_open_positions` shipped ceiling of 10 is engineering-chosen, not owner policy
 - **Status:** deliberate; named trigger for revisiting
 - **Spec:** `review/OWNER_WORK_ORDERS_2026-09-02.md` D1.3;
@@ -1187,7 +1235,7 @@ mean anything should start here.
 - **Gate affected:** none directly; a config-only value.
 
 ### D-054 — `OPEN_RISK_UNKNOWN` is a BLOCK, and `AgentPlatformState` still collapses two states into one
-- **Status:** deliberate; two adjacent gaps, one pinned by test, one flagged for Dev 2
+- **Status:** gap 1 deliberate; gap 2 RESOLVED 2026-09-03 by Dev 2
 - **Spec:** `review/OWNER_WORK_ORDERS_2026-09-02.md` D1.4;
   `review/adr/ADR-011-owner-risk-policy-v1.md` §2.5, §3
 - **Code:** `risk/policies.py::evaluate()`,
@@ -1209,14 +1257,25 @@ mean anything should start here.
 - **Gap 2 — `AgentPlatformState.open_risk_fraction` cannot distinguish
   "flat" from "unestablished."** `RiskFraction` is constrained `gt=0`, so
   both a genuinely flat book (`fraction=0`) and an unestablished
-  assessment (`fraction=None`) have to serialize as `None` on the
+  assessment (`fraction=None`) had to serialize as `None` on the
   agent-visible contract — two states Core itself now tells apart
-  collapse into one before an external agent ever sees them. Not fixed
-  here: nothing under `src/crumblr/agent_gateway/` is touched by this
-  slice (confirmed: zero diff, zero new references to `portfolio_risk`/
-  `OPEN_RISK_UNKNOWN`). **Trigger:** Dev 2's own D2.2 (wiring
-  `PortfolioSnapshot.open_risk_fraction` against `assess_open_risk`);
-  recorded in `review/INTEGRATION_NOTICES.md` for their track.
+  collapsing into one before an external agent ever sees them. **Fixed**
+  by Dev 2, same slice as D-052's resolution: new
+  `agent_gateway/contracts.py::OpenRiskFraction` (`Annotated[ExactDecimal,
+  Field(ge=0, le=1)]`, composed from the existing float-rejecting
+  `ExactDecimal` rather than duplicating that validator) replaces
+  `RiskFraction` on `AgentPlatformState.open_risk_fraction` and
+  `build_agent_market_context_v1`'s matching parameter — `Decimal("0")`
+  now constructs and means "flat, established"; `None` still means
+  "could not be established." Evidence:
+  `tests/unit/test_agent_market_context.py
+  ::test_a_genuinely_flat_book_constructs_as_zero_not_none`. Nothing
+  populates this field with a real (non-`None`) value yet — the outbound
+  context-issuance call site (`gateway.py::issue_context_bundle` or
+  equivalent) does not exist — so this closes the *representational* gap
+  only; wiring a real value through remains separate, unblocked future
+  work, not tracked as a further deviation since no behaviour regresses
+  by its absence.
 - **Gate affected:** none directly today.
 
 ### D-055 — `trading_day()`'s weekend-fabrication bug, fixed as part of D1.5

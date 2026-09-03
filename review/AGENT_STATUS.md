@@ -991,6 +991,423 @@ track has bandwidth to take it to the reviewer, not queued as active work.
 
 ---
 
+## 0o. Gateway reason-code handling made structural/opaque — done 2026-09-02 (feedback.1.28 §11 item E)
+
+Continued autonomously after Dev 1 wrapped their session — the next item
+still open from feedback.1.28's own Dev-2 work order, unblocked and not
+waiting on anything. New `agent_gateway/contracts.py::ReasonCodeToken`/
+`ReasonCodes`: applied to `TradeProposal.reason_codes`,
+`NoTradeDecision.reason_codes` and `SupervisorReview.reason_codes` alike.
+Exactly the structural rules `feedback.1.28.md` section 5 authorizes —
+non-empty per code, a count ceiling (20), a length ceiling (128 chars),
+safe printable-ASCII-only characters (no control characters, no
+newlines) — and nothing beyond that: no casing requirement, no known-token
+list, no whitelist anywhere. Deliberately **no** tuple-level `min_length`:
+an *empty* `reason_codes` must still construct successfully on
+`TradeProposal`/`NoTradeDecision` — the Gateway's own
+`AgentRejectionReason.MISSING_REASON_CODES` rejection (already built, an
+audited outcome) handles that case, not a `pydantic.ValidationError` at
+the contract boundary.
+
+Also checked whether "proposal binds to the assigned strategy artifact
+hash" (the same section 5 sentence's other named rule) was missing —
+it is not: `AgentGateway._build_trade_intent` already sources
+`TradeIntent.strategy_version` exclusively from the trusted
+`assignment.strategy_artifact_hash`, never from
+`TradeProposal.strategy_artifact_hash`'s own (unverified) claim, so the
+proposal's claim is already structurally inert regardless of whether it
+agrees. Confirmed by re-reading `gateway.py`, not assumed.
+
+Self-review (`/code-review medium`) before commit found one real
+cross-module ripple, fixed same pass — tracked as **AG-020** (closed):
+adding these bounds meant `static_agent_translate.py
+::translate_no_trade_response()`'s final `NoTradeDecision(...)`
+construction could now raise a raw `pydantic.ValidationError` for a
+response that passed that module's own coarser `isinstance` checks but
+violated one of the new contract bounds — contradicting that module's own
+documented "always raises `StaticAgentResponseRejectedError`" contract and
+every existing test asserting that exact type. Fixed by wrapping the
+construction and re-raising as `StaticAgentResponseRejectedError`;
+regression-tested with a non-ASCII reason code.
+
+Evidence: 10 new tests in `tests/unit/test_agent_gateway_contracts.py
+::TestReasonCodesAreStructurallyBoundedNotWhitelisted` (empty tuple still
+constructs, two wildly different made-up vocabularies both accepted,
+count/length boundaries on both sides, empty string rejected, a control
+character and a newline each rejected, the bound applies to
+`SupervisorReview` too), plus the AG-020 regression test in
+`tests/unit/test_static_agent_translate.py`. ruff/ruff format/mypy clean;
+full gate (unit + integration against `crumblr_test_dev2`)
+**1255 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+This closes feedback.1.28 section 11 item E.
+
+---
+
+## 0p. Exact open risk, not a count-based approximation — done 2026-09-02 (Owner Work Order D2.2)
+
+`review/OWNER_WORK_ORDERS_2026-09-02.md` (owner-authored, arrived via Dev 1's
+commit `0648e41`) landed with an explicit, prioritized Dev-2 work order,
+superseding the informal priority list this session had been working. Its
+first directly-actionable item, D2.2, is done: `decision_path.py` no longer
+models open risk as `max_risk_per_trade * len(open_positions)` — the owner's
+new Risk Policy v1 allows multiple, differently-sized open EUR/USD positions
+within one total open-risk budget (`max_open_risk=0.03`), so a count-based
+approximation is structurally wrong the moment two positions can carry
+different risk.
+
+`PortfolioSnapshot` gained a new **required** field, `open_risk_fraction:
+RiskFraction | None`. It must be the caller's own exact total open-risk
+figure — the Core-owned exact-open-risk seam D1.4 is supposed to build, once
+it exists; nothing under my ownership can honestly compute it (I do not own
+account/position state at all, by design — see the module docstring's
+"No MT5 anywhere in this module" section). `None` means the caller could not
+establish a trustworthy figure. Per D2.2's own instruction ("if exact open
+risk cannot be established from trusted state, fail closed"),
+`evaluate_agent_trade_intent` now checks this **before** Risk evaluation
+runs at all: `None` produces a directly-constructed `RiskDecision`
+(`verdict=HALT`, `reason_codes=(SAFETY_STATE_UNKNOWN,)`), trips the kill
+switch, seals a capsule with `supervisor_decision=None`, and returns —
+never reaching the Policy Gate. There is no silent zero anywhere on this
+path.
+
+**This is genuinely partial, not a full fix.** D1.4 (Dev 1's Core-owned
+exact-open-risk seam) does not exist yet, so today every real caller of this
+module still has nothing honest to pass but `None` — meaning the agent path
+is currently HALT-only for any directional intent until D1.4 lands. That is
+the correct fail-closed behaviour, not a bug: better an honest refusal than
+resurrecting the wrong approximation to keep the shadow path producing
+`PASS` verdicts. Flagged to Dev 1 (SendMessage) since `PortfolioSnapshot`
+is the `PortfolioStateProvider` Protocol's own return shape, and this add is
+a breaking field addition every future implementer (including D1.4 itself)
+must satisfy.
+
+Self-review (`/code-review medium`) found no issues — small, well-scoped
+change with dedicated fail-closed test coverage.
+
+Evidence: `tests/unit/test_agent_decision_path.py::TestOpenRiskFractionUnknown`
+(4 new tests — HALT before the Policy Gate, kill switch tripped, capsule
+still sealed, and a regression guard that `Decimal("0")` is *not* treated as
+`None`); full existing `FakePortfolioStateProvider`/`Fixture` call sites
+updated with a `Decimal("0")` default so prior behaviour is unchanged.
+`ruff check`/`ruff format --check`/`mypy` clean; `tests/unit` full suite
+**991 passed**, 1 skipped (pre-existing, unrelated MT5-import skip), 0
+failed. Full gate (unit + integration against `crumblr_test_dev2`) after:
+**1259 passed**, 3 skipped (pre-existing, unrelated), 0 failed.
+
+This is D2.2 done. Checked the rest of the Dev-2 priority order against
+current code before moving on:
+
+- **D2.1** ("consume Owner Policy v1; do not duplicate it") — already
+  satisfied, verified by grep: no numeric risk limit (`0.02`/`0.03`/`0.04`/
+  `0.08` or any `max_*` assignment) appears anywhere under
+  `agent_gateway/`. `decision_path.py::_risk_context` forwards
+  `PlatformConfig.risk` straight into `risk.policies.evaluate()` — the
+  same Core-authoritative function and config object the internal-strategy
+  path uses, never an agent-local copy. Note: `config/paper.yaml` itself
+  still carries the *old* pre-Owner-Policy-v1 numbers
+  (`max_risk_per_trade=0.005`, not `0.02`, etc.) — that is Dev 1's D1.2
+  ("implement Owner Risk Policy v1 as versioned configuration"), not a
+  Dev-2 gap; this module will pick up the correct values automatically
+  once D1.2 updates the config, with no code change needed here.
+- **D2.3** ("keep `AgentMarketContextV1` strategy-neutral") — already true,
+  done under §0l; no Pivot/FVG/MSS/ICT semantics are computed in
+  `market_context.py`.
+- **D2.4** (genuine HEALTHY Static Agent path) — blocked on the external
+  Agent/strategy-runtime developer turning neutral context into its own
+  Pivot-2.2 observation; nothing further to do from this side alone.
+- **D2.5** (external Supervisor, full production path) — core evaluation
+  logic done (§0m, AG-003 partial); HTTP client and wiring into
+  `decision_path.py` still open.
+- **D2.6** (AG-012 single Risk authority) — design proposed, not
+  implemented (§0n); cross-track, needs Dev 1 agreement.
+- **D2.7** (support Dev 3's PAPER_LITE via narrow seams only) —
+  informational; no Dev 3 request has arrived yet, no action taken.
+
+D2.5 (wiring) is the next concrete, unblocked Dev-2 item.
+
+---
+
+## 0q. D1.4 landed — real `assess_open_risk` wiring supersedes §0p's interim design, plus an outbound-contract fix (D-054 gap 2) — done 2026-09-03
+
+Dev 1 (`crumblr-68`) shipped D1.4 on `main` (`b2a07a5`/`31c74cf`,
+`risk/portfolio_risk.py::assess_open_risk`) and pinged this track per the
+handshake §0p asked for. Merged `origin/main` into `agent/contracts`
+(`c020051`, one real conflict — both branches had appended a
+`review/DEVIATIONS.md` entry at the same location; resolved by keeping
+both, D-052 then D-053/D-054 in order) rather than leave a citation
+dangling: a self-review pass on an unrelated same-day fix (below) flagged
+that my own draft already cited "D-054 gap 2" before that entry existed
+on this branch, and the honest fix was to actually bring it in, not
+soften the wording around a merge I owed anyway.
+
+**§0p's interim design is now superseded, not merely completed.**
+`PortfolioSnapshot.open_risk_fraction` — the required, caller-supplied
+field §0p added, with its own `RiskVerdict.HALT` pre-check on `None` — is
+gone. D1.4 shipped `assess_open_risk(positions, *, specs, equity) ->
+OpenRiskAssessment`, the exact single-authority whole-book computation
+`application/live_decision.py` itself now calls; `decision_path.py` calls
+it the same way, directly, over `portfolio.open_positions` and
+`{spec.broker_symbol: spec}` (correct today under this platform's
+single-instrument scope — the same assumption `live_decision.py`'s own
+call site relies on), and passes the `Decimal | None` result straight
+into `policies.PortfolioState.open_risk_fraction` unmodified. The interim
+HALT pre-check was deleted, not kept as a belt-and-braces extra: Core's
+own `risk.policies.evaluate()` already fails closed on `None` itself
+(`ReasonCode.OPEN_RISK_UNKNOWN`, a `BLOCK` — deliberately not a `HALT`,
+`review/DEVIATIONS.md` D-054 gap 1's own reasoning: no in-system
+remediation path exists yet for a stopless position, so a HALT would be a
+permanent brick, not a safer outcome). Keeping my own parallel HALT-based
+check would have been a second, weaker, diverging reimplementation of a
+decision Core already owns correctly — exactly what D2.1 ("consume Owner
+Policy v1; do not duplicate it") warns against. `PortfolioSnapshot`
+itself shrank back to `account`/`open_positions`/`reconciliation_status`
+— a `PortfolioStateProvider` only ever answers "what does the
+broker/account show", never "what does Risk Policy do with that", which
+is one field fewer any future genuine LIVE_SHADOW implementation (Dev 1's
+or otherwise) needs to satisfy.
+
+**Separately, D-054 gap 2 (flagged by Dev 1 in the same message):**
+`agent_gateway/market_context.py::AgentPlatformState.open_risk_fraction`
+was typed `domain.money.RiskFraction`, which requires `gt=0` — a
+genuinely flat book (`Decimal("0")`) could never construct, so every
+caller had nothing honest to pass but `None`, collapsing "flat" and
+"could not be established" into the same wire value on the
+agent-visible outbound context. Fixed with a new local type,
+`agent_gateway/contracts.py::OpenRiskFraction`
+(`Annotated[ExactDecimal, Field(ge=0, le=1)]` — composed from the
+existing float-rejecting `ExactDecimal` rather than duplicating that
+validator, verified by hand that the composition actually enforces both
+constraints before relying on it), applied to both
+`AgentPlatformState.open_risk_fraction` and
+`build_agent_market_context_v1`'s matching parameter. Nothing populates
+this field with a real value yet — outbound context issuance
+(`gateway.py::issue_context_bundle` or equivalent) doesn't exist — so
+this closes the representational gap only; wiring a real value through
+is separate, unblocked future work.
+
+Self-review (`/code-review medium`) ran twice this slice: first pass
+correctly caught the dangling `D-054` citation (before the merge) as a
+genuine CLAUDE.md §2/§3 violation — three permanent cross-references to
+an entry that didn't exist on this branch yet; second pass after the
+merge and the `assess_open_risk` rewrite found nothing further.
+
+Evidence: `tests/unit/test_agent_decision_path.py::TestOpenRiskUnknown`
+(rewritten from `TestOpenRiskFractionUnknown` — now exercises the real
+mechanism: an open position with no protective stop drives
+`assess_open_risk` to `None`, proving the resulting `BLOCK`/
+`OPEN_RISK_UNKNOWN`, that it does *not* trip the kill switch (a BLOCK,
+not a HALT — `_trip()` is only ever called on HALT), that a capsule is
+still sealed, that a genuinely flat book reaches `APPROVE`, and that a
+position with real stop geometry reaches `APPROVE` too — untrustworthy
+geometry fails closed, not risk itself);
+`tests/unit/test_agent_market_context.py
+::test_a_genuinely_flat_book_constructs_as_zero_not_none`. Full unit
+suite (including Dev 1's own D1.4 tests, now merged in) **1010 passed**,
+1 skipped (pre-existing, unrelated), 0 failed; ruff/ruff format/mypy
+clean (175 source files). Full gate after (unit + integration against
+`crumblr_test_dev2`): **1280 passed**, 3 skipped (pre-existing,
+unrelated), 0 failed.
+
+`review/DEVIATIONS.md` D-052 marked RESOLVED, D-054 gap 2 marked
+RESOLVED (gap 1 remains Dev 1's own deliberate, unrelated design choice).
+Replied to Dev 1 confirming no numbering collision and flagging the
+`config/paper.yaml` staleness (resolved by their same D1.2 slice, seen
+after replying — no further action needed).
+
+This is D2.1 and D2.2 both now fully, not partially, done — the last
+open item from Owner Work Order D2's "done condition" list this track
+could complete unilaterally.
+
+---
+
+## 0r. Rebase on current main, plus hard `StrategyArtifact` binding enforcement — done 2026-09-03
+
+Explicit owner instruction (Dutch, this session): rebase onto current
+`main` before continuing, re-confirm D2.2 uses only Core Risk semantics
+(§0p/§0q already did this — verified intact, not re-done), confirm `0 !=
+None` on the outbound open-risk contract (§0q already did this — also
+verified intact), and — the actual new work this slice — hard-enforce
+that a `TradeProposal` is bound to the exact `StrategyArtifact` its
+`TradingAssignment` names, not merely consistent with it after the fact.
+
+**Sync, not a literal `git rebase`.** `agent/contracts` is already
+pushed and Dev 1 messaged that they won't touch it — but a real `git
+rebase` would still rewrite already-pushed commit SHAs and require a
+force-push, exactly the operation CLAUDE.md's git-safety section singles
+out for extra caution. Used `git merge --no-ff origin/main` instead, the
+same non-destructive approach §0q already used successfully — same
+result (fully current with `main`), without rewriting shared history.
+Two merges landed this slice: `origin/main` had moved twice since §0q
+(Dev 3's PAPER_LITE, PR #1, plus Dev 1's D1.5 weekday/weekend session
+policy and a CI fix) — merged cleanly, one real conflict both times in
+`review/DEVIATIONS.md` (both tracks append entries at the same location;
+resolved by keeping every entry, in number order). Full suite green
+after each merge before starting new work, not just at the end.
+
+**`agent_gateway/errors.py::AgentRejectionReason.STRATEGY_ARTIFACT_MISMATCH`
+(new)** and the check in `gateway.py::_evaluate_proposal`:
+`proposal.strategy_artifact_hash != assignment.strategy_artifact_hash`
+now rejects before `_build_trade_intent` is ever called — zero
+`TradeIntent` constructed, a durably audited `REJECTED` outcome instead
+(the same claim→evaluate→settle sequence every other rejection reason
+already goes through, nothing new invented). **Why this mattered even
+though `_build_trade_intent` already ignored the claim:**
+`TradeIntent.strategy_version` has only ever been sourced from
+`assignment.strategy_artifact_hash`, the trusted value, never from the
+proposal's own (unverified) claim — confirmed true again this slice, so
+a mismatch could never have corrupted a constructed `TradeIntent`. But
+silently ignoring a wrong claim, rather than rejecting it, meant an agent
+could run artifact B, report B's hash in every proposal, and be audited
+entirely as artifact A after the fact — nothing durable would ever have
+recorded that its own claim disagreed with what was actually assigned.
+Rejecting makes the disagreement itself part of the audit trail, closing
+that gap.
+
+Evidence: `tests/unit/test_agent_gateway.py::TestStrategyArtifactBinding`
+— the exact adversarial shape requested (valid identity, valid
+assignment, valid context, valid proposal, wrong
+`strategy_artifact_hash` only → rejected, `trade_intent is None`), a
+positive control (matching hash still accepts), and a durable-audit
+proof (`REJECTED` + `RECEIVED` events both present for the rejected
+outcome). Self-review (`/code-review medium`) found the change itself
+clean — checked cross-file callers (`paper_lite_toy_agent.py` already
+populates the field consistently), all existing test fixtures (uniformly
+`"abc123"`, nothing broke), and check ordering — but flagged a real
+process gap: no `status.md` §13 entry existed for this change. Resolved
+by writing this entry here instead of directly editing `status.md`
+myself: `status.md` is Dev 1's actively-edited canonical document (this
+slice's own merges pulled in 259 lines of their concurrent edits to it)
+and the established, working pattern all session — visible in `status.md`
+line 20's own Dev-2 row, which already reflects §0q's `assess_open_risk`
+wiring — is that Dev 1 synthesizes a summary from this file into
+`status.md`'s tracker rather than both sessions editing the same
+document concurrently.
+
+Full gate: ruff/ruff format/mypy clean; `tests/unit` **1059 passed**, 1
+skipped (pre-existing, unrelated), 0 failed. Full gate (unit +
+integration against `crumblr_test_dev2`, including Dev 3's newly-merged
+PAPER_LITE suites): **1331 passed**, 3 skipped (pre-existing, unrelated),
+0 failed.
+
+Reaffirmed, not newly built this slice (owner instruction's items 5-7):
+External Supervisor wiring is the explicitly-named *next* slice, not
+this one (§0m's core logic is done, HTTP client/wiring remain open,
+unchanged since §0q). AG-012 stays a cross-track requirement — no
+agent-only lock was built (§0n's proposal stands, unimplemented,
+awaiting Dev 1). Dev 3 gets narrow, stable seams only
+(`AgentMarketContextV1`, translation, `AgentGateway`, the shared
+open-risk input, Supervisor contracts) — no PAPER_LITE orchestration
+logic exists or was added anywhere under this track's ownership; Dev 3's
+own `application/paper_lite*.py` (merged via PR #1, now present after
+this slice's merge) was built entirely on their side.
+
+---
+
+## 0s. PL-006 (`recover_session()` loss/drawdown check) merged — two test assertions updated for the new, more-correct timing — done 2026-09-03
+
+Dev 1 shipped PL-006 (`b3068c0`/`8505fd2` on `main`,
+`review/adr/ADR-013-restart-recovery-loss-drawdown-check.md`):
+`risk/session.py::recover_session()` now checks a recovered session's
+`max_drawdown_fraction`/`max_session_loss_fraction` against the
+configured `max_drawdown`/`max_daily_loss` thresholds itself, during
+recovery — a real gap PAPER_LITE's own test suite surfaced: previously,
+an already-breached session that survived a restart was only ever caught
+later, inside `policies.evaluate()`'s own live loss-gate leg. `Dev 1`
+made the one-line mechanical fix at this track's own call site
+(`decision_path.py:243`, two new kwargs,
+`max_daily_loss=config.risk.max_daily_loss`/
+`max_drawdown=config.risk.max_drawdown` — the same shape `orchestration
+.py`/`live_decision.py`/`execution.py` already pass) themselves, with my
+explicit go-ahead: `main` was red for PAPER_LITE's own tests over this
+today, not a future break on my branch, so waiting for me to touch it
+was the wrong call there — confirmed by reading the actual diff after
+merging, exactly the two kwargs, nothing else in the file touched.
+
+**Two tests broke, correctly — a timing change, not a defect.** Before
+PL-006, an already-breached session's `DAILY_LOSS_LIMIT`/`MAX_DRAWDOWN`
+was caught inside `policies.evaluate()`'s own live loss-gate leg, landing
+directly in `risk_decision.reason_codes` as `RiskVerdict.HALT`. Now
+`recover_session()` catches it first and trips the kill switch during
+recovery, before `evaluate()` ever runs — `evaluate()` then runs against
+an already-halted switch and reports `RiskVerdict.BLOCK` with
+`ReasonCode.SYSTEM_HALTED`, per its own pre-existing "an already-halted
+system is enforced as a BLOCK, not a fresh HALT escalation" convention
+(`tests/unit/test_risk_engine.py
+::test_adr001_7_a_kill_switch_tripped_since_approval_is_refused`) —
+reused here, not reinvented. The kill switch itself is still correctly
+halted with the real reason, just visible via `kill_switch.active_reasons`
+now rather than `risk_decision.reason_codes`. Updated
+`tests/unit/test_agent_decision_path.py
+::TestAG012FreshSessionRecoveryEveryCall`'s two affected tests to assert
+the new, more-correct shape (`kill_switch.is_halted` +
+`active_reasons` carries the real breach reason + downstream
+`risk_decision.verdict is BLOCK`/`SYSTEM_HALTED`) rather than paper over
+the difference.
+
+Self-review (`/code-review medium`) caught one real precision gap before
+commit: my first draft asserted `MAX_DRAWDOWN in active_reasons or
+DAILY_LOSS_LIMIT in active_reasons` for the second test, but the actual
+fixture (`max_drawdown_fraction=0.5`, `max_session_loss_fraction=0.5`,
+both far over their configured thresholds) always trips *both* reasons —
+confirmed directly from the captured log output
+(`"reasons": ["MAX_DRAWDOWN", "DAILY_LOSS_LIMIT"]`), not assumed. An
+`or` would have silently stopped catching a regression that dropped
+either one; tightened to `and` on both.
+
+Did not touch `test_agent_decision_path.py` before Dev 1 pushed, per our
+own agreement (`agent_gateway/**` stays single-owned; I fix my own test
+file against real, pushed code rather than either session editing it
+blind or concurrently).
+
+Evidence: `tests/unit/test_agent_decision_path.py` — both previously
+failing tests pass again (23/23 in the file); full `tests/unit`
+**1067 passed**, 1 skipped (pre-existing, unrelated), 0 failed;
+ruff/ruff format/mypy clean (185 source files). Full gate after (unit +
+integration against `crumblr_test_dev2`): **1339 passed**, 3 skipped
+(pre-existing, unrelated), 0 failed.
+
+---
+
+## 0t. Phase 0 convergence — synced with item 9, pushed for review; PR itself blocked on missing GitHub access — 2026-09-03
+
+The owner/reviewer published a major new coordination document,
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` — a staged route
+(Phases 0 through F) to a one-shot, deliberately constrained real
+Pepperstone **DEMO** canary. Its Phase 0 names this track's own next
+required action explicitly: merge/rebase latest `main` (including item 9,
+ADR-014's broker-side protective-stop verification) into
+`agent/contracts`, preserve the already-reviewed D2.2/Core-risk,
+0-vs-`None` and `STRATEGY_ARTIFACT_MISMATCH` changes, run the full local
+gate, push, and open a PR to `main` — explicitly **not** bundling
+Supervisor or new Static Agent work into that PR, keeping it a pure,
+reviewable convergence.
+
+Merged `origin/main` (`7ad93a5` — item 9/ADR-014 plus the new work order
+document itself) into `agent/contracts`: clean, one usual
+`review/DEVIATIONS.md` append-collision (both tracks append entries at
+the same location; resolved keeping all entries), no conflict anywhere
+in code. Verified §0p/§0q/§0r/§0s's work (`assess_open_risk` wiring,
+`OpenRiskFraction`, `STRATEGY_ARTIFACT_MISMATCH`, the PL-006 test fixes)
+all survived intact — nothing needed re-doing, exactly as the work order
+itself expected ("Preserve the already-reviewed... changes").
+
+**Blocked on the PR step itself, not on anything code-related:** neither
+this session nor Dev 1's has `gh` CLI installed or a `GITHUB_TOKEN`/
+`GH_TOKEN` available — confirmed independently on both sides. The branch
+is pushed and ready; opening the actual PR object needs a human with
+GitHub access (the owner, most likely). Dev 1 has agreed to start their
+own Phase-0 cross-track review directly against the pushed branch
+(`agent/contracts` vs `main`) without waiting on the PR object to exist,
+so review is not blocked even though the formal PR artifact is.
+
+Full gate (unit + integration against `crumblr_test_dev2`, on the
+dedicated Dev-2 database as the work order specifies): **1358 passed**,
+3 skipped (pre-existing, unrelated), 0 failed. ruff/ruff format/mypy
+clean.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
 
 | Step | Scope | State |

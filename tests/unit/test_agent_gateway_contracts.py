@@ -311,6 +311,70 @@ class TestTradeProposal:
         assert first.proposal_fingerprint == second.proposal_fingerprint
 
 
+class TestReasonCodesAreStructurallyBoundedNotWhitelisted:
+    """feedback.1.28.md section 5 / section 11 item E: `reason_codes` must
+    be "opaque, bounded, auditable strategy-local strings" — Crumblr
+    enforces structural rules (non-empty per code, maximum count, maximum
+    length, safe character/encoding rules) but must never maintain a
+    global whitelist. Exercised against `TradeProposal`, `NoTradeDecision`
+    and `SupervisorReview` alike, the three contracts that carry
+    `reason_codes`.
+    """
+
+    def test_an_empty_tuple_still_constructs(self) -> None:
+        """Deliberately not rejected here — an empty `TradeProposal
+        .reason_codes` is `AgentGateway._evaluate_proposal`'s own audited
+        `AgentRejectionReason.MISSING_REASON_CODES` rejection, never a
+        construction-time `ValidationError`."""
+        proposal = trade_proposal(reason_codes=())
+        assert proposal.reason_codes == ()
+        decision = no_trade_decision(reason_codes=())
+        assert decision.reason_codes == ()
+
+    def test_any_arbitrary_token_vocabulary_is_accepted_no_whitelist(self) -> None:
+        """Wildly different casing/shape from two unrelated, made-up
+        vocabularies — neither is a Crumblr-known code, and both must
+        pass, proving there is no whitelist anywhere in the contract."""
+        first = trade_proposal(reason_codes=("MARKET_DATA_STALE", "PIVOT_2_2_CONFIRMED"))
+        assert first.reason_codes == ("MARKET_DATA_STALE", "PIVOT_2_2_CONFIRMED")
+        second = trade_proposal(reason_codes=("a-totally-different:vocabulary!v2",))
+        assert second.reason_codes == ("a-totally-different:vocabulary!v2",)
+
+    def test_more_than_twenty_reason_codes_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            trade_proposal(reason_codes=tuple(f"code_{i}" for i in range(21)))
+
+    def test_exactly_twenty_reason_codes_is_accepted(self) -> None:
+        proposal = trade_proposal(reason_codes=tuple(f"code_{i}" for i in range(20)))
+        assert len(proposal.reason_codes) == 20
+
+    def test_a_reason_code_over_the_length_limit_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            trade_proposal(reason_codes=("x" * 129,))
+
+    def test_a_reason_code_at_exactly_the_length_limit_is_accepted(self) -> None:
+        proposal = trade_proposal(reason_codes=("x" * 128,))
+        assert len(proposal.reason_codes[0]) == 128
+
+    def test_an_empty_string_reason_code_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            trade_proposal(reason_codes=("",))
+
+    def test_a_control_character_in_a_reason_code_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            trade_proposal(reason_codes=("bad\x00code",))
+
+    def test_a_newline_in_a_reason_code_is_rejected(self) -> None:
+        """Guards against log-injection-shaped content in an audited
+        field, not against any particular vocabulary."""
+        with pytest.raises(ValidationError):
+            no_trade_decision(reason_codes=("line one\nline two",))
+
+    def test_the_bound_applies_to_supervisor_review_too(self) -> None:
+        with pytest.raises(ValidationError):
+            supervisor_review(reason_codes=tuple(f"code_{i}" for i in range(21)))
+
+
 class TestNoTradeDecisionIsIndependentOfProposal:
     def test_no_trade_decision_is_constructible_on_its_own(self) -> None:
         decision = no_trade_decision()

@@ -302,6 +302,23 @@ class TestRefusals:
     def _mutate(self, **overrides: Any) -> dict[str, Any]:
         return {**REAL_FORK_RESPONSE, **overrides}
 
+    def test_refuses_reason_codes_that_violate_the_platform_contracts_own_bounds(self) -> None:
+        """Self-review finding: `NoTradeDecision.reason_codes`
+        (`agent_gateway/contracts.py::ReasonCodes`) carries its own
+        structural bounds beyond this module's coarse `isinstance` checks
+        -- a response that passes those but violates a contract bound
+        (here: non-ASCII) must still raise this module's own documented
+        `StaticAgentResponseRejectedError`, never a raw
+        `pydantic.ValidationError` a caller wouldn't expect."""
+        with pytest.raises(StaticAgentResponseRejectedError, match="reason_codes"):
+            translate_no_trade_response(
+                self._mutate(reason_codes=["café"]),
+                sent_context=SENT_CONTEXT,
+                agent_id=AGENT_ID,
+                assignment_id=ASSIGNMENT_ID,
+                context_hash="ctx",
+            )
+
     def test_refuses_an_unsupported_schema_version(self) -> None:
         with pytest.raises(StaticAgentResponseRejectedError, match="schema_version"):
             translate_no_trade_response(

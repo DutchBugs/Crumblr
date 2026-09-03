@@ -31,6 +31,8 @@ from datetime import datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from pydantic import ValidationError
+
 from crumblr.agent_gateway.contracts import NoTradeDecision
 from crumblr.agent_gateway.gateway import AgentDecisionOutcomeResult, AgentGateway
 from crumblr.agent_gateway.static_agent_transport import STATIC_AGENT_STRATEGY_IDENTITY
@@ -113,14 +115,28 @@ def translate_no_trade_response(
 
     decided_at_utc = _parse_decision_time(response.get("decision_time_utc"))
 
-    return NoTradeDecision(
-        decision_id=uuid5(NAMESPACE_URL, f"crumblr:static-agent-decision:{fork_decision_id}"),
-        agent_id=agent_id,
-        assignment_id=assignment_id,
-        context_hash=context_hash,
-        reason_codes=tuple(reason_codes_raw),
-        decided_at_utc=decided_at_utc,
-    )
+    try:
+        return NoTradeDecision(
+            decision_id=uuid5(NAMESPACE_URL, f"crumblr:static-agent-decision:{fork_decision_id}"),
+            agent_id=agent_id,
+            assignment_id=assignment_id,
+            context_hash=context_hash,
+            reason_codes=tuple(reason_codes_raw),
+            decided_at_utc=decided_at_utc,
+        )
+    except ValidationError as error:
+        # `NoTradeDecision.reason_codes` carries its own structural bounds
+        # (count/length/safe-character -- `agent_gateway/contracts.py
+        # ::ReasonCodes`) beyond the coarse `isinstance` checks above.
+        # Self-review finding: a response that passed those coarse checks
+        # but violated one of the contract's own bounds (too many codes, a
+        # too-long one, a non-ASCII/control character) must still resolve
+        # to this module's own documented `StaticAgentResponseRejectedError`
+        # -- never a raw `pydantic.ValidationError` a caller that only
+        # catches this module's own error type would not expect.
+        raise StaticAgentResponseRejectedError(
+            f"response reason_codes violate the platform contract's own bounds: {error}"
+        ) from error
 
 
 def _parse_decision_time(raw: Any) -> UtcDatetime:

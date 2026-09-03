@@ -375,6 +375,19 @@ class AgentGateway:
             return reason
         assert assignment is not None  # narrowed: _assignment_scope_reason returned None
 
+        if proposal.strategy_artifact_hash != assignment.strategy_artifact_hash:
+            # Hard StrategyArtifact binding. `_build_trade_intent` already
+            # sources `TradeIntent.strategy_version` from
+            # `assignment.strategy_artifact_hash` alone, never from this
+            # claim -- so this check cannot change what a constructed
+            # `TradeIntent` says. It exists so a disagreement is refused
+            # and durably audited rather than silently discarded: without
+            # it, an agent could run artifact B, report B's hash here, and
+            # be audited entirely as artifact A after the fact, since
+            # nothing would ever have recorded that its own claim
+            # disagreed with what was actually assigned.
+            return AgentRejectionReason.STRATEGY_ARTIFACT_MISMATCH
+
         if (
             count_including_self is not None
             and count_including_self > assignment.max_proposals_per_hour
