@@ -46,7 +46,18 @@ jobs:
         # dev container (that fallback exists for local development only,
         # never reachable from a hosted runner) — the restore proof was
         # never actually exercised in CI.
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        #
+        # The unpinned `postgresql-client` meta-package resolves to
+        # ubuntu-latest's own default major (16), while the `postgres`
+        # service below runs 17 — pg_dump refuses to dump from a server
+        # newer than itself. Installed via the official PGDG apt repo
+        # instead, pinned to postgresql-client-17 to match the service
+        # image exactly, rather than trusting whatever Ubuntu ships.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
