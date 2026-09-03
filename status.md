@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `7ad93a5` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`) — reviewer-confirmed correct (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.1: "correctly escalates a missing/mismatched broker SL"). All four items of the 2026-09-03 Shared-Core work order shipped. **New owner/reviewer coordination order received 2026-09-03: `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`** — stages the route to a constrained one-shot Pepperstone DEMO canary across Phases 0/A/B/C/D/E/F. Dev 1's own **Phase B** (real-but-disabled DEMO mutation adapter, real submission side-effect chain, honest definite/ambiguous outcome semantics, real per-ticket close/flatten, exact account pin, one-shot canary permit, shared final-Risk/side-effect authority with Dev 2) is **queued but explicitly not to start yet** — the work order's own Phase-0 sequencing requires Dev 2's `agent/contracts` convergence PR (still unmerged; branch `d62722d` last synced to pre-item-9 `main` `8505fd2`, must rebase before PR) and a fresh fully-green hosted CI run first. NEXT: awaiting Dev 2's Phase-0 convergence merge; Dev 1's own Phase-0 role is review-only (cross-track Core invariants / item-9 conflicts) once that PR exists. BLOCKED: on Dev 2's Phase-0 PR + confirmed-green hosted CI before Phase B may branch |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`) — reviewer-confirmed correct (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.1: "correctly escalates a missing/mismatched broker SL"). All four items of the 2026-09-03 Shared-Core work order shipped. **New owner/reviewer coordination order received 2026-09-03: `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`**, staging the route to a constrained one-shot Pepperstone DEMO canary across Phases 0/A/B/C/D/E/F. **Dev 1's own Phase-0 role — reviewing Dev 2's `agent/contracts` convergence merge for cross-track Core invariant/item-9 conflicts — is now DONE**: Dev 2 pushed `76a88c7` (synced onto item-9 `main`, full local gate green: 1358 passed/3 skips/0 failed), reviewed in full 2026-09-03 — zero touches to any Core file (`execution.py`/`reconciliation.py`/`expected_state.py`/`domain/enums.py`/`risk/*.py`), zero `order_send`/`close_all_positions` references, D2.2's `assess_open_risk()` wiring correct and non-duplicating, the two PL-006 test-timing fixes correct, `DEVIATIONS.md` merged cleanly (item-9/D-051 amendment intact). No conflicts found. Only the PR object itself remains, blocked on human GitHub access (neither Dev session has `gh`/API access — confirmed on both sides). Dev 1's own **Phase B** (real-but-disabled DEMO mutation adapter, real submission side-effect chain, honest definite/ambiguous outcome semantics, real per-ticket close/flatten, exact account pin, one-shot canary permit, shared final-Risk/side-effect authority with Dev 2) stays queued until the PR is opened and hosted CI is confirmed green on it — the work order's own explicit sequencing. NEXT: awaiting a human to open the `agent/contracts` → `main` PR and hosted CI confirmation. BLOCKED: on that PR/CI confirmation before Phase B may branch |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9601,6 +9601,84 @@ Next:
   conflicts — begins), or explicit user direction to begin Phase B
   research/planning ahead of that (still disabled-by-construction, but
   the work order's own text discourages branching before Phase 0).
+
+---
+
+## Update 2026-09-03 (seventy-second entry) — Dev 1's own Phase-0 review of Dev 2's convergence merge: no conflicts found
+
+```text
+Component: none (review only — no source changed)
+Milestone: DEMO canary work order, Phase 0
+Status before: Dev 1 blocked on Dev 2's convergence PR
+Status after:  Dev 1's own Phase-0 review complete, no conflicts; blocked only on a human opening the PR + hosted CI confirmation
+```
+
+**Completed**
+
+- Dev 2 (`crumblr-fc`) reported, via cross-session message: merged latest
+  `main` (including item 9) into `agent/contracts`, full local gate green
+  (1358 passed, 3 pre-existing skips, 0 failed), pushed as `76a88c7`,
+  merge-base exactly `main`'s `7ad93a5` (a clean, non-diverged sync).
+  Neither Dev session has `gh` CLI or a `GITHUB_TOKEN`/`GH_TOKEN` — both
+  confirmed independently — so the PR object itself cannot be opened by
+  either agent; it needs a human with GitHub access on one side or the
+  other.
+- Reviewed `git diff origin/main...origin/agent/contracts` in full
+  (14 files, 908 insertions/33 deletions) for cross-track Core
+  invariant/item-9 conflicts, per the work order's own scoping of Dev
+  1's Phase-0 role (review only, not a full re-review of Dev 2's own
+  D2.2/AG-work).
+
+**Evidence**
+
+- Zero changed lines under `execution.py`/`reconciliation.py`
+  /`expected_state.py`/`domain/enums.py`/`risk/*.py` — the entire diff
+  is scoped to `agent_gateway/`, `review/DEVIATIONS.md`, Dev 2's own new
+  `review/AGENT_STATUS.md`/`AGENT_FEEDBACK.md`, and Dev 2's own tests.
+- `git diff origin/main...origin/agent/contracts | grep -n
+  "order_send\|close_all_positions\|cancel_pending"` — zero matches.
+  Structural inertness confirmed untouched by this merge.
+- `decision_path.py`'s D2.2 wiring read directly: calls `risk
+  .portfolio_risk.assess_open_risk()` (confirmed `OpenRiskAssessment
+  .fraction: Decimal | None` is the real field by reading
+  `portfolio_risk.py` itself, not assumed), feeds `.fraction` straight
+  into `policies.PortfolioState.open_risk_fraction` unmodified, and
+  deliberately does not re-implement `OPEN_RISK_UNKNOWN`'s BLOCK-not-HALT
+  fail-closed check itself — matches D-054 gap 1's existing, correct
+  design exactly, no duplicated/diverging authority.
+- The two originally-failing `test_agent_decision_path.py` assertions
+  (flagged in the seventieth/seventy-first entries) now read
+  `RiskVerdict.BLOCK`/`ReasonCode.SYSTEM_HALTED`, matching PL-006's
+  earlier-detection timing exactly as ADR-013 §2.5 anticipated.
+- `review/DEVIATIONS.md` diff read in full: my own item-9/D-051
+  amendment survived the merge intact (confirmed via grep for
+  `PROTECTIVE_STOP`/`ADR-014`/the "Last updated" line); Dev 2's new
+  D-052 (RESOLVED) and D-054 gap 2 (RESOLVED) entries are accurate and
+  consistent with what this session independently knows of
+  `OPEN_RISK_UNKNOWN`'s design.
+
+**Problems found**
+
+- None. No conflicts, no duplicated authority, no structural-inertness
+  regression.
+
+**Risk impact**
+
+- None — this was a review, not a code change on Dev 1's own side.
+
+**Decision**
+
+- Reported the clean review result back to Dev 2 directly (no action
+  needed on their side); told them Dev 1 still holds Phase B until the
+  PR is opened and hosted CI is confirmed green on it.
+- `status.md` compact header's Dev 1 row updated to reflect the review
+  is done and the remaining blocker is now purely human-GitHub-access,
+  not engineering work on either track.
+
+Next:
+- Wait for a human (owner or either Dev's user) to open the
+  `agent/contracts` (`76a88c7`) → `main` PR and for hosted CI to run and
+  confirm green on it. Only then does Dev 1's Phase B branch.
 
 ---
 
