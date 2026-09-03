@@ -76,6 +76,14 @@ class RiskConfig(ConfigSection):
     max_drawdown: RiskFraction
     max_orders_per_hour: int = Field(ge=0)
     max_open_positions: int = Field(ge=0)
+    """An operational circuit-breaker ceiling, not a trading rule and not
+
+    the owner's portfolio budget — that is `max_open_risk`, enforced
+    against measured open risk (`risk/portfolio_risk.py::assess_open_risk`,
+    owner risk policy v1, D1.4). Position count alone must never be a
+    refusal reason on its own account; this exists only so a runaway
+    strategy cannot open unbounded tickets before the risk budget itself
+    would catch it. See `review/DEVIATIONS.md` D-053."""
     min_stop_distance_points: int = Field(ge=0)
 
     approved_config_version: Annotated[str, Field(min_length=1, max_length=128)] | None = None

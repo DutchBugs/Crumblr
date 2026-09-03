@@ -304,12 +304,12 @@ def platform_config(
         ),
         risk=RiskConfig.model_validate(
             {
-                "max_risk_per_trade": "0.005",
-                "max_open_risk": "0.02",
-                "max_daily_loss": "0.02",
-                "max_drawdown": "0.10",
+                "max_risk_per_trade": "0.02",
+                "max_open_risk": "0.03",
+                "max_daily_loss": "0.04",
+                "max_drawdown": "0.08",
                 "max_orders_per_hour": 6,
-                "max_open_positions": 1,
+                "max_open_positions": 10,
                 "min_stop_distance_points": 50,
             }
         ),

@@ -37,14 +37,34 @@ SPEC = make_instrument_spec()
 EQUITY = Decimal("10000")
 
 
+def _dummy_position(ticket: int) -> PositionState:
+    """A position that only needs to exist and be counted.
+
+    Its own stop geometry is irrelevant to these tests — `portfolio()`
+    is given `open_risk_fraction` directly, so `evaluate()` never
+    recomputes risk from these tickets.
+    """
+    return PositionState(
+        ticket=ticket,
+        broker_symbol=SPEC.broker_symbol,
+        side=Side.BUY,
+        volume=Decimal("0.01"),
+        open_price=Decimal("1.08500"),
+        opened_at_utc=FIXED_NOW,
+        profit=Decimal("0"),
+        swap=Decimal("0"),
+        observed_at_utc=FIXED_NOW,
+    )
+
+
 def risk_config(**overrides: object) -> RiskConfig:
     fields: dict[str, object] = {
-        "max_risk_per_trade": Decimal("0.005"),
-        "max_open_risk": Decimal("0.02"),
-        "max_daily_loss": Decimal("0.02"),
-        "max_drawdown": Decimal("0.10"),
+        "max_risk_per_trade": Decimal("0.02"),
+        "max_open_risk": Decimal("0.03"),
+        "max_daily_loss": Decimal("0.04"),
+        "max_drawdown": Decimal("0.08"),
         "max_orders_per_hour": 6,
-        "max_open_positions": 1,
+        "max_open_positions": 10,
         "min_stop_distance_points": 50,
     }
     fields.update(overrides)
@@ -93,7 +113,7 @@ def portfolio(
     ledger: EquityLedger | None = None,
     orders_in_last_hour: int = 0,
     seen_decision_hashes: frozenset[str] = frozenset(),
-    open_risk_fraction: Decimal = Decimal("0"),
+    open_risk_fraction: Decimal | None = Decimal("0"),
 ) -> policies.PortfolioState:
     return policies.PortfolioState(
         account=account or make_account_state(equity=EQUITY, balance=EQUITY),
@@ -149,6 +169,9 @@ class TestHealthyIntentPasses:
         decision = evaluate()
         assert decision.risk_amount is not None
         assert decision.risk_amount <= EQUITY * Decimal("0.005")
+        # And within the owner's per-trade ceiling, independent of what the
+        # intent itself happened to request.
+        assert decision.risk_amount <= EQUITY * risk_config().max_risk_per_trade
 
 
 class TestMarketDataChecks:
@@ -228,7 +251,10 @@ class TestExposureLimits:
             swap=Decimal("0"),
             observed_at_utc=FIXED_NOW,
         )
-        decision = evaluate(portfolio_state=portfolio(open_positions=(position,)))
+        decision = evaluate(
+            portfolio_state=portfolio(open_positions=(position,)),
+            risk_context=context(risk=risk_config(max_open_positions=1)),
+        )
         assert ReasonCode.MAX_OPEN_POSITIONS in decision.reason_codes
 
     def test_the_order_frequency_limit_is_enforced(self) -> None:
@@ -245,14 +271,120 @@ class TestExposureLimits:
         assert ReasonCode.RISK_PER_TRADE_LIMIT in decision.reason_codes
 
     def test_the_portfolio_risk_budget_is_enforced(self) -> None:
-        decision = evaluate(portfolio_state=portfolio(open_risk_fraction=Decimal("0.02")))
+        decision = evaluate(portfolio_state=portfolio(open_risk_fraction=Decimal("0.03")))
         assert ReasonCode.OPEN_RISK_LIMIT in decision.reason_codes
+
+    def test_an_unestablished_open_risk_blocks_with_its_own_code(self) -> None:
+        """Owner risk policy v1 (D1.4): `None` is never treated as zero —
+
+        it must not silently pass, and it must not read as
+        `OPEN_RISK_LIMIT` either, since that would misreport an unknown
+        as a known-too-large budget."""
+        decision = evaluate(portfolio_state=portfolio(open_risk_fraction=None))
+        assert ReasonCode.OPEN_RISK_UNKNOWN in decision.reason_codes
+        assert ReasonCode.OPEN_RISK_LIMIT not in decision.reason_codes
+
+    def test_an_unestablished_open_risk_is_a_block_not_a_halt(self) -> None:
+        """Pinned deliberately (ADR-011 §2.5): the platform cannot close
+
+        the offending position either way, so a HALT would be a
+        permanent brick with no in-system remediation. A later change
+        to this must be a deliberate decision, not a side effect."""
+        decision = evaluate(portfolio_state=portfolio(open_risk_fraction=None))
+        assert decision.verdict is not RiskVerdict.HALT
+
+    def test_stacked_positions_exactly_at_the_budget_pass(self) -> None:
+        """`OWNER_WORK_ORDERS_2026-09-02.md` acceptance example: 1.0% already
+
+        open plus a 2.0% request sums to exactly the 3.0% budget and must
+        pass — position count plays no part."""
+        decision = evaluate(
+            intent=healthy_intent(requested_risk_fraction=Decimal("0.02")),
+            portfolio_state=portfolio(
+                open_positions=(_dummy_position(1), _dummy_position(2)),
+                open_risk_fraction=Decimal("0.01"),
+            ),
+            risk_context=context(
+                risk=risk_config(
+                    max_risk_per_trade=Decimal("0.02"),
+                    max_open_positions=10,
+                    max_open_risk=Decimal("0.03"),
+                )
+            ),
+        )
+        assert decision.verdict is RiskVerdict.PASS
+
+    def test_stacked_positions_over_the_budget_block(self) -> None:
+        """Same example, nudged 0.1% over: 1.1% + 2.0% = 3.1% must block."""
+        decision = evaluate(
+            intent=healthy_intent(requested_risk_fraction=Decimal("0.02")),
+            portfolio_state=portfolio(
+                open_positions=(_dummy_position(1), _dummy_position(2)),
+                open_risk_fraction=Decimal("0.011"),
+            ),
+            risk_context=context(
+                risk=risk_config(
+                    max_risk_per_trade=Decimal("0.02"),
+                    max_open_positions=10,
+                    max_open_risk=Decimal("0.03"),
+                )
+            ),
+        )
+        assert ReasonCode.OPEN_RISK_LIMIT in decision.reason_codes
+
+    def test_several_small_positions_under_budget_pass_regardless_of_count(self) -> None:
+        """O-004 withdrawn: a book of several positions, well under the risk
+
+        budget, must not be refused for its *count* — only `OPEN_RISK_LIMIT`
+        or the operational `MAX_OPEN_POSITIONS` circuit-breaker may do that,
+        and neither is configured to fire here."""
+        decision = evaluate(
+            intent=healthy_intent(requested_risk_fraction=Decimal("0.002")),
+            portfolio_state=portfolio(
+                open_positions=tuple(_dummy_position(i) for i in range(1, 6)),
+                open_risk_fraction=Decimal("0.006"),
+            ),
+            risk_context=context(
+                risk=risk_config(
+                    max_risk_per_trade=Decimal("0.02"),
+                    max_open_positions=10,
+                    max_open_risk=Decimal("0.03"),
+                )
+            ),
+        )
+        assert decision.verdict is RiskVerdict.PASS
+
+    def test_a_stopless_open_position_never_reads_as_zero_risk(self) -> None:
+        """End to end through `assess_open_risk` into `evaluate`: a real
+
+        open position with no protective stop must never resolve to a
+        PASS."""
+        from crumblr.risk.portfolio_risk import assess_open_risk
+
+        stopless = PositionState(
+            ticket=1,
+            broker_symbol=SPEC.broker_symbol,
+            side=Side.BUY,
+            volume=Decimal("0.05"),
+            open_price=Decimal("1.08500"),
+            stop_loss_price=None,
+            opened_at_utc=FIXED_NOW,
+            profit=Decimal("0"),
+            swap=Decimal("0"),
+            observed_at_utc=FIXED_NOW,
+        )
+        assessment = assess_open_risk((stopless,), specs={SPEC.broker_symbol: SPEC}, equity=EQUITY)
+        assert assessment.fraction is None
+
+        decision = evaluate(portfolio_state=portfolio(open_risk_fraction=assessment.fraction))
+        assert decision.verdict is not RiskVerdict.PASS
+        assert ReasonCode.OPEN_RISK_UNKNOWN in decision.reason_codes
 
 
 class TestLossGates:
     def test_the_daily_loss_gate_halts(self) -> None:
         ledger = EquityLedger(starting_equity=EQUITY)
-        ledger.update(EQUITY * Decimal("0.97"))
+        ledger.update(EQUITY * Decimal("0.94"))
         decision = evaluate(portfolio_state=portfolio(ledger=ledger))
         assert decision.verdict is RiskVerdict.HALT
         assert ReasonCode.DAILY_LOSS_LIMIT in decision.reason_codes

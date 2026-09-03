@@ -154,13 +154,21 @@ class ReasonCode(StrEnum):
     VOLUME_STEP_INVALID = "VOLUME_STEP_INVALID"
     STOP_DISTANCE_VIOLATION = "STOP_DISTANCE_VIOLATION"
     MAX_OPEN_POSITIONS = "MAX_OPEN_POSITIONS"
-    SYMBOL_EXPOSURE_EXISTS = "SYMBOL_EXPOSURE_EXISTS"
-    """O-004: this instrument already has an exposure, and v1 permits one.
+    """The operational circuit-breaker ceiling (`RiskConfig.max_open_positions`)
 
-    Distinct from MAX_OPEN_POSITIONS on purpose. That is a portfolio budget and
-    is configurable; this is an owner-approved business rule about a single
-    instrument, and the two would be indistinguishable in an incident report if
-    they shared a code."""
+    has been hit. Not the owner's portfolio budget — that is
+    `OPEN_RISK_LIMIT`, measured against real open risk. Owner risk policy
+    v1 (D1.4) reclassified this field; see its docstring in `config.py`."""
+    SYMBOL_EXPOSURE_EXISTS = "SYMBOL_EXPOSURE_EXISTS"
+    """Retired 2026-09-02: O-004 (one exposure per symbol) was withdrawn by
+
+    `OWNER_POLICY_V1.md` §2 — multiple positions are now permitted, subject
+    to the real portfolio open-risk budget (`OPEN_RISK_LIMIT`). Kept only
+    because `ReasonCode` values are reconstructed from persisted rows
+    (`ReasonCode(code)` in `persistence/execution.py`,
+    `persistence/flatten.py`, `persistence/safety_state.py`) — deleting the
+    member would make any historical row carrying it undecodable. No code
+    path emits this any more."""
     MAX_DRAWDOWN = "MAX_DRAWDOWN"
     SESSION_BLACKOUT = "SESSION_BLACKOUT"
     OVERNIGHT_EXPOSURE = "OVERNIGHT_EXPOSURE"
@@ -187,6 +195,26 @@ class ReasonCode(StrEnum):
     recorded, which is not an error) — collapsing the two would let a
     corrupted idempotence record look identical to a legitimate fresh
     start, which is exactly the failure class F-054 exists to prevent."""
+
+    OPEN_RISK_UNKNOWN = "OPEN_RISK_UNKNOWN"
+    """Owner risk policy v1 (D1.4, `review/adr/ADR-011-owner-risk-policy
+
+    -v1.md`): `risk/portfolio_risk.py::assess_open_risk` could not
+    establish the book's total open risk — at least one open position
+    has no trustworthy protective-stop geometry (no recorded stop, or no
+    known instrument spec). Never counted as zero risk: a position this
+    platform cannot value is not evidence the book is safe, the same
+    F-002 discipline every other member in this group applies.
+
+    **BLOCK, not HALT — deliberately.** The refusal's whole job (stop
+    *new* risk stacking on top of unquantifiable risk) is fully achieved
+    by a BLOCK. The platform cannot currently close the offending
+    position either way (`close_all_positions` stays unbuilt, D-050),
+    so a HALT would be a permanent brick with no in-system remediation
+    path, and core critical path item 9 (broker-side SL/protection
+    verification) is the correctly-scoped future owner of that
+    system-level judgement — this code names the gap, item 9 escalates
+    it."""
 
     # §10.1 — supervisor pre-trade envelope checks.
     UNKNOWN_REGIME = "UNKNOWN_REGIME"

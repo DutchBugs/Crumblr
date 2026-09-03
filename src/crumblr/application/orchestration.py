@@ -60,6 +60,7 @@ from crumblr.mt5_gateway.simulated import ClosedTrade, SimulatedBroker
 from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, session, trading_window
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
+from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionStore
 from crumblr.trading_agent import registry
 from crumblr.trading_agent.base import AgentContext, FeatureEvidence
@@ -514,16 +515,20 @@ class ReplayOrchestrator:
     # ------------------------------------------------------------------ #
 
     def _portfolio(self, positions: tuple[PositionState, ...]) -> policies.PortfolioState:
-        # Each open position was sized to the per-trade budget, so total open
-        # risk is that budget times the number of positions.
-        open_risk = self._config.risk.max_risk_per_trade * Decimal(len(positions))
+        # Owner risk policy v1 (D1.4): real portfolio risk, never a
+        # count-based approximation. One account read, shared between the
+        # portfolio carrier and the assessment.
+        account = self._broker.account()
+        open_risk = assess_open_risk(
+            positions, specs={self._spec.broker_symbol: self._spec}, equity=account.equity
+        )
         return policies.PortfolioState(
-            account=self._broker.account(),
+            account=account,
             open_positions=positions,
             ledger=self._ledger,
             orders_in_last_hour=len(self._order_times),
             seen_decision_hashes=frozenset(self._seen_hashes),
-            open_risk_fraction=open_risk,
+            open_risk_fraction=open_risk.fraction,
         )
 
     def _reconciliation_status(self) -> ReconciliationStatus:
@@ -584,14 +589,19 @@ class ReplayOrchestrator:
         """
         if self._current_trading_day is None:
             return
+        # Owner risk policy v1 (D1.4): real portfolio risk, never a
+        # count-based approximation. One position read, shared between
+        # the risk assessment and the persisted position count.
+        positions = self._broker.positions()
+        open_risk = assess_open_risk(
+            positions, specs={self._spec.broker_symbol: self._spec}, equity=self._broker.equity
+        )
         state = session.snapshot(
             self._ledger,
             trading_day=self._current_trading_day,
             realized_pnl=self._broker.balance - self._ledger.starting_equity,
-            open_risk_fraction=(
-                self._config.risk.max_risk_per_trade * Decimal(len(self._broker.positions()))
-            ),
-            open_position_count=len(self._broker.positions()),
+            open_risk_fraction=open_risk.fraction,
+            open_position_count=len(positions),
             recorded_at_utc=tick.received_time_utc,
         )
         key = (
@@ -600,6 +610,14 @@ class ReplayOrchestrator:
             state.max_drawdown_fraction,
             state.max_session_loss_fraction,
             state.open_position_count,
+            # Owner risk policy v1 (D1.4): `open_risk_fraction` is no
+            # longer a pure function of `open_position_count` (a stop
+            # moved to breakeven changes risk with no count change), so
+            # the two can now genuinely disagree. Tracking the raw
+            # fraction here would restore a write-per-bar (it moves with
+            # live equity every tick); tracking establishment status
+            # flipping is the safety-relevant transition worth a write.
+            state.open_risk_fraction is None,
         )
         if key == self._session_key:
             return

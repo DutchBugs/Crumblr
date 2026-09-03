@@ -41,23 +41,6 @@ from crumblr.risk.trading_window import (
     requires_flat,
 )
 
-MAX_EXPOSURES_PER_SYMBOL = 1
-"""Owner decision O-004: one EUR/USD exposure at a time, and no more.
-
-Deliberately a constant rather than a configuration field. It is a business
-rule the owner approved for v1, not a budget to be tuned, and a YAML key would
-invite someone to raise it without the decision that should accompany doing so.
-Raising it is a code change, a review and a status.md decision row.
-
-It holds regardless of whether the account turns out to be hedging or netting
-(Q2 — answered 2026-08-24 by `account_info()` on the real demo account:
-`RETAIL_HEDGING`, status.md §13). A netting account would net a second order
-into the first position and a hedging account would open a parallel one;
-neither is what v1 is permitted to do, so the rule sits above the account
-model rather than depending on it — deliberately, so it did not need to change
-once the answer was known.
-"""
-
 HALT_REASONS: frozenset[ReasonCode] = frozenset(
     {
         ReasonCode.LIVE_ACCOUNT_IN_PAPER_MODE,
@@ -80,7 +63,17 @@ class PortfolioState:
     ledger: EquityLedger
     orders_in_last_hour: int
     seen_decision_hashes: frozenset[str]
-    open_risk_fraction: Decimal = ZERO
+    open_risk_fraction: Decimal | None
+    """Real portfolio open risk (owner risk policy v1, D1.4), from
+
+    `risk/portfolio_risk.py::assess_open_risk` — never a count-based
+    approximation. `None` means the platform could not establish it (an
+    open position with untrustworthy stop geometry) and must never be
+    treated as zero; `evaluate()` fails this closed via
+    `ReasonCode.OPEN_RISK_UNKNOWN`. Deliberately no default: a
+    `PortfolioState` that does not state an open-risk answer is exactly
+    the fail-open hazard this field's own default (`= ZERO`) used to
+    be — every construction site must now say something."""
 
 
 @dataclass(frozen=True)
@@ -191,16 +184,10 @@ def evaluate(
         reasons.append(ReasonCode.STOP_DISTANCE_VIOLATION)
 
     # --- Exposure ---------------------------------------------------------
-    # O-004 first, because it is the more specific refusal and the one an
-    # operator will want named. Both can fire; both are reported.
-    exposures = sum(
-        1 for position in portfolio.open_positions if position.broker_symbol == spec.broker_symbol
-    )
-    if exposures >= MAX_EXPOSURES_PER_SYMBOL:
-        reasons.append(ReasonCode.SYMBOL_EXPOSURE_EXISTS)
-    if exposures and _overnight_breach(
-        portfolio.open_positions, snapshot.event_time_utc, context.intraday
-    ):
+    # O-004 (one exposure per symbol) withdrawn 2026-09-02: see
+    # OWNER_POLICY_V1.md §2. Multiple positions are permitted; the real
+    # portfolio budget is enforced below via `open_risk_fraction`.
+    if _overnight_breach(portfolio.open_positions, snapshot.event_time_utc, context.intraday):
         # Past the flatten deadline with the book still open, or holding a
         # position that has already crossed a rollover. A block would leave it
         # there; only a halt brings a person in.
@@ -216,9 +203,16 @@ def evaluate(
         # carry in total. They fail for different reasons and are reported so.
         if intent.requested_risk_fraction > context.risk.max_risk_per_trade:
             reasons.append(ReasonCode.RISK_PER_TRADE_LIMIT)
-        projected_open_risk = portfolio.open_risk_fraction + intent.requested_risk_fraction
-        if projected_open_risk > context.risk.max_open_risk:
-            reasons.append(ReasonCode.OPEN_RISK_LIMIT)
+        # Owner risk policy v1 (D1.4): `open_risk_fraction` is `None` when
+        # the platform could not establish it (an open position with
+        # untrustworthy stop geometry) — never treated as zero. A BLOCK,
+        # not a HALT: see `ReasonCode.OPEN_RISK_UNKNOWN`'s own docstring.
+        if portfolio.open_risk_fraction is None:
+            reasons.append(ReasonCode.OPEN_RISK_UNKNOWN)
+        else:
+            projected_open_risk = portfolio.open_risk_fraction + intent.requested_risk_fraction
+            if projected_open_risk > context.risk.max_open_risk:
+                reasons.append(ReasonCode.OPEN_RISK_LIMIT)
 
     # --- Loss gates -------------------------------------------------------
     if portfolio.ledger.session_loss_fraction >= context.risk.max_daily_loss:

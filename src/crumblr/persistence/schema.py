@@ -205,7 +205,7 @@ risk_session_states = Table(
     Column("realized_pnl", Numeric, nullable=False),
     Column("max_drawdown_fraction", Numeric, nullable=False),
     Column("max_session_loss_fraction", Numeric, nullable=False),
-    Column("open_risk_fraction", Numeric, nullable=False),
+    Column("open_risk_fraction", Numeric, nullable=True),
     Column("open_position_count", Integer, nullable=False),
     _utc_column("occurred_at_utc", nullable=False),
     _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),

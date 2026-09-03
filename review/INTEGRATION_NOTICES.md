@@ -485,3 +485,77 @@ be aware of the new field and prefer flat() unless durable execution
 history is genuinely being read.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: New ReasonCode.OPEN_RISK_UNKNOWN (owner risk policy v1, D1.4,
+review/adr/ADR-011-owner-risk-policy-v1.md SS2.5). SYMBOL_EXPOSURE_EXISTS
+is retired (O-004 withdrawn by review/OWNER_POLICY_V1.md SS2) - kept as
+an enum member only because ReasonCode(code) reconstructs values from
+persisted rows in persistence/execution.py, persistence/flatten.py, and
+persistence/safety_state.py; no code path emits it any more.
+Impact: purely additive on the ReasonCode side - no existing member
+renamed or removed. Confirmed via grep: zero references to
+OPEN_RISK_UNKNOWN anywhere in src/crumblr/agent_gateway/ today.
+Action required: none expected. If external-agent code ever surfaces
+BLOCK/HALT reason codes to an operator or model, OPEN_RISK_UNKNOWN is
+now a live code that can appear; SYMBOL_EXPOSURE_EXISTS can still appear
+on old persisted rows and should render as retired/historical, not as a
+current rule.
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: risk/policies.py::PortfolioState.open_risk_fraction widens from
+Decimal (defaulting to ZERO) to Decimal | None, with no default (owner
+risk policy v1, D1.4). None means the platform could not establish real
+open risk (an open position with untrustworthy stop geometry) and must
+never be treated as zero - see risk/portfolio_risk.py::assess_open_risk,
+the new function that replaces the old count-based approximation
+(max_risk_per_trade * Decimal(len(open_positions))) at every internal
+call site.
+Impact: agent_gateway/decision_path.py:230-236 constructs a
+PortfolioState with an explicit open_risk_fraction kwarg already
+(confirmed by direct read before this slice) - the widened type is
+source-compatible with that call site with no edit required, though its
+own count-based approximation is unchanged by this slice (that is Dev
+2's own D2.2, tracked separately below). Confirmed via grep: zero edits
+under src/crumblr/agent_gateway/ in this slice.
+Action required: Dev 2's D2.2 - when agent_gateway/decision_path.py is
+updated to consume real open-risk accounting instead of its own
+count-based approximation, prefer risk/portfolio_risk.py::assess_open_risk
+over reimplementing the arithmetic; ping DEV1 if the signature needs
+anything the agent-gateway side does not already have in scope (specs,
+equity). Separately: agent_gateway/market_context.py
+::AgentPlatformState.open_risk_fraction: RiskFraction | None cannot
+currently distinguish a flat book from an unestablished one - both
+serialize as None, since RiskFraction is constrained gt=0. Not fixed in
+this slice (see review/DEVIATIONS.md D-054 gap 2); worth resolving
+alongside D2.2 rather than separately.
+Relevant commit: (this commit)
+```
+
+---
+
+```text
+2026-09-03 — DEV1
+Changed: New Alembic migration,
+migrations/versions/20260903_d3b2e828b5b0_risk_session_open_risk_fraction
+_nullable.py, revises 03df83b062a6 (the head at the time this was
+created - confirmed via `alembic heads`, and confirmed with Dev 2 no
+migration was in flight on agent/contracts). Nullable-only: makes
+risk_session_states.open_risk_fraction nullable (owner risk policy v1,
+D1.4). recover_session() never reads this field (confirmed by direct
+read) - recovery behaviour is unaffected.
+Impact: persistence/schema.py is shared/cross-cutting infrastructure.
+Nullability-only - no table, column removal, FK, or existing index
+changed. Confirmed via tests/integration/test_migrations.py.
+Action required: current Alembic head is now d3b2e828b5b0 - the next
+migration on either side must chain from there.
+Relevant commit: (this commit)
+```

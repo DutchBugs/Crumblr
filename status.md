@@ -1,8 +1,8 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.9  
-**Last updated:** 2026-09-01  
+**Status document version:** 1.10  
+**Last updated:** 2026-09-03  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -56,7 +56,7 @@ document you have that this repository doesn't yet.
 | # | What | Why it needs you | Where |
 |---|---|---|---|
 | 1 | Confirm the next hosted CI run is actually green | No `gh`/Actions access in this environment. Hosted run 60 already confirmed **F-063** genuinely fixed; **F-065** (`ruff format --check`) and now **F-067** (the `pg_dump`/`psql` restore proof silently skipping instead of running — `postgresql-client` was never installed on the runner, and the dump/restore subprocess calls carried no connection parameters underneath that) are both fixed 2026-09-01. "Local green" was never allowed to stand in for "hosted green," and now — for the first time — neither is "hosted green that never actually exercised the restore test." A human (or a session with GitHub access) has to look at the Actions tab for the current `main` and check: Linux job (including the two new "assert not silently skipped" steps), Windows job, PostgreSQL integration coverage, gitleaks/secrets job, overall workflow | `.github/workflows/ci.yml`; `tests/integration/test_migrations.py`; §2 M0 acceptance below; `review/FEEDBACK.md` F-067 |
-| 2 | Owner risk-policy decisions: risk per trade, max daily loss, max drawdown, last-entry cutoff, mandatory flatten deadline, HALT-reset authority | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. `config/paper.yaml`'s current numbers (0.5% / 2% / 10% / 60min / 15min) are conservative placeholders that must not be promoted to policy just by having sat there (D-013) | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; §11 below |
+| 2 | ~~Owner risk-policy decisions: risk per trade, max daily loss, max drawdown~~ **done 2026-09-02** — `max_risk_per_trade=0.02`, `max_open_risk=0.03`, `max_daily_loss=0.04`, `max_drawdown=0.08` (O-008b, ADR-011). Still open: last-entry cutoff, mandatory flatten deadline, HALT-reset authority — session policy (D1.5), a separate later slice | build.md §29 Q7/Q8 and ADR-004 §3 reserve these for a human by design. The four fractions are no longer placeholders (D-013 partially resolved); the session-timing fields are D1.5's own scope | `config/paper.yaml`; `review/adr/ADR-004-intraday-session-boundary.md`; `review/adr/ADR-011-owner-risk-policy-v1.md`; §11 below |
 | 3 | Optional: countersign the domain-contract package | Only relevant if §2's "reviewed by a human" wording below is read literally. Review 1.24 §7 approved the package at the reviewer/technical level and explicitly declined to count itself as that "human" — named as an open governance question, not an engineering one. Suggested one-line form: "Owner reviewed and accepts the current domain-contract package at commit `6bdb5b1`." | `review/domain_contracts.md`; `review/FEEDBACK.md` unreviewed-work table |
 | 4 | Decide if/when to enable terminal AlgoTrading, and under what conditions | APP-016: explicitly an owner decision, never automatic, never "just to make a check pass." The real `order_check` evidence gathered 2026-08-27 was deliberately gathered with AlgoTrading left off — a genuine `ORDER_CHECK_REJECTED` result, not a workaround. Review 1.25 §8 reaffirms: leave it off until the actual `SubmissionGate`/`feedback.2.0` readiness conditions are met | §3 APP-016 below; §13 forty-fifth entry |
 | ~~5~~ | ~~Restart real M5 bar accumulation for F-051 part 2~~ | **Done 2026-09-01** — `mt5_live_reader.py`/`live_decision.py` (`baseline_v1`) restarted against `crumblr_soak`; two real decisions reached risk PASS/Supervisor APPROVE (capsules `5b8c89df...`/`ed0b5c4a...`). Reader left running to keep accumulating toward `ict_v1`'s 120-bar threshold | `review/FEEDBACK.md` F-051; §13 fifty-sixth entry |
@@ -450,7 +450,7 @@ Per capability, because "implemented" and "validated" are different claims
 | durable HALT across restart | x | x | | | |
 | cancel pending orders | x | x | | | |
 | flatten positions | x | x | | | |
-| one exposure per symbol (O-004) | x | x | x | | |
+| real portfolio open-risk accounting (D1.4, supersedes O-004) | x | x | x | | |
 | intraday entry cut-off (O-003) | x | x | x | | |
 | overnight-exposure halt (O-003) | x | x | x | | |
 | account currency / leverage guard | x | x | x | | |
@@ -550,7 +550,7 @@ something was found and dealt with (F-009).
 | APP-008 | HIGH | The journal records decisions but not the market data they were made from; warm-up windows leave no trace at all (D-031) | | **CLOSED 2026-08-18** | `market_ticks` and `market_bars` written on the ordinary path for every observed window; tick→bar pipeline with gap, out-of-order, duplicate and crossed-quote detection. 46 tests |
 | APP-010 | MEDIUM | `metadata.create_all` was the only way to build the schema, on a database that now holds data (D-029) | | **CLOSED 2026-08-18** | Alembic baseline; the runtime migrates rather than creates; a restored `pg_dump` is proven to reproduce the run |
 | APP-011 | MEDIUM | Two supervisor checks could not fire but reported as passed (D-015, D-028, EV-002) | | **CLOSED 2026-08-18** | Threshold set to `null` = uncalibrated; every decision carries `uncalibrated_checks` and the run report names them. The calibration itself still needs real data |
-| APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18** | One-exposure is a hard constant with the reviewer's four cases tested. Intraday entries are refused and a breach halts — **the automatic flatten is M5** (D-033, ADR-004) |
+| APP-012 | HIGH | Nothing enforced the owner's one-exposure and intraday decisions (O-003, O-004) | | **PARTLY CLOSED 2026-08-18; O-004 leg superseded 2026-09-02** | O-004 (one exposure per symbol) is withdrawn by owner risk policy v1 (`review/OWNER_POLICY_V1.md`) — multiple positions are now permitted, enforced instead by real portfolio open-risk accounting (D1.4, `risk/portfolio_risk.py::assess_open_risk`, ADR-011, O-008). Intraday entries are refused and a breach halts — **the automatic flatten is built** (item 7, ADR-009) |
 | APP-014 | MEDIUM | The MT5 adapter has never run against a terminal; the fake it was tested against was written from documentation, not observation (D-035) | | **CLOSED 2026-08-24** | First contact made: account, symbol, instrument and position reads all succeeded against the real terminal (status.md §13). Continuous bar/tick read and observed reconnect behaviour, once "still open" here, completed the same day: Phase A (30 clean minutes) and Phase B (two deliberate terminal closures, both recovered with full revalidation) — F-034/F-037 closed, M1 PASSED (`feedback.1.12.md`). Closed in place per review 1.14 §11 F-033, which found this row still read as open after the fact |
 | APP-015 | MEDIUM | `symbol_info.filling_mode` and `trade_mode` are integer enums stored as strings; the filling mode is a bitmask, so `"3"` is recorded where `FOK\|IOC` was meant (D-037) | | **CLOSED 2026-08-24** | Confirmed against the real terminal (`filling_mode=2`→IOC, `trade_mode=4`→FULL, matching documentation) and fixed: decode logic shared between the gateway and the probe in `mt5_gateway/enums.py` |
 | APP-013 | MEDIUM | The Pepperstone entity is ambiguous: O-001 says EU, the supplied server says UK | | **CLOSED FOR DEMO 2026-08-24, by O-005** | Owner/reviewer decision: demo entity is **Pepperstone Limited (UK)**, amending O-001 for demo/development only. Does **not** decide the entity for a future live account — that reopens this question against live documentation (D-034) |
@@ -945,6 +945,8 @@ Use this for architectural or risk decisions.
 | 2026-08-25 | `LiveDecisionOrchestrator` is a class of its own, not a mode added to `LiveReader` or `ReplayOrchestrator` | Review 1.16 §9 is explicit: "Build it as a separate `LiveDecisionOrchestrator`/equivalent rather than turning `LiveReader` into a trading process." Keeps the boundary `LiveReader` = observe/persist real broker+market state; `LiveDecisionOrchestrator` = decide from what was persisted; execution service (M5) = later, execute. The Trading Agent, Risk Engine and Supervisor it calls are exactly the same components `ReplayOrchestrator` already uses — nothing about how a decision is judged changed, only where its inputs come from | Adding a "live mode" flag to `LiveReader`; forking `ReplayOrchestrator`'s decision logic into a parallel copy | Reviewer (review 1.16 §9) |
 | 2026-08-25 | `instrument_specs` gets a real producer: `LiveReader` now persists the spec it already observes on every reconnect | F-048 needs a durable instrument spec to size against without the decision orchestrator itself talking to MT5 — a dependency discovered while building F-048, not planned ahead of it. Closes part of the gap D-045 (then D-045, now folded into D-046) already named: "the day `instrument_specs` gets a real producer..." | Passing a hardcoded/config-supplied spec into the live decision path (risks silent drift from the real broker spec); giving the decision orchestrator its own MT5 read (violates the LiveReader=observe boundary) | |
 | 2026-08-25 | **O-006**: the next promotion target is a controlled MT5 **DEMO** account autonomous canary order — real decisioning, real order submission, real demo fills, zero live-money exposure — not a live account, not strategy validation from a handful of trades | Review 1.15 §3 interprets the owner's direction toward "daadwerkelijk getrade kan worden" concretely, so "autonomous trading" cannot later be read as authorizing more than this. Reprioritizes engineering away from dashboard/foundation polish (both now substantially closed) onto the M5 critical path: CI/M0 closure → F-047 durable broker-state persistence → read-only reconciliation → F-048 live shadow decision pipeline (execution stays disabled) → execution-safety work (F-049) → `feedback.2.0` → one gated canary order | Owner (relayed via reviewer, review 1.15 §3/§12) |
+| 2026-09-02 | **O-008a**, superseding O-004: multiple EUR/USD positions may be open at once, provided total open risk never exceeds `max_open_risk` — not one exposure at a time | `review/OWNER_POLICY_V1.md` (owner-approved). O-004 was always a v1 simplification, not a permanent constraint; the risk gateway now enforces the real portfolio budget via `risk/portfolio_risk.py::assess_open_risk` (D1.4) rather than a position-count rule, so relaxing the count constraint no longer weakens the actual safety property. See `review/adr/ADR-011-owner-risk-policy-v1.md` | Deferring the withdrawal until D1.5 (session-policy) also lands — rejected, D1.4's real accounting was already in place and there was no reason to keep the stricter rule waiting on unrelated work | Project owner |
+| 2026-09-02 | **O-008b**: the four risk fractions move from engineering placeholders to owner-approved policy — `max_risk_per_trade=0.02`, `max_open_risk=0.03`, `max_daily_loss=0.04`, `max_drawdown=0.08` | `review/OWNER_POLICY_V1.md` §1, answering build.md §29 Q7-Q8. Closes the numeric half of D-013 (`config/paper.yaml`'s risk values were placeholders since 2026-08-17). `max_orders_per_hour`, `max_open_positions` and `min_stop_distance_points` remain engineering-chosen, not owner policy — D-013's remaining gap, D-053 | Leaving the placeholders in place indefinitely; picking new numbers without an explicit owner decision | Project owner |
 
 ---
 
@@ -983,7 +985,9 @@ Done in this pass:
 - [x] Persist the decision flow, ticks and bars to PostgreSQL (M2).
 - [x] Version the schema with Alembic and prove a restore (F-020, F-023).
 - [x] Make the risk session survive a restart (F-019).
-- [x] Encode the one-exposure rule and the intraday window (O-003, O-004).
+- [x] Encode the one-exposure rule and the intraday window (O-003, O-004) —
+      O-004 later withdrawn 2026-09-02 and replaced by real portfolio
+      open-risk accounting (D1.4, O-008).
 - [x] Implement the deterministic risk policy engine and kill switch (M4).
 
 Blocked on a human decision — see build.md §29 and `review/feedback.1.6.md` §6:
@@ -8814,6 +8818,183 @@ Next:
   list ("→ CI pg_dump/psql verbinding fixen → hosted CI volledig groen
   → ambiguous-outcome recovery → flatten → post-fill reconciliation →
   broker-SL verification").
+
+---
+
+## Update 2026-09-03 (sixty-sixth entry) — owner risk policy v1: real portfolio open-risk accounting, O-004 withdrawn, owner numbers shipped (D1.2/D1.3/D1.4)
+
+Component: `risk/portfolio_risk.py` (new), `risk/policies.py`, `risk/session.py`, `config.py`, `domain/enums.py`, `application/execution.py`, `application/orchestration.py`, `application/live_decision.py`, `persistence/schema.py`, new migration, `config/paper.yaml`, `review/adr/ADR-011-owner-risk-policy-v1.md`, `review/DEVIATIONS.md`, `review/INTEGRATION_NOTICES.md`
+Milestone: Dev-1 owner work order (`review/OWNER_WORK_ORDERS_2026-09-02.md` D1.2/D1.3/D1.4), following owner-approved `review/OWNER_POLICY_V1.md` (2026-09-02); planned via `EnterPlanMode` and approved before implementation. D1.6/D1.7/D1.8 explicitly out of scope; D1.5 (session/weekend policy) is a separate, later slice
+Status before: exposure was capped at one EUR/USD position at a time (O-004, a hard constant), and every internal `PortfolioState.open_risk_fraction` was the fiction `max_risk_per_trade * Decimal(len(open_positions))`; `config/paper.yaml`'s four risk fractions were engineering placeholders (D-013)
+Status after: multiple positions are permitted, gated by real portfolio open-risk accounting (`risk/portfolio_risk.py::assess_open_risk`, entry-geometry-anchored, live-equity-denominated, fails closed to `None` — never zero — on untrustworthy stop geometry, via new `ReasonCode.OPEN_RISK_UNKNOWN`, a BLOCK not a HALT); `config/paper.yaml` ships the owner's four numbers (`0.02`/`0.03`/`0.04`/`0.08`) and a reclassified `max_open_positions: 10` (operational circuit-breaker, not owner policy)
+
+Completed:
+- Pulled `origin/main` (fast-forward past `a52d12f`/`0648e41`), read
+  `review/OWNER_POLICY_V1.md` and `review/OWNER_WORK_ORDERS_2026-09-02.md`
+  in full, summarized to the user. Asked how to sequence the size of the
+  work order — approved: split into a risk-policy slice (D1.2+D1.3+D1.4,
+  this entry) and a separate later session-policy slice (D1.5).
+- Entered plan mode; a `Plan` sub-agent pass validated two genuine design
+  forks before finalizing — entry geometry vs. mark-to-market anchoring,
+  live vs. session-start equity denominator — each resolved with a
+  written argument in the plan and in `ADR-011` §2.3-2.4. Corrected the
+  sub-agent's own research once before approving: it claimed the highest
+  existing owner decision was O-005; a direct grep found O-006/O-007
+  already recorded, so this slice's owner decision is **O-008**.
+  Sequenced deliberately D1.4 → D1.3 → D1.2 (never D1.3 before D1.4,
+  which would briefly permit stacking against a still-fictional
+  count-based budget). Plan approved before any code was written.
+- **D1.4**: new `risk/portfolio_risk.py::assess_open_risk()` — reuses
+  `sizing.py::realised_risk()`; signed adverse-distance geometry (not
+  `abs()`, since `PositionState` carries no protective-side validator);
+  any untrusted position (no spec, no stop) makes the whole assessment
+  unestablished rather than partial. `PortfolioState.open_risk_fraction`
+  widened `Decimal` (default `ZERO`) → `Decimal | None` (no default).
+  New `ReasonCode.OPEN_RISK_UNKNOWN`, BLOCK not HALT — item 9 named as
+  the future escalation path, pinned by test. Five internal call sites
+  updated (execution.py, orchestration.py×2, live_decision.py×2);
+  `agent_gateway/decision_path.py`'s own count-based approximation left
+  untouched (Dev 2's D2.2). `RiskSessionState.open_risk_fraction`
+  widened to `Decimal | None`, `to_payload()` made `None`-safe, one
+  nullable-column migration (`d3b2e828b5b0`, off `03df83b062a6`,
+  confirmed single head both before and after, no collision with Dev 2's
+  `agent/contracts`). New `tests/unit/test_portfolio_risk.py` (15 cases:
+  entry geometry, signed distance, summing, fail-closed legs, the
+  `current_price`-never-read and equity-anchor fork proofs, determinism,
+  the structural source-scan guard).
+- **D1.3**: deleted `MAX_EXPOSURES_PER_SYMBOL` and its
+  `SYMBOL_EXPOSURE_EXISTS`-appending block from `risk/policies.py`;
+  `ReasonCode.SYMBOL_EXPOSURE_EXISTS` kept (docstring retired — persisted
+  rows still reconstruct via `ReasonCode(code)`), never emitted again.
+  `RiskConfig.max_open_positions` gains a real docstring (operational
+  circuit-breaker, not owner policy); shipped value `1` → `10`, derived
+  from every registered strategy's fixed 0.5%-per-trade request against
+  the 3% budget, with a named revisit trigger. Deleted
+  `tests/unit/test_one_exposure_policy.py` in full. Its load-bearing
+  replay proof did not survive intact: the plan called for inverting it
+  through the full agent/strategy replay, but `baseline_v1`'s own
+  `already_positioned` guard (a legitimate, unrelated strategy choice)
+  almost never lets a second position occur on synthetic random-walk
+  data even with loss gates widened far past the owner's own values
+  (confirmed: a 4000-bar run produced 23 fills and never stacked) —
+  forcing it further would have meant seed-hunting, tuning against
+  synthetic data in substance even without touching the strategy itself
+  (`CLAUDE.md` §4). Resolved by driving `SimulatedBroker.order_send()`
+  directly instead (`tests/replay/test_replay_prototype
+  .py::TestMultiplePositionsPermitted`, mirroring `TestIdempotency`'s own
+  pattern) — proves two real positions can coexist and that the real
+  resulting book, valued by `assess_open_risk` against the broker's own
+  equity, sits inside the owner's budget, without depending on the
+  strategy ever choosing to pyramid. Recorded as a deliberate deviation
+  from the plan's original method, not a silent substitution.
+  The three owner acceptance examples (1.0%+2.0%=3.0% passes,
+  1.1%+2.0%=3.1% blocks, several small positions pass regardless of
+  count) proved directly at `risk/policies.py::evaluate()` in
+  `tests/unit/test_risk_engine.py::TestExposureLimits`, verbatim.
+- **D1.2**: `config/paper.yaml`'s risk quartet →
+  `0.02`/`0.03`/`0.04`/`0.08`, header rewritten to cite
+  `OWNER_POLICY_V1.md` as confirmation rather than "provisional
+  values"; `max_open_positions` → `10`. Updated every hardcoded-quartet
+  test fixture (`tests/conftest.py::paper_config_payload()`,
+  `tests/integration/_execution_fixtures.py::platform_config()`,
+  `tests/unit/test_risk_engine.py::risk_config()`), plus tests whose
+  inputs silently stopped exercising anything once the defaults moved
+  (`test_the_portfolio_risk_budget_is_enforced`'s `0.02`→`0.03`,
+  `test_the_daily_loss_gate_halts`'s `0.97`→`0.94`,
+  `test_the_open_position_limit_is_enforced`'s new explicit
+  `max_open_positions=1` override). New
+  `tests/unit/test_config.py::TestOwnerRiskPolicyV1` (shipped values,
+  each independently proven to change `config_version`, ceiling `> 1`).
+- Wrote `review/adr/ADR-011-owner-risk-policy-v1.md`; `review/DEVIATIONS
+  .md` D-013 → `PARTIALLY RESOLVED`, new **D-053** (the `10` ceiling),
+  new **D-054** (BLOCK-not-HALT choice + the `AgentPlatformState`
+  three-states-into-two-slots gap) — renumbered from the plan's original
+  D-052/D-053 after Dev 2 shipped their own D-052 first
+  (`agent/contracts` commit `bf49549`); coordinated directly, confirmed
+  no collision, Dev 2 acknowledged. Three `review/INTEGRATION_NOTICES.md`
+  entries (the reason-code retirement, the widened `open_risk_fraction`
+  type + the `AgentPlatformState` flag for Dev 2's D2.2, the new Alembic
+  head). Updated `status.md`'s capability matrix, APP-012, and the v1
+  checklist to point at the supersession rather than silently continuing
+  to assert O-004; added **O-008a**/**O-008b** to the decision log (§10);
+  removed Q7/Q8 from §E's open-questions table (now answered).
+
+Evidence:
+- tests: full suite, solo, `crumblr_test_dev1` — **1263 passed, 3
+  skipped** (skips pre-exist, unrelated: filesystem-permission tests and
+  an MT5-importability guard). Up from 1257 before this slice (199 lines
+  deleted with `test_one_exposure_policy.py`, more added across
+  `test_portfolio_risk.py`/`test_risk_engine.py`/`test_config.py`/
+  `test_replay_prototype.py`).
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (175 source files).
+- determinism: `scripts/run_replay.py --bars 600` run twice, stdout-only
+  MD5 identical (`439abed3...`) — confirmed the two apparently-differing
+  runs from an earlier check were a test-methodology artifact (stderr
+  log timestamps merged into the hash), not a real regression.
+- migration: `alembic heads` → single head `d3b2e828b5b0`;
+  `tests/integration/test_migrations.py` passes.
+- Grepped the diff for `.order_send(`/`.close_all_positions(` — only a
+  docstring mention (naming D-050), no new call. Grepped
+  `src/crumblr/agent_gateway/` for `portfolio_risk`/`OPEN_RISK_UNKNOWN` —
+  zero; `git diff --stat` confirms zero files touched under that
+  directory. `config/base.yaml` and `risk/trading_window.py` confirmed
+  byte-identical (D1.5 untouched).
+
+Problems found:
+- The plan's own replay-stacking proof method (drive it through the
+  agent/strategy pipeline) turned out not to work against synthetic
+  data without effectively tuning against it — see "Completed" above.
+  Self-caught by actually running the replay and reading the result
+  (23 fills, never stacked) rather than assuming the plan's premise held.
+- Two stale test inputs (`test_the_portfolio_risk_budget_is_enforced`,
+  `test_the_daily_loss_gate_halts`) would have silently stopped testing
+  anything once the config defaults moved — caught by running the tests,
+  not by re-reading the plan (both had been named as risks in the plan,
+  but the daily-loss one's exact required threshold had to be derived at
+  implementation time).
+- Editing `test_config.py` while a background pytest run against the
+  same file was still in flight produced one confusing, non-reproducing
+  failure (stale line numbers in the traceback via `linecache`) — not a
+  real regression; confirmed by a clean re-run against the settled file.
+  Worth remembering: do not edit a file a background test run is still
+  reading.
+
+Risk impact:
+- None to structural inertness: `order_send`/`close_all_positions`
+  remain unconditional `ExecutionDisabledError` raises, untouched by
+  this slice, confirmed by grep.
+- The owner's numbers widen every risk gate substantially (2-4x the
+  prior placeholders). This is the owner's explicit, approved decision
+  (O-008b), not an engineering judgement call — `risk.
+  approved_config_version` stays unset, so this does not itself move
+  `order_send` any closer to reachable.
+
+Decision:
+- Sequencing D1.4 → D1.3 → D1.2, never D1.3 before D1.4.
+- Proving D1.3's replay property via direct `SimulatedBroker.order_send`
+  construction instead of the full agent/strategy replay, once the
+  latter was shown not to reliably exercise the property without
+  tuning-against-synthetic-data in substance.
+- D-053/D-054 renumbered from the plan's original D-052/D-053 after
+  coordinating with Dev 2 on their own D-052.
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/owner-risk-policy-v1` branch, `[core]`
+  prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after rebasing onto current `origin/main`
+  if it has moved.
+- Notify Dev 2 that `risk/portfolio_risk.py::assess_open_risk` has
+  shipped, so they can wire `PortfolioSnapshot.open_risk_fraction`
+  against it (D2.2) — they explicitly requested this ping.
+- Begin the separate D1.5 slice (session/weekend policy: daily →
+  weekly/weekend-flat) as its own plan-mode cycle, per the user's
+  earlier "split into two slices" decision. Not started; no code
+  touched under `risk/trading_window.py` or `IntradayPolicy` yet.
+- D1.6 (HALT reset human-only, verification only)/D1.7 (item 9,
+  broker-side SL verification)/D1.8 (Settings-activation seam) remain
+  separate, future work — not started.
 
 ---
 

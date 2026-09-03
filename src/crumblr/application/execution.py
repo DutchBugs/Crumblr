@@ -57,7 +57,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -112,6 +111,7 @@ from crumblr.risk.execution_eligibility import evaluate_execution_eligibility
 from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.flatten_gate import FlattenGateContext, evaluate_flatten_gate
 from crumblr.risk.kill_switch import KillSwitch
+from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
 from crumblr.trading_agent.sessions import trading_day
@@ -449,14 +449,21 @@ class ExecutionOrchestrator:
             ExecutionEventType.SUBMISSION_STARTED, final_now - timedelta(hours=1)
         )
 
+        # Owner risk policy v1 (D1.4): real portfolio risk, never a
+        # count-based approximation. One coherent observation already in
+        # scope (`observation`, F-058) — no second broker read.
+        open_risk = assess_open_risk(
+            observation.position_states,
+            specs={spec.broker_symbol: spec},
+            equity=observation.account_state.equity,
+        )
         fresh_portfolio = policies.PortfolioState(
             account=observation.account_state,
             open_positions=observation.position_states,
             ledger=session_recovery.ledger,
             orders_in_last_hour=orders_in_last_hour,
             seen_decision_hashes=frozenset(),
-            open_risk_fraction=self._config.risk.max_risk_per_trade
-            * Decimal(len(observation.position_states)),
+            open_risk_fraction=open_risk.fraction,
         )
 
         final_risk = policies.revalidate_fixed_volume_at_execution_time(
