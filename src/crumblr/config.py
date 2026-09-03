@@ -149,6 +149,19 @@ class ExecutionConfig(ConfigSection):
     automatic liquidation." Defaults to `False`; no shipped config sets
     it to `True`."""
 
+    approved_canary_account_ref: str | None = None
+    """The owner-approved exact DEMO account reference for real
+
+    submission (Phase B item B7, `review/adr/ADR-017-account-reference
+    -pin.md`). A `login_hash`-style fingerprint
+    (`fingerprint({"login": ..., "server": ...})[:16]`, matching
+    `AccountState.login_hash`/`ExpectedState.expected_account_ref`'s own
+    technique) — never the raw account number, never a credential.
+    Defaults `None`/unset; no shipped config sets it. Setting it is a
+    deliberate, git-reviewed, owner-made act (Phase E), the same
+    "record that a specific real-world identity was approved" role
+    `approved_config_version` plays for the risk config."""
+
 
 class TradingAgentConfig(ConfigSection):
     strategy_id: VersionTag
@@ -278,23 +291,26 @@ class PlatformConfig(ConfigSection):
         decision capsule and `SubmissionGate` condition 6
         (`RiskConfig.approved_config_version`, F-049/ADR-006).
 
-        Excludes the four governance/approval fields
+        Excludes the five governance/approval fields
         (`risk.approved_config_version`, `execution.submission_enabled`,
-        `execution.feedback_2_0_approved`, `execution.flatten_submission_enabled`)
-        deliberately: this hash is what an owner reviews and approves ("the
-        actual numbers this `RiskConfig` carries" — `RiskConfig
-        .approved_config_version`'s own docstring), and an approval field is
-        not itself one of those numbers. Hashing it anyway would make it
-        self-referential — writing the approved hash into the file changes
-        the file, which changes the hash the write was supposed to match,
-        which can never converge (found while adding the wiring in
-        `application/execution.py` that actually evaluates this condition;
-        empirically confirmed unsatisfiable before this fix, see F-062,
-        `review/FEEDBACK.md`). `flatten_submission_enabled` (core critical
-        path item 7) joined the exclusion set for the identical reason the
-        day it was added, rather than repeating F-062's mistake a second
-        time. Any other field change still produces a new version, unchanged
-        from before this fix (`tests/unit/test_config.py::TestConfigVersioning`)."""
+        `execution.feedback_2_0_approved`, `execution.flatten_submission_enabled`,
+        `execution.approved_canary_account_ref`) deliberately: this hash is
+        what an owner reviews and approves ("the actual numbers this
+        `RiskConfig` carries" — `RiskConfig.approved_config_version`'s own
+        docstring), and an approval field is not itself one of those
+        numbers. Hashing it anyway would make it self-referential — writing
+        the approved hash into the file changes the file, which changes the
+        hash the write was supposed to match, which can never converge
+        (found while adding the wiring in `application/execution.py` that
+        actually evaluates this condition; empirically confirmed
+        unsatisfiable before this fix, see F-062, `review/FEEDBACK.md`).
+        `flatten_submission_enabled` (core critical path item 7) and
+        `approved_canary_account_ref` (Phase B item B7,
+        `review/adr/ADR-017-account-reference-pin.md`) each joined the
+        exclusion set for the identical reason the day they were added,
+        rather than repeating F-062's mistake a second/third time. Any
+        other field change still produces a new version, unchanged from
+        before this fix (`tests/unit/test_config.py::TestConfigVersioning`)."""
         payload = self.model_dump(
             mode="json",
             exclude={
@@ -303,6 +319,7 @@ class PlatformConfig(ConfigSection):
                     "submission_enabled",
                     "feedback_2_0_approved",
                     "flatten_submission_enabled",
+                    "approved_canary_account_ref",
                 },
             },
         )

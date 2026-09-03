@@ -30,6 +30,7 @@ from crumblr.risk.session import RiskSessionState
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
 from tests.integration._execution_fixtures import (
+    APPROVED_CANARY_ACCOUNT_REF,
     BROKER_SYMBOL,
     STRATEGY_VERSION,
     FakeMt5,
@@ -101,14 +102,16 @@ class TestEndToEnd:
         # `order_check` is real and reached (below); the *outcome* reported
         # for the run reflects the true final state, one step further —
         # the submission gate (Dev-1 core critical path item 2). Every
-        # shipped/test config leaves three of nine legs unapproved, so a
-        # clean capsule correctly, honestly ends BLOCKED here, never
-        # PASSED, until an owner explicitly approves submission.
+        # shipped/test config leaves four of ten legs unapproved (Phase B
+        # item B7 added the account-reference leg), so a clean capsule
+        # correctly, honestly ends BLOCKED here, never PASSED, until an
+        # owner explicitly approves submission.
         assert outcomes[0].event_type == ExecutionEventType.SUBMISSION_GATE_BLOCKED
         assert set(outcomes[0].reason_codes) == {
             ReasonCode.RISK_POLICY_NOT_APPROVED,
             ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED,
             ReasonCode.FEEDBACK_2_0_NOT_APPROVED,
+            ReasonCode.WRONG_ACCOUNT,
         }
         assert fake.order_send_calls == 0
         assert fake.order_check_requests  # the real order_check call happened
@@ -137,8 +140,10 @@ class TestEndToEnd:
         the platform to attempting one broker submission — core critical
         path item 3 (review 1.26 §6 / review 1.27 §8), one step further
         than `SUBMISSION_GATE_PASSED` alone. A test-only config with all
-        three approval fields set (F-062 makes this achievable at all —
-        see `tests/unit/test_config.py::test_approving_this_exact_version_does_not_change_it`).
+        four approval fields set (F-062 makes this achievable at all —
+        see `tests/unit/test_config.py::test_approving_this_exact_version_does_not_change_it`;
+        `approved_canary_account_ref` set to `APPROVED_CANARY_ACCOUNT_REF`,
+        Phase B item B7, matching `FakeMt5`'s own default account identity).
         Never a shipped default; every real config leaves this BLOCKED, as
         `test_a_clean_eligible_capsule_reaches_order_checked` proves above.
 
@@ -155,7 +160,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )
@@ -191,6 +200,8 @@ class TestEndToEnd:
         assert gate_event.payload["feedback_2_0_approved"] is True
         assert gate_event.payload["approved_risk_config_version"] == version
         assert gate_event.payload["risk_config_version"] == version
+        assert gate_event.payload["approved_account_ref"] == APPROVED_CANARY_ACCOUNT_REF
+        assert gate_event.payload["observed_account_ref"] == APPROVED_CANARY_ACCOUNT_REF
 
         submission_event = next(
             e for e in events if e.event_type == ExecutionEventType.SUBMISSION_STARTED
@@ -232,7 +243,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )
@@ -310,7 +325,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )
@@ -361,7 +380,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )
@@ -433,7 +456,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )
@@ -481,7 +508,11 @@ class TestEndToEnd:
             update={
                 "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
                 "execution": base_config.execution.model_copy(
-                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
                 ),
             }
         )

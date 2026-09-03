@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `0eab01b` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), independently re-verified green locally. **Phase B slice 1 (B4, `ADR-015`) shipped** — ambiguous-recovery fails closed/HALTs on >1 matching broker positions. **Phase B slice 2 (B1+B2, `ADR-016`) shipped** — `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real, tested `order_send` adapter (demo-only guard reuses the existing account-verify mechanism, shares its MT5 request builder with `order_check` including the `magic` idempotency key) — deliberately **not wired into `ExecutionOrchestrator`** yet (proven by a structural test), since B2's own required chain needs the account pin (B7), the one-shot canary permit (B8) and Phase C/AG-012's shared Risk authority first; full suite 1377 passed/3 skips/0 failed. B3/B5/B7/B8 remain (B6 explicitly deferred by the work order until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (B7 account pin, B8 canary permit, B3 outcome normalization, or B5 real close/flatten). BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), independently re-verified green locally. **Phase B slice 1 (B4, `ADR-015`) shipped** — ambiguous-recovery fails closed/HALTs on >1 matching broker positions. **Phase B slice 2 (B1+B2, `ADR-016`) shipped** — `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real, tested `order_send` adapter, deliberately **not wired into `ExecutionOrchestrator`** yet. **Phase B slice 3 (B7, `ADR-017`) shipped** — `SubmissionGate` tenth condition, an owner-approval-gated exact account-reference pin (`login_hash`-style fingerprint, never the raw account number); found and routed around a real landmine (D-046: setting the general `AccountGuardConfig.expected_login` would silently block the live `LiveReader`/`live_decision.py` path — confirmed 4 of 5 `RiskContext` call sites hardcode `expected_login=None`, only replay reads it) by scoping the new leg to `SubmissionGateContext`'s own fresh per-pass account read instead; also caught and fixed a second F-062-shaped `config_version` circularity before shipping. Full suite 1380 passed/3 skips/0 failed. B3/B5/B8 remain (B6 explicitly deferred by the work order until continuous-DEMO promotion), plus Phase C/AG-012 before B1+B2's adapter can be wired in. NEXT: decide and plan the next Phase B slice with the user (B8 canary permit, B3 outcome normalization, or B5 real close/flatten). BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9990,6 +9990,121 @@ Next:
   normalization), B5 (real per-ticket close/flatten), B7 (exact account
   pin) and B8 (one-shot canary permit) all remain, plus Phase C/AG-012
   before this slice's adapter can actually be wired in.
+
+---
+
+## Update 2026-09-03 (seventy-sixth entry) — Phase B slice 3: exact account-reference pin on SubmissionGate (B7)
+
+```text
+Component: config.py, risk/submission_gate.py, application/execution.py
+Milestone: DEMO canary work order, Phase B, item B7 — slice 3 of the Phase-B punch list
+Status before: B1/B2/B4 shipped; B3/B5/B7/B8 not started
+Status after:  B7 shipped; B3/B5/B8 remain, plus Phase C/AG-012 before B1+B2's adapter can be wired in
+```
+
+**A landmine found and routed around, not walked into.** Before
+designing, grepped every `RiskContext(` construction site for
+`expected_login=` and found `live_decision.py`, `execution.py`,
+`paper_lite.py` and `agent_gateway/decision_path.py` all hardcode
+`expected_login=None` — only the synthetic-data replay path
+(`orchestration.py`) reads the real config value. `review/DEVIATIONS.md`
+D-046 already warned, as its own "Watch for": setting a real
+`AccountGuardConfig.expected_login` would silently BLOCK every live
+intent, confusingly, since `live_decision.py`'s `AccountState` is
+reconstructed from a durable snapshot with `login` hardcoded to a
+placeholder `0`. This item deliberately does not touch
+`AccountGuardConfig.expected_login`, any of the four hardcoded call
+sites, or `_account_state_from_snapshot` — that revisit stays exactly
+as deferred as D-046 left it. Full reasoning in ADR-017 §2.
+
+**Completed**
+
+- New `ExecutionConfig.approved_canary_account_ref: str | None = None`
+  — owner-approval-gated, same style as `submission_enabled`/
+  `feedback_2_0_approved`, holding a `login_hash`-style fingerprint
+  (never the raw account number).
+- `SubmissionGate` gains a tenth condition:
+  `approved_account_ref != account.login_hash` → `ReasonCode
+  .WRONG_ACCOUNT` (reused, not a new code — matches
+  `ACCOUNT_NOT_CONNECTED`'s own precedent of one reason code shared
+  across `risk/policies.py` and `submission_gate.py` for the same
+  underlying concern at different layers). Mirrors condition 6's plain-
+  inequality idiom exactly — fails closed automatically when unset.
+  `_evaluate_submission_readiness()`'s payload gains
+  `approved_account_ref`/`observed_account_ref` for audit visibility.
+- **A second F-062-shaped circularity, caught before shipping, not
+  after:** the first version of this change made the "fully approved"
+  integration test fail closed on `RISK_POLICY_NOT_APPROVED` instead of
+  opening — `approved_canary_account_ref` wasn't yet in
+  `PlatformConfig.config_version`'s governance-field exclusion set, so
+  setting it changed the hash the `approved_config_version` pin was
+  computed against moments earlier. Fixed by adding it to the same
+  exclusion set `submission_enabled`/`feedback_2_0_approved`/
+  `flatten_submission_enabled` already sit in.
+- `review/adr/ADR-017-account-reference-pin.md` written; ADR-006 §7
+  amended (gate is one document, ten conditions, not two competing
+  descriptions).
+
+**Evidence**
+
+- New tests: `tests/unit/test_execution_gates.py` — 3 new (unset closes
+  it, mismatched closes it, exact match doesn't by itself close it);
+  `submission_context()` fixture's default `approved_account_ref` is
+  now derived from its own `account.login_hash`, never hardcoded.
+  Extended `test_the_gate_is_closed_against_the_actual_shipped_config`
+  to assert `WRONG_ACCOUNT` too (real shipped config leaves this leg
+  closed like the other three). `tests/integration/_execution_fixtures.py`
+  gained a shared `APPROVED_CANARY_ACCOUNT_REF` constant (computed via
+  `fingerprint()`, matching the fake account's real identity, never
+  hardcoded) used by every "fully approved" config builder across
+  `test_execution_orchestrator.py`/`test_execution_reconciliation.py`.
+  `test_a_clean_eligible_capsule_reaches_order_checked`'s expected
+  reason-code set extended with `WRONG_ACCOUNT` — a real, new, correct
+  closed leg for every config that doesn't set the pin, not a defect.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (187 source files).
+- Full suite: **1380 passed, 3 pre-existing skips, 0 failed** (297.81s)
+  — 1377 (post-B1+B2 baseline) + 3 new, exactly accounted for.
+- Determinism: `scripts/run_replay.py --bars 600` run twice (PowerShell,
+  stdout only), MD5 identical (`704967823f258496922a9b16c4d29788` — same
+  hash as every prior slice).
+- Grep the diff: zero `expected_login` occurrences anywhere (confirms
+  the D-046 trap was genuinely not touched), zero edits under
+  `agent_gateway/`/`live_decision.py`/`orchestration.py`/`paper_lite.py`.
+
+**Problems found**
+
+- The `config_version` circularity above — caught by the test suite
+  itself on the first implementation pass, not discovered later. Same
+  root-cause shape as F-062, now documented as a pattern to check for
+  ("does a new owner-approval-gated field need to join the exclusion
+  set?") whenever a future field follows this precedent.
+
+**Risk impact**
+
+- None: `submission_enabled`/`feedback_2_0_approved`/
+  `approved_canary_account_ref` all stay unset/`False` in every shipped
+  config, so `SubmissionGate` remains closed regardless of this item —
+  proven directly by the extended shipped-config test.
+- Genuine forward-looking safety hardening: once an owner does approve
+  submission for the canary (Phase E), a different demo account sharing
+  the approved server/currency/leverage can no longer pass by accident.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/phase-b-3-account-reference-pin` branch,
+  `[core]` prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational — flagging the
+  D-046 finding since `agent_gateway/decision_path.py` shares the same
+  hardcoded-`expected_login=None` shape).
+- Plan and implement the next Phase B slice — B3 (durable outcome
+  normalization), B5 (real per-ticket close/flatten), B8 (one-shot
+  canary permit) remain, plus Phase C/AG-012 before B1+B2's adapter can
+  be wired in.
 
 ---
 

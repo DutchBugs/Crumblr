@@ -247,13 +247,16 @@ def fresh_tick(**overrides: Any) -> MarketTick:
 
 
 def submission_context(**overrides: Any) -> SubmissionGateContext:
-    """All nine legs pass by default — every test overrides exactly the
+    """All ten legs pass by default — every test overrides exactly the
 
     leg(s) it means to fail, proving the gate closes independently on
-    each."""
+    each. `approved_account_ref` is derived from the fixture's own
+    `account` rather than hardcoded, so it can never silently drift from
+    `make_account_state()`'s own defaults (Phase B item B7)."""
+    account = make_account_state()
     fields: dict[str, Any] = {
         "environment": Environment.PAPER,
-        "account": make_account_state(),
+        "account": account,
         "reconciliation_status": ReconciliationStatus.MATCHED,
         "fresh_tick": fresh_tick(),
         "max_market_data_age_ms": 2_000,
@@ -263,6 +266,7 @@ def submission_context(**overrides: Any) -> SubmissionGateContext:
         "submission_enabled": True,
         "terminal_trade_allowed": True,
         "feedback_2_0_approved": True,
+        "approved_account_ref": account.login_hash,
         "now": FIXED_NOW,
     }
     fields.update(overrides)
@@ -270,12 +274,14 @@ def submission_context(**overrides: Any) -> SubmissionGateContext:
 
 
 class TestSubmissionGate:
-    """F-049: nine conditions, all required simultaneously (review 1.15
+    """F-049: ten conditions, all required simultaneously (review 1.15
 
-    §14). `submission_context()` is fully open by default; every test
-    below fails exactly one leg to prove it alone closes the gate — the
-    same "one leg failing closes the whole gate" discipline
-    `TestPreflightGate` already exercises above."""
+    §14; condition 10 added by Phase B item B7,
+    `review/adr/ADR-017-account-reference-pin.md`).
+    `submission_context()` is fully open by default; every test below
+    fails exactly one leg to prove it alone closes the gate — the same
+    "one leg failing closes the whole gate" discipline `TestPreflightGate`
+    already exercises above."""
 
     def test_a_fully_satisfied_context_opens_the_gate(self) -> None:
         decision = evaluate_submission_gate(submission_context())
@@ -372,6 +378,36 @@ class TestSubmissionGate:
         assert decision.open is False
         assert ReasonCode.FEEDBACK_2_0_NOT_APPROVED in decision.reason_codes
 
+    def test_an_unapproved_account_reference_closes_it(self) -> None:
+        """Phase B item B7: `approved_account_ref=None` (every shipped
+
+        config's real state today) fails closed automatically, mirroring
+        condition 6's own plain-inequality idiom — no separate null-check
+        needed."""
+        decision = evaluate_submission_gate(submission_context(approved_account_ref=None))
+        assert decision.open is False
+        assert ReasonCode.WRONG_ACCOUNT in decision.reason_codes
+
+    def test_a_mismatched_account_reference_closes_it(self) -> None:
+        """A different demo account is a refusal even if every other leg
+
+        looks plausible — a stale or wrong approval does not carry over,
+        exactly like `test_a_risk_config_version_mismatch_closes_it`
+        above."""
+        decision = evaluate_submission_gate(
+            submission_context(approved_account_ref="not-the-approved-account")
+        )
+        assert decision.open is False
+        assert ReasonCode.WRONG_ACCOUNT in decision.reason_codes
+
+    def test_the_exact_matching_account_reference_does_not_by_itself_close_it(self) -> None:
+        account = make_account_state()
+        decision = evaluate_submission_gate(
+            submission_context(account=account, approved_account_ref=account.login_hash)
+        )
+        assert decision.open is True
+        assert decision.reason_codes == ()
+
     def test_every_failing_leg_is_reported_not_just_the_first(self) -> None:
         decision = evaluate_submission_gate(
             submission_context(
@@ -388,7 +424,7 @@ class TestSubmissionGate:
         """The concrete proof, not just the design intent: build a context
 
         from `load_config`'s real, current `config/paper.yaml` values —
-        the gate must stay closed, because none of the three durable
+        the gate must stay closed, because none of the four durable
         approval fields are set in any shipped config file."""
         from pathlib import Path
 
@@ -403,12 +439,14 @@ class TestSubmissionGate:
                 approved_risk_config_version=config.risk.approved_config_version,
                 submission_enabled=config.execution.submission_enabled,
                 feedback_2_0_approved=config.execution.feedback_2_0_approved,
+                approved_account_ref=config.execution.approved_canary_account_ref,
             )
         )
         assert decision.open is False
         assert ReasonCode.RISK_POLICY_NOT_APPROVED in decision.reason_codes
         assert ReasonCode.EXECUTION_NOT_EXPLICITLY_ENABLED in decision.reason_codes
         assert ReasonCode.FEEDBACK_2_0_NOT_APPROVED in decision.reason_codes
+        assert ReasonCode.WRONG_ACCOUNT in decision.reason_codes
 
     def test_decision_is_internally_consistent(self) -> None:
         from crumblr.risk.submission_gate import SubmissionGateDecision

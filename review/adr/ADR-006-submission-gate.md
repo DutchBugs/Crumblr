@@ -191,3 +191,23 @@ when that contract was written; it is real (though still unreachable in
 any shipped config — the same three closed approval fields still gate
 `SUBMISSION_GATE_PASSED`) as of this addendum. Logged in
 `review/INTEGRATION_NOTICES.md`.
+
+---
+
+## 7. Addendum 2026-09-03 — condition 10: exact account-reference pin (Phase B item B7)
+
+Full design in `review/adr/ADR-017-account-reference-pin.md`. Summary:
+`SubmissionGateContext` gains `approved_account_ref: str | None`, and
+the gate a tenth condition — `context.approved_account_ref !=
+context.account.login_hash` closes it with `ReasonCode.WRONG_ACCOUNT`,
+mirroring condition 6's plain-inequality idiom exactly (fails closed
+automatically when unset, no separate null-check). Backed by a new
+`ExecutionConfig.approved_canary_account_ref: str | None = None` —
+a `login_hash`-style fingerprint, never the raw account number, added to
+`PlatformConfig.config_version`'s exclusion set for the identical F-062
+reason `submission_enabled`/`feedback_2_0_approved`/
+`flatten_submission_enabled` were excluded (§5 above) — this was caught
+directly, not assumed, when the first version of this change made
+`test_a_fully_approved_config_reaches_submission_started` fail closed on
+`RISK_POLICY_NOT_APPROVED` instead of opening. No shipped config sets
+the new field, so this addendum changes no reachable behaviour.

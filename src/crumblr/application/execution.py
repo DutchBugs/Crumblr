@@ -1303,6 +1303,7 @@ class ExecutionOrchestrator:
             submission_enabled=self._config.execution.submission_enabled,
             terminal_trade_allowed=bool(observation.account.terminal_trade_allowed),
             feedback_2_0_approved=self._config.execution.feedback_2_0_approved,
+            approved_account_ref=self._config.execution.approved_canary_account_ref,
             now=final_now,
         )
         decision = evaluate_submission_gate(context)
@@ -1325,6 +1326,8 @@ class ExecutionOrchestrator:
                 "submission_enabled": context.submission_enabled,
                 "terminal_trade_allowed": context.terminal_trade_allowed,
                 "feedback_2_0_approved": context.feedback_2_0_approved,
+                "approved_account_ref": context.approved_account_ref,
+                "observed_account_ref": context.account.login_hash,
             },
         )
         return event_type, decision.reason_codes
