@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from crumblr.domain.enums import DataQuality, Side
+from crumblr.domain.enums import DataQuality
 from crumblr.domain.events import OrderCheckCompleted
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import (
@@ -39,10 +39,11 @@ from crumblr.domain.money import ZERO
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.market_data.synthetic import GeneratedTick
 from crumblr.mt5_gateway.simulated import ClosedTrade, SimulatedBroker
-from crumblr.risk.sizing import realised_risk
+from crumblr.risk.portfolio_risk import OpenRiskAssessment, assess_open_risk
 
-PAPER_JOURNAL_SCHEMA_VERSION = "1.0"
+PAPER_JOURNAL_SCHEMA_VERSION = "1.1"
 SUPERVISOR_SKIPPED_PAPER_MODE = "SUPERVISOR_SKIPPED_PAPER_MODE"
+PAPER_LITE_INCIDENT_CLEAR_ASSERTED = "PAPER_LITE_INCIDENT_CLEAR_ASSERTED"
 
 
 class PaperJournalError(RuntimeError):
@@ -79,10 +80,9 @@ class PaperJournalEntry:
 class PaperPortfolioView:
     """Strategy-neutral read model suitable for a dashboard adapter.
 
-    ``authorized_open_risk_amount`` is the sum of the original RiskDecision
-    amounts for positions that remain open. It is useful visibility, but is
-    deliberately *not* labelled or used as Core's exact projected-open-risk
-    semantic; that shared seam is still pending (worklog PL-001).
+    ``authorized_open_risk_amount`` is retained as historical execution
+    visibility only. The ``exact_*`` fields are produced by Core
+    ``assess_open_risk`` and are the authority for risk-session state.
     """
 
     balance: Decimal
@@ -92,8 +92,8 @@ class PaperPortfolioView:
     open_position_count: int
     closed_trade_count: int
     authorized_open_risk_amount: Decimal
-    exact_open_risk_amount: Decimal
-    exact_open_risk_fraction: Decimal
+    exact_open_risk_amount: Decimal | None
+    exact_open_risk_fraction: Decimal | None
     latest_observation_time_utc: str | None
 
 
@@ -147,6 +147,7 @@ class DurablePaperBroker:
         self._order_risk_amounts: dict[int, Decimal] = {}
         self._flatten_results: dict[UUID, tuple[int, ...]] = {}
         self._latest_tick: GeneratedTick | None = None
+        self._bar_ranges_applied: set[str] = set()
 
         if self._path.exists():
             self._load_and_replay()
@@ -202,13 +203,24 @@ class DurablePaperBroker:
         return self.advance(generated_tick_from_snapshot(snapshot))
 
     def advance(self, tick: GeneratedTick) -> tuple[ClosedTrade, ...]:
-        payload = _tick_payload(tick)
+        source_bar_payload = tick.bar.model_dump(mode="json")
+        source_bar_fingerprint = fingerprint(source_bar_payload)
+        apply_historical_range = source_bar_fingerprint not in self._bar_ranges_applied
+        simulation_tick = tick if apply_historical_range else _quote_only_tick(tick)
+        payload = {
+            **_tick_payload(simulation_tick),
+            "source_bar": source_bar_payload,
+            "source_bar_fingerprint": source_bar_fingerprint,
+            "historical_bar_range_applied": apply_historical_range,
+        }
         event_key = f"market:{fingerprint(payload)}"
         if event_key in self._event_payload_hashes:
             return ()
         self._append(PaperJournalEventType.MARKET_OBSERVED, event_key=event_key, payload=payload)
-        self._latest_tick = tick
-        return self._broker.advance(tick)
+        if apply_historical_range:
+            self._bar_ranges_applied.add(source_bar_fingerprint)
+        self._latest_tick = simulation_tick
+        return self._broker.advance(simulation_tick)
 
     def submit(self, order: ApprovedOrder, *, authorized_risk_amount: Decimal) -> ExecutionResult:
         """Durably claim then simulate one order; retry-safe across restart."""
@@ -278,10 +290,7 @@ class DurablePaperBroker:
             ZERO,
         )
         realized_profit = self._broker.balance - self._starting_balance
-        exact_open_risk = self.exact_open_risk_amount()
-        exact_open_risk_fraction = (
-            exact_open_risk / self._broker.equity if self._broker.equity > ZERO else ZERO
-        )
+        open_risk = self.open_risk_assessment()
         latest = self._entries[-1] if self._entries else None
         latest_observation = None
         if latest is not None:
@@ -297,43 +306,19 @@ class DurablePaperBroker:
             open_position_count=len(positions),
             closed_trade_count=len(self.closed_trades),
             authorized_open_risk_amount=authorized_open_risk,
-            exact_open_risk_amount=exact_open_risk,
-            exact_open_risk_fraction=exact_open_risk_fraction,
+            exact_open_risk_amount=open_risk.risk_amount,
+            exact_open_risk_fraction=open_risk.fraction,
             latest_observation_time_utc=latest_observation,
         )
 
-    def exact_open_risk_amount(self) -> Decimal:
-        """Loss from the current executable quote to every remaining stop.
+    def open_risk_assessment(self) -> OpenRiskAssessment:
+        """Assess the paper book with Core's owner-risk authority."""
 
-        This is derived from the simulator's current bid/ask, broker-reported
-        position volume and the trusted instrument tick facts. A stop that has
-        moved beyond the executable quote locks profit and contributes zero
-        downside risk rather than a misleading absolute distance.
-        """
-
-        positions = self.positions()
-        if not positions:
-            return ZERO
-        if self._latest_tick is None:
-            raise PaperJournalError("open paper positions have no market observation")
-
-        total = ZERO
-        for position in positions:
-            if position.stop_loss_price is None:
-                raise PaperJournalError(f"paper position {position.ticket} has no stop-loss price")
-            if position.side is Side.BUY:
-                distance = max(ZERO, self._latest_tick.bid - position.stop_loss_price)
-            else:
-                distance = max(ZERO, position.stop_loss_price - self._latest_tick.ask)
-            if distance > ZERO:
-                total += realised_risk(position.volume, distance, self._spec)
-        return total
-
-    def exact_open_risk_fraction(self) -> Decimal:
-        equity = self._broker.equity
-        if equity <= ZERO:
-            raise PaperJournalError("paper equity is not positive")
-        return self.exact_open_risk_amount() / equity
+        return assess_open_risk(
+            self.positions(),
+            specs={self._spec.broker_symbol: self._spec},
+            equity=self._broker.equity,
+        )
 
     def _apply_order(
         self,
@@ -375,6 +360,32 @@ class DurablePaperBroker:
 
             if entry.event_type is PaperJournalEventType.MARKET_OBSERVED:
                 tick = _tick_from_payload(entry.payload)
+                source_bar = Bar.model_validate(entry.payload.get("source_bar"))
+                source_bar_fingerprint = str(entry.payload.get("source_bar_fingerprint"))
+                if source_bar_fingerprint != fingerprint(source_bar.model_dump(mode="json")):
+                    raise PaperJournalCorruptionError(
+                        f"source bar fingerprint mismatch at sequence {entry.sequence}"
+                    )
+                range_applied = entry.payload.get("historical_bar_range_applied")
+                if not isinstance(range_applied, bool):
+                    raise PaperJournalCorruptionError(
+                        f"bar-range marker is invalid at sequence {entry.sequence}"
+                    )
+                if range_applied:
+                    if source_bar_fingerprint in self._bar_ranges_applied:
+                        raise PaperJournalCorruptionError(
+                            f"historical bar range is applied twice at sequence {entry.sequence}"
+                        )
+                    if tick.bar != source_bar:
+                        raise PaperJournalCorruptionError(
+                            f"first simulation bar differs from source at sequence {entry.sequence}"
+                        )
+                    self._bar_ranges_applied.add(source_bar_fingerprint)
+                elif source_bar_fingerprint not in self._bar_ranges_applied:
+                    raise PaperJournalCorruptionError(
+                        "quote-only observation precedes its source bar at sequence "
+                        f"{entry.sequence}"
+                    )
                 self._latest_tick = tick
                 self._broker.advance(tick)
             elif entry.event_type is PaperJournalEventType.PAPER_ORDER_ACCEPTED:
@@ -494,6 +505,37 @@ def _tick_from_payload(payload: dict[str, Any]) -> GeneratedTick:
         injected_fault=(
             str(payload["injected_fault"]) if payload.get("injected_fault") is not None else None
         ),
+    )
+
+
+def _quote_only_tick(tick: GeneratedTick) -> GeneratedTick:
+    """Represent a later quote without replaying a closed bar's old range.
+
+    The midpoint produces exactly the current bid for BUY exits and current ask
+    for SELL exits after ``SimulatedBroker`` applies its half-spread adjustment.
+    This still lets a new quote trigger SL/TP, while historical high/low can be
+    consumed only once and therefore cannot close a position opened afterwards.
+    """
+
+    midpoint = (tick.bid + tick.ask) / Decimal(2)
+    return GeneratedTick(
+        bar=Bar(
+            open_time_utc=tick.bar.open_time_utc,
+            open=midpoint,
+            high=midpoint,
+            low=midpoint,
+            close=midpoint,
+            tick_volume=0,
+            real_volume=0,
+            spread_points=tick.spread_points,
+        ),
+        bid=tick.bid,
+        ask=tick.ask,
+        spread_points=tick.spread_points,
+        event_time_utc=tick.event_time_utc,
+        received_time_utc=tick.received_time_utc,
+        data_quality=tick.data_quality,
+        injected_fault=tick.injected_fault,
     )
 
 

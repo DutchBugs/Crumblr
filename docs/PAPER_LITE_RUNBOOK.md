@@ -8,9 +8,9 @@ execution-adapter dependency. All real-submission configuration flags are
 validated `false` at startup.
 
 This is currently a plumbing/integration milestone, not final PAPER_LITE
-acceptance. The exact open-risk and new Friday/weekend Core seams are still in
-flight on Dev 1, and the genuine HEALTHY Pivot-2.2 runtime remains Dev-2/external
-Agent work. See `review/PAPER_LITE_DEV3_WORKLOG.md` PL-001 through PL-004.
+acceptance. Core `assess_open_risk()` is authoritative; consumption of that
+assessment by the shared Agent decision path and the genuine HEALTHY Pivot-2.2
+runtime remain external dependencies. See the worklog PL-001 through PL-004.
 
 ## Prerequisites
 
@@ -112,6 +112,7 @@ uv run python scripts/paper_lite.py \
   --agent-url http://127.0.0.1:8788 \
   --code-commit COMMIT_SHA \
   --confirm-paper-incident-clear \
+  --incident-clear-note 'checked PAPER_LITE incident scope before startup' \
   --initialize-paper-safety \
   --operator YOUR_OPERATOR_ID \
   --incident-note 'initial PAPER_LITE safety-state activation'
@@ -124,11 +125,13 @@ requires both the database safety record and local paper latch to already say
 
 `--confirm-paper-incident-clear` is also deliberate. The current repository has
 no durable incident register to query, so platform Policy receives `UNKNOWN`
-and vetoes by default. This flag is the operator's explicit assertion that the
-limited PAPER_LITE integration scope has no active incident; it does not disable
-Policy and it cannot reset HALT.
+and vetoes by default. The flag requires `--operator` and
+`--incident-clear-note`; identity, UTC timestamp and context are written as the
+durable `PAPER_LITE_INCIDENT_CLEAR_ASSERTED` audit fact. It does not disable
+Policy, reset HALT or enable real execution.
 
-For an ordinary restart, omit the three initialization/operator arguments:
+For an ordinary restart, omit only the safety initialization arguments. A fresh
+operator-bound incident assertion is still required:
 
 ```bash
 uv run python scripts/paper_lite.py \
@@ -136,7 +139,9 @@ uv run python scripts/paper_lite.py \
   --assignment-id ASSIGNMENT_UUID \
   --agent-url http://127.0.0.1:8788 \
   --code-commit COMMIT_SHA \
-  --confirm-paper-incident-clear
+  --confirm-paper-incident-clear \
+  --operator YOUR_OPERATOR_ID \
+  --incident-clear-note 'checked PAPER_LITE incident scope before restart'
 ```
 
 `config/paper_lite.yaml` contains the explicit simulated starting balance and
@@ -147,8 +152,8 @@ portfolio instead of silently rewriting history.
 ## Evidence and interpretation
 
 The runner emits compact JSON lines with paper balance/equity, open/closed
-position counts and the outcome stage. The paper read model also exposes exact
-current stop-risk amount/fraction separately from the originally authorized
+position counts and the outcome stage. The paper read model also exposes Core's
+exact allocation-risk amount/fraction separately from the originally authorized
 risk amount. Detailed evidence lives in:
 
 - PostgreSQL: real market observations, Agent identity/assignment/context and
@@ -185,9 +190,11 @@ Pepperstone execution quality.
 ## Known fail-closed behavior pending shared seams
 
 - A first directional paper fill can complete when the paper book is flat.
-- A further directional proposal while a paper position is open returns
+- A further directional proposal while a paper position is open currently returns
   `EXACT_OPEN_RISK_UNAVAILABLE`; it does not use the forbidden
-  `position_count × 2%` approximation.
+  `position_count × 2%` approximation. The paper book itself already uses Core
+  `assess_open_risk()`; this guard can disappear when the shared Agent decision
+  path consumes that Core assessment.
 - The Friday-only application guard blocks entries from T-15m and flattens the
   paper book from T-5m using Core's New York market clock. This remains a
   temporary Lite guard until Dev 1 replaces Core's obsolete daily-flatten

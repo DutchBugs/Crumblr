@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,18 +33,21 @@ from crumblr.agent_gateway.stores import (
 )
 from crumblr.application.paper_lite import (
     PaperLiteConfigurationError,
+    PaperLiteIncidentClearAssertion,
     PaperLiteOrchestrator,
     PaperLiteOutcomeType,
     PaperLiteSafetyError,
     PaperLiteSessionPhase,
     PaperLiteSettings,
     paper_lite_session_phase,
+    require_paper_lite_database_url,
 )
 from crumblr.application.recording import NullRecorder
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import EntryType, Environment, IncidentStatus, ReasonCode, Side
 from crumblr.domain.models import InstrumentSpec, MarketSnapshot
 from crumblr.persistence.paper_lite import (
+    PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
     DurablePaperBroker,
     PaperJournalEventType,
@@ -183,6 +187,11 @@ class Fixture:
             session_store=self.session_store,
             kill_switch=KillSwitch(),
             code_commit="test-commit",
+            incident_clear_assertion=PaperLiteIncidentClearAssertion(
+                operator="paper-lite-test",
+                note="unit-test assertion for the isolated paper path",
+                asserted_at_utc=FIXED_NOW,
+            ),
             clock=lambda: FIXED_NOW,
         )
         return orchestrator, broker
@@ -229,6 +238,47 @@ class TestTypedPaperOnlyBoundary:
                 kill_switch=KillSwitch(),
                 code_commit="test",
             )
+
+    def test_database_guard_accepts_only_the_dedicated_paper_database(self) -> None:
+        dedicated = "postgresql+psycopg://user:secret@localhost:5432/crumblr_test_dev3"
+
+        assert require_paper_lite_database_url(dedicated) == dedicated
+        with pytest.raises(PaperLiteConfigurationError, match="dedicated"):
+            require_paper_lite_database_url(
+                "postgresql+psycopg://user:secret@localhost:5432/crumblr"
+            )
+
+    def test_clear_requires_operator_assertion_and_journals_it_durably(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "paper.jsonl"
+        orchestrator, broker = Fixture(path).build()
+        assertion_entries = [
+            entry
+            for entry in broker.audit_entries
+            if entry.payload.get("fact") == PAPER_LITE_INCIDENT_CLEAR_ASSERTED
+        ]
+        assert len(assertion_entries) == 1
+        assert json.loads(assertion_entries[0].payload["detail"]) == {
+            "asserted_at_utc": FIXED_NOW.isoformat(),
+            "note": "unit-test assertion for the isolated paper path",
+            "operator": "paper-lite-test",
+        }
+
+        restarted = DurablePaperBroker(
+            path,
+            make_instrument_spec(),
+            starting_balance=Decimal("10000"),
+        )
+        assert any(
+            entry.payload.get("fact") == PAPER_LITE_INCIDENT_CLEAR_ASSERTED
+            for entry in restarted.audit_entries
+        )
+
+        orchestrator._incident_clear_assertion = None
+        snapshot, spec = compatible_snapshot()
+        with pytest.raises(PaperLiteSafetyError, match="operator-bound"):
+            process_clear(orchestrator, snapshot, spec)
 
 
 class TestSessionPolicy:
@@ -358,7 +408,7 @@ class TestPaperLiteFlow:
         risk_state = fixture.session_store.load_latest().state
         assert risk_state is not None
         assert risk_state.open_position_count == 1
-        assert risk_state.open_risk_fraction == broker.exact_open_risk_fraction()
+        assert risk_state.open_risk_fraction == broker.open_risk_assessment().fraction
 
     def test_existing_exposure_without_risk_session_halts_on_restart(self, tmp_path: Path) -> None:
         path = tmp_path / "paper.jsonl"
@@ -449,6 +499,8 @@ class TestPaperLiteFlow:
         assert outcome.outcome_type is PaperLiteOutcomeType.SESSION_BLOCKED
         assert broker.positions() == ()
         assert broker.portfolio_view().closed_trade_count == 1
+        assert len(outcome.closed_trades) == 1
+        assert outcome.closed_trades[0].exit_reason == "owner_policy_v1_friday_flatten"
 
     def test_weekend_exposure_raises_instead_of_carrying_silently(self, tmp_path: Path) -> None:
         orchestrator, broker = Fixture(tmp_path / "paper.jsonl").build()

@@ -5,7 +5,7 @@
 **Worktree:** `.claude/worktrees/paper-lite`
 **Test database:** `crumblr_test_dev3` (required for database-backed tests)
 **Started:** 2026-09-02
-**Baseline:** `origin/main` at `0648e41`
+**Baseline:** rebased onto `origin/main` at `dd2106c` on 2026-09-03
 **Real broker submission:** FORBIDDEN
 
 This is the reviewer/supervisor audit log for the owner-authorized PAPER_LITE
@@ -54,13 +54,17 @@ the Dev-1/Dev-2 owned status documents.
 
 ## 3. Baseline findings and cross-track dependencies
 
-### PL-001 — exact open-risk input is not yet available in the shared agent path
+### PL-001 — Core risk exists; shared Agent-path consumption remains pending
 
 **Status:** OPEN / fail-closed in PAPER_LITE
 **Owner:** shared seam requires Dev 1 + Dev 2 coordination; Dev 3 will not silently
 change the shared semantics.
 
-At baseline, `agent_gateway/decision_path.py::PortfolioSnapshot` contains only
+After rebasing, Core `risk/portfolio_risk.py::assess_open_risk()` is the sole
+PAPER_LITE authority: paper positions, the trusted spec and paper equity feed
+that function directly. The local quote-based risk definition was removed.
+
+`agent_gateway/decision_path.py::PortfolioSnapshot` still contains only
 `account`, `open_positions` and `reconciliation_status`. The implementation then
 sets `PortfolioState.open_risk_fraction` to:
 
@@ -71,19 +75,16 @@ config.risk.max_risk_per_trade * len(open_positions)
 This is exactly the approximation prohibited by Owner Policy v1 and the Lite
 work order. PAPER_LITE therefore must not send a directional proposal into this
 path while any open paper position exists unless an exact open-risk seam has
-been supplied. The planned Lite portfolio derives exact remaining stop risk from
-the simulated position volume, entry/current executable price, stop and trusted
-instrument specification. If that calculation is impossible or ambiguous, the
-run refuses the new entry rather than guessing.
+been supplied. The neutral Agent context and durable risk-session receive the
+Core assessment. A second directional entry remains fail-closed until the shared
+decision path consumes it, rather than retaining an independent risk semantic.
 
 ### PL-002 — current Core Risk still enforces one exposure per symbol
 
-**Status:** OPEN / owned by Dev 1
-`risk/policies.py::MAX_EXPOSURES_PER_SYMBOL = 1` still implements the superseded
-O-004 rule. PAPER_LITE will not fork or weaken Core Risk. Multiple-position
-acceptance tests remain blocked until Dev 1 lands the owner-policy replacement;
-the Lite test suite will prove fail-closed behavior meanwhile and will expose
-this dependency explicitly.
+**Status:** CLOSED by current Core; no PAPER_LITE shared-Core edit
+The rebase includes the owner-policy replacement that withdrew O-004. The
+remaining multi-position blocker is PL-001's shared Agent-path input seam, not a
+PAPER_LITE risk rule.
 
 ### PL-003 — current intraday Core policy still models daily flatten
 
@@ -110,8 +111,8 @@ The shared `evaluate_agent_trade_intent()` recovers `RiskSessionStore` state but
 does not save a new state. Using it directly in a long-running paper process
 would therefore refill the apparent daily-loss/drawdown budget on every call.
 PAPER_LITE now recovers and persists the existing Core `RiskSessionState` around
-each simulated state transition. It records exact current stop risk from the
-simulator's bid/ask, position volume, stop and trusted tick facts. Existing
+each simulated state transition. It records Core's entry-geometry allocation
+risk from paper positions, trusted instrument facts and paper equity. Existing
 paper exposure with no durable risk-session record trips the existing KillSwitch
 as `SAFETY_STATE_UNKNOWN`; Lite never silently manufactures a fresh budget.
 
@@ -138,10 +139,11 @@ The strategy-neutral platform Policy requires `IncidentStatus`, but this
 repository exposes no durable incident-register reader to the Lite process.
 The orchestrator therefore defaults to `UNKNOWN`, which vetoes. The standalone
 runner only supplies `CLEAR` when the operator passes
-`--confirm-paper-incident-clear` after checking the limited paper integration
-scope. This assertion cannot bypass Risk, cannot bypass Policy, cannot reset
-HALT and cannot enable real submission. Replace it with a durable read when the
-shared incident seam exists.
+`--confirm-paper-incident-clear` with operator identity and a reason after
+checking the limited paper integration scope. The assertion, UTC timestamp and
+context are durably journalled as `PAPER_LITE_INCIDENT_CLEAR_ASSERTED`. This
+cannot bypass Risk or Policy, reset HALT, or enable real submission. Replace it
+with a durable incident read when the shared seam exists.
 
 ## 4. Implementation plan
 
@@ -209,6 +211,37 @@ as plainly as passed checks.
 - Refetched `origin/main` after the gate: both the Lite branch base and
   `origin/main` remain at `0648e41` (ahead/behind `0/0`). No rebase or merge was
   needed and no shared tracked file was changed.
+
+### 2026-09-03 — requested review corrections
+
+- Fetched and rebased the branch onto current `origin/main` `dd2106c`; this
+  includes Core owner-risk commit `b2a07a5`. No merge to `main` was performed.
+- Replaced PAPER_LITE's quote-based open-risk calculation with Core
+  `assess_open_risk(position state, trusted spec, paper equity)`. The result is
+  used by the neutral Agent context, paper read model and durable risk session.
+- Prevented a previously observed closed bar's high/low from being replayed
+  after a later entry. Repeated observations of the same source bar now advance
+  stop/TP handling with the current executable quote only; the full closed bar
+  remains available to the Trading Agent. The journal records and validates
+  whether that historical range was applied.
+- Centralized the exact `crumblr_test_dev3` database guard and applied it to the
+  runner and provisioning CLI before engine construction.
+- Made incident-CLEAR assertions operator-bound and durable with operator,
+  timestamp, reason/context and audit fact
+  `PAPER_LITE_INCIDENT_CLEAR_ASSERTED`. Default `UNKNOWN` still vetoes and this
+  capability neither resets HALT nor changes execution authority.
+- Included Friday T-5 simulated closures in `PaperLiteOutcome.closed_trades` and
+  verified the outcome against the broker's closed-trade ledger.
+- Added regression coverage for all points above. Targeted PAPER_LITE tests:
+  29 passed.
+- Final gate after the corrections: `ruff check .` passed; all 201 files passed
+  `ruff format --check .`; mypy passed for 195 source files; the full suite
+  passed with 1,304 tests against only `crumblr_test_dev3`.
+- Two 600-bar deterministic replays produced identical MD5
+  `7d767883dc43a0f6527b9d6348dcc5fc`.
+- This gate made no Pepperstone connection, MT5 execution call, real broker
+  write or external Agent claim. Genuine HEALTHY Static Agent acceptance remains
+  outstanding under PL-004.
 
 ## 6. Reviewer/supervisor handoff
 

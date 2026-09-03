@@ -13,6 +13,7 @@ passing a different adapter cannot turn this path into broker submission.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -24,6 +25,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import yaml
 from pydantic import Field, model_validator
+from sqlalchemy.engine import make_url
 
 from crumblr.agent_gateway.contracts import (
     NoTradeDecision,
@@ -66,6 +68,7 @@ from crumblr.domain.money import ZERO, ExactDecimal
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.simulated import ClosedTrade
 from crumblr.persistence.paper_lite import (
+    PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
     DurablePaperBroker,
     PaperPortfolioView,
@@ -82,6 +85,7 @@ from crumblr.trading_agent.sessions import (
 
 PAPER_LITE_MODE: Literal["PAPER_LITE"] = "PAPER_LITE"
 PAPER_LITE_POLICY_VERSION = "owner-risk-policy-v1-paper-lite"
+PAPER_LITE_DATABASE_NAME = "crumblr_test_dev3"
 
 OWNER_MAX_RISK_PER_TRADE = Decimal("0.02")
 OWNER_MAX_OPEN_RISK = Decimal("0.03")
@@ -95,6 +99,57 @@ class PaperLiteConfigurationError(ValueError):
 
 class PaperLiteSafetyError(RuntimeError):
     """The paper portfolio cannot continue honestly without operator action."""
+
+
+def require_paper_lite_database_url(url: str) -> str:
+    """Refuse every database except the track-isolated PAPER_LITE database."""
+
+    if make_url(url).database != PAPER_LITE_DATABASE_NAME:
+        raise PaperLiteConfigurationError(
+            f"PAPER_LITE requires the dedicated {PAPER_LITE_DATABASE_NAME} database"
+        )
+    return url
+
+
+@dataclass(frozen=True)
+class PaperLiteIncidentClearAssertion:
+    """Operator-bound capability for asserting CLEAR in this paper process."""
+
+    operator: str
+    note: str
+    asserted_at_utc: UtcDatetime
+
+    def __post_init__(self) -> None:
+        if not self.operator.strip():
+            raise PaperLiteConfigurationError("incident-CLEAR assertion requires an operator")
+        if not self.note.strip():
+            raise PaperLiteConfigurationError("incident-CLEAR assertion requires an audit note")
+        if self.asserted_at_utc.utcoffset() is None:
+            raise PaperLiteConfigurationError(
+                "incident-CLEAR assertion timestamp must be timezone-aware"
+            )
+
+    @property
+    def assertion_id(self) -> UUID:
+        return uuid5(
+            NAMESPACE_URL,
+            f"crumblr:paper-lite:incident-clear:{fingerprint(self.audit_payload)}",
+        )
+
+    @property
+    def audit_payload(self) -> dict[str, str]:
+        return {
+            "operator": self.operator,
+            "note": self.note,
+            "asserted_at_utc": self.asserted_at_utc.isoformat(),
+        }
+
+    def record(self, broker: DurablePaperBroker) -> None:
+        broker.record_audit_fact(
+            PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
+            correlation_id=self.assertion_id,
+            detail=json.dumps(self.audit_payload, sort_keys=True, separators=(",", ":")),
+        )
 
 
 class PaperLiteSettings(ConfigSection):
@@ -298,6 +353,7 @@ class PaperLiteOrchestrator:
         session_store: RiskSessionStore,
         kill_switch: KillSwitch,
         code_commit: str,
+        incident_clear_assertion: PaperLiteIncidentClearAssertion | None = None,
         clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         _validate_paper_lite_platform_config(config, settings)
@@ -315,10 +371,13 @@ class PaperLiteOrchestrator:
         self._session_store = session_store
         self._kill_switch = kill_switch
         self._code_commit = code_commit
+        self._incident_clear_assertion = incident_clear_assertion
         self._clock = clock
         self._risk_ledger: EquityLedger | None = None
         self._risk_trading_day: date | None = None
         self._risk_recorded_at: UtcDatetime | None = None
+        if incident_clear_assertion is not None:
+            incident_clear_assertion.record(broker)
 
     def process(
         self,
@@ -337,6 +396,10 @@ class PaperLiteOrchestrator:
             raise PaperLiteSafetyError("market snapshot timeframe does not match the assignment")
         if snapshot.symbol_spec_version != spec.spec_version:
             raise PaperLiteSafetyError("market snapshot and instrument spec versions disagree")
+        if incident_status is IncidentStatus.CLEAR and self._incident_clear_assertion is None:
+            raise PaperLiteSafetyError(
+                "IncidentStatus.CLEAR requires an operator-bound PAPER_LITE assertion"
+            )
 
         if self._broker.has_market_observation:
             self._recover_risk_session(snapshot)
@@ -357,10 +420,17 @@ class PaperLiteOrchestrator:
                 NAMESPACE_URL,
                 f"crumblr:paper-lite:friday-flatten:{now.astimezone(NEW_YORK).date()}",
             )
-            self._broker.flatten_all(
+            closed_count_before = len(self._broker.closed_trades)
+            flattened_tickets = self._broker.flatten_all(
                 flatten_request_id=flatten_id,
                 reason="owner_policy_v1_friday_flatten",
             )
+            flattened_trades = self._broker.closed_trades[closed_count_before:]
+            if tuple(trade.ticket for trade in flattened_trades) != flattened_tickets:
+                raise PaperLiteSafetyError(
+                    "Friday flatten result does not match the paper closed-trade ledger"
+                )
+            closed_trades = (*closed_trades, *flattened_trades)
         elif session_phase is PaperLiteSessionPhase.CLOSED and self._broker.positions():
             self._trip_risk_session(
                 (ReasonCode.OVERNIGHT_EXPOSURE,),
@@ -397,6 +467,7 @@ class PaperLiteOrchestrator:
 
         account = self._broker.account()
         positions = self._broker.positions()
+        open_risk = self._broker.open_risk_assessment()
         portfolio_summary_hash = fingerprint(
             {
                 "account": account.model_dump(mode="json"),
@@ -434,8 +505,9 @@ class PaperLiteOrchestrator:
             reconciliation_status=ReconciliationStatus.MATCHED,
             feature_snapshot_id=bundle.feature_snapshot_id,
             open_position_count=len(positions),
-            # PL-001: no guessed value crosses this boundary.
-            open_risk_fraction=None,
+            # The Agent contract represents a flat book as absence; its
+            # RiskFraction type intentionally excludes numeric zero.
+            open_risk_fraction=open_risk.fraction if positions else None,
             policy_hints=bundle.policy_hints,
         )
         decision = self._agent.decide(context)
@@ -513,21 +585,21 @@ class PaperLiteOrchestrator:
                 detail=session_phase.value,
             )
 
-        # PL-001/PL-002: the shared path still guesses total open risk and
-        # enforces one exposure. Never route a second paper proposal through
-        # that misleading approximation; refuse until the Core seam lands.
+        # Core owns the exact assessment above. The shared Agent decision path
+        # does not consume that seam yet, so never route a second proposal
+        # through its legacy position-count approximation.
         if positions:
             self._broker.record_audit_fact(
                 "PAPER_LITE_EXACT_OPEN_RISK_UNAVAILABLE",
                 correlation_id=gateway_result.outcome_id,
-                detail="shared Core exact-open-risk seam has not landed",
+                detail="shared Agent decision path does not consume Core open-risk yet",
             )
             return self._outcome(
                 PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE,
                 context,
                 gateway_result,
                 closed_trades=closed_trades,
-                detail="shared Core exact-open-risk seam has not landed",
+                detail="shared Agent decision path does not consume Core open-risk yet",
             )
 
         assert gateway_result.trade_intent is not None
@@ -710,13 +782,14 @@ class PaperLiteOrchestrator:
             return
         account = self._broker.account()
         positions = self._broker.positions()
+        open_risk = self._broker.open_risk_assessment()
         self._risk_ledger.update(account.equity)
         self._session_store.save(
             session.snapshot(
                 self._risk_ledger,
                 trading_day=self._risk_trading_day,
                 realized_pnl=self._broker.portfolio_view().realized_profit,
-                open_risk_fraction=self._broker.exact_open_risk_fraction(),
+                open_risk_fraction=open_risk.fraction,
                 open_position_count=len(positions),
                 recorded_at_utc=self._risk_recorded_at,
             )

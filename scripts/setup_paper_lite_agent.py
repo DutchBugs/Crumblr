@@ -20,6 +20,10 @@ from crumblr.agent_gateway.stores import (
     InMemoryDecisionContextBundleStore,
     InMemoryFeatureEvidenceStore,
 )
+from crumblr.application.paper_lite import (
+    PaperLiteConfigurationError,
+    require_paper_lite_database_url,
+)
 from crumblr.domain.enums import Environment
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.persistence.agent_gateway import (
@@ -56,7 +60,11 @@ def main() -> None:
         raise SystemExit(
             f"set {GATEWAY_CREDENTIAL_ENV}; the credential is never accepted in a CLI argument"
         )
-    engine = create_db_engine(database_url())
+    try:
+        configured_database_url = require_paper_lite_database_url(database_url())
+    except PaperLiteConfigurationError as error:
+        raise SystemExit(str(error)) from error
+    engine = create_db_engine(configured_database_url)
     try:
         identities = PostgresAgentIdentityStore(engine)
         credentials = PostgresAgentCredentialStore(engine)

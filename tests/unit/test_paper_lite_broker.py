@@ -53,6 +53,44 @@ class TestMarketObservationAdapter:
 
 
 class TestDurablePaperBroker:
+    def test_closed_bar_range_is_not_reapplied_to_a_position_opened_after_it(
+        self, tmp_path: Path
+    ) -> None:
+        broker = make_broker(tmp_path / "paper.jsonl")
+        historical = make_bar(low=Decimal("1.08200"), high=Decimal("1.08600"))
+        first = make_snapshot(bars=(historical,))
+        broker.advance_snapshot(first)
+        broker.submit(
+            make_approved_order(
+                environment=Environment.PAPER,
+                final_risk_decision_id=None,
+                stop_loss_price=Decimal("1.08300"),
+            ),
+            authorized_risk_amount=Decimal("100"),
+        )
+
+        safe_quote = make_snapshot(
+            event_time_utc=FIXED_NOW + timedelta(seconds=2),
+            received_time_utc=FIXED_NOW + timedelta(seconds=2, milliseconds=8),
+            bid=Decimal("1.08500"),
+            ask=Decimal("1.08512"),
+            bars=(historical,),
+        )
+        assert broker.advance_snapshot(safe_quote) == ()
+        assert len(broker.positions()) == 1
+
+        stop_quote = make_snapshot(
+            event_time_utc=FIXED_NOW + timedelta(seconds=3),
+            received_time_utc=FIXED_NOW + timedelta(seconds=3, milliseconds=8),
+            bid=Decimal("1.08299"),
+            ask=Decimal("1.08311"),
+            bars=(historical,),
+        )
+        closed = broker.advance_snapshot(stop_quote)
+
+        assert len(closed) == 1
+        assert closed[0].exit_reason == "stop_loss"
+
     def test_restart_reconstructs_a_fill_and_retry_does_not_double_fill(
         self, tmp_path: Path
     ) -> None:
@@ -67,7 +105,7 @@ class TestDurablePaperBroker:
 
         first = broker.submit(order, authorized_risk_amount=Decimal("100"))
         assert len(broker.positions()) == 1
-        assert broker.portfolio_view().exact_open_risk_amount == Decimal("10.00")
+        assert broker.open_risk_assessment().risk_amount == Decimal("10.65")
 
         restarted = make_broker(path)
         retried = restarted.submit(order, authorized_risk_amount=Decimal("100"))
@@ -75,7 +113,7 @@ class TestDurablePaperBroker:
         assert retried == first
         assert len(restarted.positions()) == 1
         assert restarted.portfolio_view().authorized_open_risk_amount == Decimal("100")
-        assert restarted.portfolio_view().exact_open_risk_amount == Decimal("10.00")
+        assert restarted.open_risk_assessment().risk_amount == Decimal("10.65")
         assert (
             sum(
                 entry.event_type is PaperJournalEventType.PAPER_ORDER_ACCEPTED

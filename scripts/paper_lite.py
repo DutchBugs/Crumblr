@@ -9,14 +9,15 @@ import time
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy.engine import make_url
-
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.agent_gateway.static_agent_client import StaticAgentClientConfig
 from crumblr.application.paper_lite import (
+    PaperLiteConfigurationError,
+    PaperLiteIncidentClearAssertion,
     PaperLiteOrchestrator,
     PaperLiteOutcomeType,
     load_paper_lite_settings,
+    require_paper_lite_database_url,
 )
 from crumblr.application.paper_lite_agent import HttpPaperLiteTradingAgent
 from crumblr.application.recording import JournalRecorder
@@ -24,6 +25,7 @@ from crumblr.config import load_config
 from crumblr.domain.enums import Environment, IncidentStatus, SessionState
 from crumblr.domain.models import InstrumentSpec, MarketSnapshot
 from crumblr.domain.money import price_to_points
+from crumblr.domain.timeutils import utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
 from crumblr.persistence.agent_gateway import (
     PostgresAgentCredentialStore,
@@ -60,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--confirm-paper-incident-clear", action="store_true")
+    parser.add_argument("--incident-clear-note")
     parser.add_argument("--initialize-paper-safety", action="store_true")
     parser.add_argument("--operator")
     parser.add_argument("--incident-note")
@@ -69,11 +72,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     # No default URL: the dedicated Dev-3 database must be chosen explicitly.
-    configured_database_url = database_url()
-    if make_url(configured_database_url).database != "crumblr_test_dev3":
-        raise SystemExit(
-            "PAPER_LITE requires the dedicated crumblr_test_dev3 database; refusing another target"
-        )
+    try:
+        configured_database_url = require_paper_lite_database_url(database_url())
+    except PaperLiteConfigurationError as error:
+        raise SystemExit(str(error)) from error
     engine = create_db_engine(configured_database_url)
     settings = load_paper_lite_settings(args.settings)
     base = load_config(Environment.PAPER, config_dir=REPO_ROOT / "config")
@@ -82,6 +84,10 @@ def main() -> None:
         raise SystemExit(
             "PAPER_LITE incident status defaults to UNKNOWN; an operator must pass "
             "--confirm-paper-incident-clear after checking the paper integration scope"
+        )
+    if not args.operator or not args.incident_clear_note:
+        raise SystemExit(
+            "--confirm-paper-incident-clear requires --operator and --incident-clear-note"
         )
 
     credential = os.getenv(GATEWAY_CREDENTIAL_ENV)
@@ -125,6 +131,11 @@ def main() -> None:
         starting_balance=settings.starting_balance,
         account_currency=settings.account_currency,
         leverage=settings.leverage,
+    )
+    incident_clear_assertion = PaperLiteIncidentClearAssertion(
+        operator=args.operator,
+        note=args.incident_clear_note,
+        asserted_at_utc=utc_now(),
     )
     safety_store = CompositeSafetyStateStore(
         PostgresSafetyStateStore(engine), FileSafetyStateStore(safety_path)
@@ -173,6 +184,7 @@ def main() -> None:
         session_store=PostgresRiskSessionStore(engine),
         kill_switch=kill_switch,
         code_commit=args.code_commit,
+        incident_clear_assertion=incident_clear_assertion,
     )
 
     try:
