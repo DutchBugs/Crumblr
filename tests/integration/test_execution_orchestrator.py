@@ -25,6 +25,7 @@ from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestC
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
 from crumblr.persistence.risk_session import PostgresRiskSessionStore
+from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import RiskSessionState
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
@@ -345,6 +346,125 @@ class TestEndToEnd:
         assert reconciled_event.payload["expected_position_tickets"] == [900042]
         assert reconciled_event.payload["observed_open_tickets"] == [900042]
         assert reconciled_event.payload["book_status"] == "MATCHED"
+
+    def test_two_matching_broker_positions_is_an_integrity_ambiguity(self, engine: Engine) -> None:
+        """Phase B item B4: >1 broker positions sharing one magic number
+
+        is never a stronger form of "submitted" — it is an integrity
+        ambiguity that fails closed and escalates, distinct from both
+        the 0-match and 1-match cases above."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            kill_switch=kill_switch,
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        magic = mt5_magic_number(request_id)
+        fake.open_positions = (
+            fake_position(magic=magic, ticket=900042),
+            fake_position(magic=magic, ticket=900043),
+        )
+
+        second = orch.run_once()
+        assert len(second) == 1
+        assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert fake.order_send_calls == 0
+
+        assert kill_switch.is_halted
+        assert ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS in kill_switch.active_reasons
+
+        events = ExecutionEventStore(engine).events_for(request_id)
+        recovery_event = events[-1]
+        assert recovery_event.event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert recovery_event.payload is not None
+        assert "submitted" not in recovery_event.payload
+        assert recovery_event.payload["integrity_ambiguity"] is True
+        assert recovery_event.payload["matching_position_count"] == 2
+        assert set(recovery_event.payload["matching_tickets"]) == {900042, 900043}
+
+        # A second pass must not re-run recovery for this request — the
+        # last event is no longer SUBMISSION_STARTED, so
+        # `_recover_ambiguous_submission`'s own guard returns immediately.
+        # `reconcile_once()` does still read broker state on later passes
+        # (this request stays a "pending" reconciliation candidate
+        # forever, since it never reaches DETERMINED/RECONCILED — a
+        # known, separate characteristic of an unresolvable request, not
+        # something this slice changes), but it must not append a second
+        # `AMBIGUOUS_OUTCOME_RESOLVED`, must not re-derive a ticket
+        # attribution for this request, and must not re-trip or alter the
+        # already-halted kill switch.
+        events_before_third = len(events)
+        active_reasons_before_third = kill_switch.active_reasons
+        third = orch.run_once()
+        assert third == ()
+        assert len(ExecutionEventStore(engine).events_for(request_id)) == events_before_third
+        assert kill_switch.active_reasons == active_reasons_before_third
+
+    def test_three_matching_broker_positions_is_also_an_integrity_ambiguity(
+        self, engine: Engine
+    ) -> None:
+        """Not special-cased to exactly two — any count above one is the
+
+        same ambiguity."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={"submission_enabled": True, "feedback_2_0_approved": True}
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            kill_switch=kill_switch,
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        magic = mt5_magic_number(request_id)
+        fake.open_positions = (
+            fake_position(magic=magic, ticket=900042),
+            fake_position(magic=magic, ticket=900043),
+            fake_position(magic=magic, ticket=900044),
+        )
+
+        second = orch.run_once()
+        assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+
+        assert kill_switch.is_halted
+        events = ExecutionEventStore(engine).events_for(request_id)
+        recovery_event = events[-1]
+        assert recovery_event.payload is not None
+        assert recovery_event.payload["matching_position_count"] == 3
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine

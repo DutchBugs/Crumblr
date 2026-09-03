@@ -16,7 +16,7 @@ session a meaningful slice merges to `main`, not later.
 |---|---|
 | **`main` HEAD** | `7ad93a5` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`) — reviewer-confirmed correct (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.1: "correctly escalates a missing/mismatched broker SL"). All four items of the 2026-09-03 Shared-Core work order shipped. **New owner/reviewer coordination order received 2026-09-03: `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`**, staging the route to a constrained one-shot Pepperstone DEMO canary across Phases 0/A/B/C/D/E/F. **Dev 1's own Phase-0 role — reviewing Dev 2's `agent/contracts` convergence merge for cross-track Core invariant/item-9 conflicts — is now DONE**: Dev 2 pushed `76a88c7` (synced onto item-9 `main`, full local gate green: 1358 passed/3 skips/0 failed), reviewed in full 2026-09-03 — zero touches to any Core file (`execution.py`/`reconciliation.py`/`expected_state.py`/`domain/enums.py`/`risk/*.py`), zero `order_send`/`close_all_positions` references, D2.2's `assess_open_risk()` wiring correct and non-duplicating, the two PL-006 test-timing fixes correct, `DEVIATIONS.md` merged cleanly (item-9/D-051 amendment intact). No conflicts found. Only the PR object itself remains, blocked on human GitHub access (neither Dev session has `gh`/API access — confirmed on both sides). Dev 1's own **Phase B** (real-but-disabled DEMO mutation adapter, real submission side-effect chain, honest definite/ambiguous outcome semantics, real per-ticket close/flatten, exact account pin, one-shot canary permit, shared final-Risk/side-effect authority with Dev 2) stays queued until the PR is opened and hosted CI is confirmed green on it — the work order's own explicit sequencing. NEXT: awaiting a human to open the `agent/contracts` → `main` PR and hosted CI confirmation. BLOCKED: on that PR/CI confirmation before Phase B may branch |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — reviewed and merged Dev 2's `agent/contracts` convergence (PR #2, `3e87384`), no conflicts, independently re-verified green locally (1358 passed/3 skips/0 failed). **Phase B slice 1 (B4, `ADR-015`) shipped** — `_recover_ambiguous_submission()` now fails closed and HALTs (`ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS`) on >1 broker positions sharing one magic number, instead of silently attributing them all to one request; full suite 1361 passed/3 skips/0 failed. 7 of 8 Phase-B sub-items remain (B1/B2/B3/B5/B7/B8; B6 explicitly deferred by the work order itself until continuous-DEMO promotion). NEXT: decide and plan the next Phase B slice with the user (leaning B7 — exact account pin, small/independent — or B1+B2, the core adapter + submission chain). BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -9744,6 +9744,128 @@ Next:
 - Confirm with the user whether to proceed into Phase B now (local
   evidence is green) or wait for an explicit hosted-CI confirmation
   first.
+
+---
+
+## Update 2026-09-03 (seventy-fourth entry) — Phase B slice 1: ambiguous-recovery integrity hardening (B4)
+
+```text
+Component: application/execution.py, application/expected_state.py, domain/enums.py, risk/flatten_gate.py
+Milestone: DEMO canary work order, Phase B, item B4 — slice 1 of 8 (user chose this as the first, smallest, most independent piece)
+Status before: Phase 0 complete; Phase B not started
+Status after:  Phase B slice 1 (B4) shipped; 7 sub-items remain (B1, B2, B3, B5, B6 deferred by the work order itself, B7, B8)
+```
+
+**Completed**
+
+- `application/execution.py::_recover_ambiguous_submission()` now
+  explicitly branches on `len(matches) > 1` before computing `submitted`
+  — previously `submitted = len(matches) > 0` treated 2+ matching
+  broker positions identically to exactly 1, durably attributing every
+  matching ticket to one request. Two or more positions sharing one
+  magic number is never a legitimate outcome of a single MARKET order
+  (no retry logic exists that could produce two) — it signals a
+  magic-number collision or corrupted state, and blindly attributing
+  all of them was exactly the "silently accept" failure `build.md` §20's
+  own default ("No new exposure. Reconcile first.") forbids.
+- New `_trip_submission_integrity_ambiguous()`, mirroring
+  `_trip_overnight_exposure()`/`_trip_protective_stop_issue()`'s
+  idempotent-trip shape, escalates via a new
+  `ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS` the moment `>1` matches
+  are found.
+- `application/expected_state.py::derive_expected_exposure()` gains an
+  explicit, honestly-worded check for the new `integrity_ambiguity`
+  payload flag, ahead of the existing "missing or malformed" branch —
+  deliberately not reusing that wording, since this is a correctly-shaped
+  payload for a distinct condition, not a data defect. The request is
+  left undetermined (never in `tickets_by_request`), which independently
+  makes `reconcile()` return `UNKNOWN` — a second line of defense on top
+  of the kill-switch HALT.
+- `risk/flatten_gate.py::_TOLERATED_HALT_REASONS` gains
+  `SUBMISSION_INTEGRITY_AMBIGUOUS`, same reasoning as item 9's own
+  additions: flattening closes whatever the broker reports regardless of
+  attribution, so becoming flat is still the safe resolution even when
+  attribution itself is in doubt.
+- `review/adr/ADR-015-ambiguous-recovery-integrity-hardening.md`
+  written. Checked against `build.md` (§8.2 "reconciliation mismatch"
+  HALT trigger, §20's ambiguous-situation default) before concluding no
+  new `review/DEVIATIONS.md` entry is needed — this aligns with, not
+  departs from, the spec, same as item 9.
+- **Distinguishing note (unlike items 6-9/D1.5):** the 0-match branch of
+  this method is already live in shipped behaviour today — every
+  request reaching `SUBMISSION_STARTED` is durably resolved as
+  `submitted=False` on the next pass, since `order_send` never runs.
+  This slice preserves that unchanged (verified by re-running the
+  pre-existing 0-match/1-match tests without modification); only the
+  new `>1`-match branch is provably unreachable today, for the same
+  structural reason as every prior slice.
+
+**Evidence**
+
+- New tests: `tests/integration/test_execution_orchestrator.py` — 2 new
+  (`test_two_matching_broker_positions_is_an_integrity_ambiguity`,
+  `test_three_matching_broker_positions_is_also_an_integrity_ambiguity`,
+  confirming payload shape, kill-switch trip, and idempotence on a
+  third pass — the third pass does still read broker state, since this
+  request remains a "pending" `reconcile_once()` candidate forever
+  having never reached `RECONCILED`, but must not append a second event,
+  re-derive attribution, or re-trip/alter the halted kill switch).
+  `tests/unit/test_expected_state.py` — 1 new
+  (`test_an_integrity_ambiguity_is_undetermined_not_malformed`). 3 new
+  tests total.
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (185 source files).
+- Full suite: **1361 passed, 3 pre-existing skips, 0 failed** (329.06s)
+  — 1358 (post-Phase-0-merge baseline, seventy-third entry) + 3 new,
+  exactly accounted for.
+- Determinism: `scripts/run_replay.py --bars 600` run twice (PowerShell,
+  stdout only), MD5 identical (`704967823f258496922a9b16c4d29788` — same
+  hash as item 9's own run, as expected, since replay never touches
+  this code path).
+- Grep the diff: zero `.order_send(`/`.close_all_positions(` calls,
+  zero edits under `agent_gateway/`.
+
+**Problems found**
+
+- Two of my own initial test assertions were wrong, not the
+  implementation: (1) a test asserted `"malformed"` was absent from the
+  new reason text, but my own honest wording ("not a malformed payload")
+  legitimately contains that substring — fixed by asserting the
+  precise original phrase ("missing or malformed") is absent instead.
+  (2) a test assumed a third `run_once()` pass would do zero further
+  broker reads, but `reconcile_once()`'s own candidate-gathering treats
+  any request with `SUBMISSION_STARTED` and no `RECONCILED` as
+  perpetually pending — since this request can never reach
+  `RECONCILED` (it never becomes determined), it stays a scan candidate
+  forever, causing one broker read per pass indefinitely. Not a defect
+  in this slice (out of scope to change `reconcile_once()`'s own
+  candidate-gathering here) — the test was corrected to assert the
+  actually-relevant invariants (no new event, no kill-switch change)
+  instead of an incorrect broker-read-count assumption.
+
+**Risk impact**
+
+- None to structural inertness: `order_send`/`close_all_positions`
+  remain unconditional raises; the new `>1`-match branch is provably
+  unreachable today, proven by the same structural argument and tests
+  as every prior slice.
+- Genuine safety tightening on an already-live code path: an integrity
+  anomaly that was previously silently accepted (attributed to one
+  request as if normal) now fails closed and escalates.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing to a new `core/phase-b-1-ambiguous-recovery-integrity`
+  branch, `[core]` prefix, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational — no
+  shared-contract surface change expected).
+- Plan and implement the next Phase B slice — likely B7 (exact account
+  pin, small/independent) or B1+B2 (the core new adapter + submission
+  chain, the largest remaining piece) — to be decided with the user.
 
 ---
 

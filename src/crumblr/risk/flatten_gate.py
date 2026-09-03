@@ -121,6 +121,7 @@ _TOLERATED_HALT_REASONS: frozenset[ReasonCode] = frozenset(
         ReasonCode.FLATTEN_STATE_UNKNOWN,
         ReasonCode.PROTECTIVE_STOP_MISSING,
         ReasonCode.PROTECTIVE_STOP_MISMATCH,
+        ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS,
     }
 )
 """Halt reasons that do not, by themselves, close this gate. See the
@@ -134,7 +135,11 @@ item 9) join this set for the same reason: a position whose protection
 cannot be trusted is exactly the position flattening exists to close,
 and excluding it here would leave that position permanently un-remediable
 in-system the moment the halt trips — the same brick `OPEN_RISK_UNKNOWN`'s
-own BLOCK-not-HALT choice was designed to avoid."""
+own BLOCK-not-HALT choice was designed to avoid. `SUBMISSION_INTEGRITY_AMBIGUOUS`
+(Phase B item B4) joins them for the same reason: flattening closes
+whatever the broker actually reports, regardless of which request a
+position is or isn't attributable to, so becoming flat is still the
+safe resolution even when that attribution itself is in doubt."""
 
 
 @dataclass(frozen=True)

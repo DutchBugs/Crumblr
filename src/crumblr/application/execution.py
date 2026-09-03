@@ -633,6 +633,10 @@ class ExecutionOrchestrator:
         (`review/DEVIATIONS.md`); a submitted `EntryType.LIMIT` order
         sitting pending, not yet filled, would not be found by this
         check. Named as a real, separate gap, not silently ignored.
+
+        Phase B item B4: more than one matching position is an integrity
+        ambiguity, not a stronger form of "submitted" — see the `>1`
+        branch below and `_trip_submission_integrity_ambiguous`.
         """
         events = self._events.events_for(order_request_id)
         if not events or events[-1].event_type is not ExecutionEventType.SUBMISSION_STARTED:
@@ -642,9 +646,28 @@ class ExecutionOrchestrator:
         matches = tuple(
             position for position in self._adapter.positions() if position.magic == magic
         )
-        submitted = len(matches) > 0
-
         now = self._clock()
+
+        if len(matches) > 1:
+            self._append(
+                order_request_id,
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                now,
+                payload={
+                    "magic_number": magic,
+                    "integrity_ambiguity": True,
+                    "matching_position_count": len(matches),
+                    "matching_tickets": [position.ticket for position in matches],
+                },
+            )
+            self._trip_submission_integrity_ambiguous(order_request_id, matches, now)
+            return ExecutionAttemptOutcome(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+            )
+
+        submitted = len(matches) == 1
         self._append(
             order_request_id,
             ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
@@ -661,6 +684,32 @@ class ExecutionOrchestrator:
             capsule_id=capsule.capsule_id,
             event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
         )
+
+    def _trip_submission_integrity_ambiguous(
+        self,
+        order_request_id: UUID,
+        matches: tuple[PositionState, ...],
+        now: UtcDatetime,
+    ) -> None:
+        """Phase B item B4: more than one broker position shares this
+
+        request's magic number — a magic-number collision or corrupted
+        broker/platform state, never a legitimate outcome of one MARKET
+        order. Same idempotent-trip shape as `_trip_overnight_exposure`/
+        `_trip_protective_stop_issue` — a no-op once already halted.
+        """
+        if not self._kill_switch.is_halted:
+            tickets = [position.ticket for position in matches]
+            self._kill_switch.trip(
+                reason_codes=(ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS,),
+                tripped_by="ambiguous_recovery_driver",
+                occurred_at_utc=now,
+                detail=(
+                    f"order_request_id {order_request_id}: {len(matches)} broker "
+                    f"positions share magic number {mt5_magic_number(order_request_id)} "
+                    f"(tickets={tickets}) -- cannot safely attribute any of them"
+                ),
+            )
 
     def flatten_once(self) -> FlattenAttemptOutcome | None:
         """Core critical path item 7 (ADR-009): the durable

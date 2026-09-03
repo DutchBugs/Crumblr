@@ -291,6 +291,33 @@ class ReasonCode(StrEnum):
     actually protecting the position is not the one this platform
     believes it placed."""
 
+    SUBMISSION_INTEGRITY_AMBIGUOUS = "SUBMISSION_INTEGRITY_AMBIGUOUS"
+    """Phase B item B4 (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`):
+
+    ambiguous-outcome recovery (`application/execution.py
+    ::_recover_ambiguous_submission`) found *more than one* broker
+    position sharing this request's computed magic number. A single
+    MARKET order this platform ever submits can produce at most one
+    resulting position — no retry logic exists that could legitimately
+    produce two — so two or more matches signals a magic-number
+    collision or corrupted broker/platform state, never a normal
+    outcome. Never silently attributed to the request (which of the N
+    positions would even be "the" one this platform is responsible
+    for?): recovery deliberately does not set `submitted` at all for
+    this case, so `expected_state.py::derive_expected_exposure` leaves
+    the request undetermined rather than guessing.
+
+    Same "provably inert today, real code for when real submission
+    lands" shape as `PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH`
+    above (item 9): a real MT5 position bearing this platform's magic
+    number cannot exist while `order_send` stays an unconditional raise,
+    so this branch cannot fire in any shipped configuration today.
+    Tolerated in `flatten_gate.py::_TOLERATED_HALT_REASONS` alongside
+    `PROTECTIVE_STOP_MISSING`/`PROTECTIVE_STOP_MISMATCH` — flattening
+    closes broker-observed positions regardless of per-request
+    attribution, so becoming flat is still the safe resolution of this
+    halt too."""
+
     # §10.1 — supervisor pre-trade envelope checks.
     UNKNOWN_REGIME = "UNKNOWN_REGIME"
     CONFIDENCE_OUT_OF_RANGE = "CONFIDENCE_OUT_OF_RANGE"

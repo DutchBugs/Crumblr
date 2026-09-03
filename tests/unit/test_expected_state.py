@@ -145,6 +145,31 @@ class TestPerRequestExposure:
         assert len(exposure.undetermined_reasons) == 1
         assert request_id not in exposure.determined_request_ids
 
+    def test_an_integrity_ambiguity_is_undetermined_not_malformed(self) -> None:
+        """Phase B item B4: >1 matching positions produces a deliberately
+
+        `submitted`-less payload — distinct from a genuinely malformed
+        one, with its own, honest reason text."""
+        request_id = uuid4()
+        history = [
+            event(ExecutionEventType.SUBMISSION_STARTED, payload={"entry_type": "MARKET"}),
+            event(
+                ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                payload={
+                    "integrity_ambiguity": True,
+                    "matching_position_count": 2,
+                    "matching_tickets": [900001, 900002],
+                },
+            ),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.expected_position_tickets == frozenset()
+        assert request_id not in exposure.determined_request_ids
+        assert request_id not in exposure.tickets_by_request
+        assert len(exposure.undetermined_reasons) == 1
+        assert "integrity ambiguity" in exposure.undetermined_reasons[0]
+        assert "missing or malformed" not in exposure.undetermined_reasons[0]
+
     def test_a_non_market_entry_type_is_undetermined_for_pending_orders(self) -> None:
         request_id = uuid4()
         history = [
