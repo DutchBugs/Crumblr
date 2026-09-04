@@ -1673,6 +1673,18 @@ skips, unrelated), 0 failed, in 1177s (~20 min — the full suite,
 including Dev 1's own new `test_risk_ledger_lock.py` concurrency proof).
 Committed `f0a18ed`, merged Dev 1's ADR-021 amendment on top, pushed.
 
+**Self-review, same day:** `/code-review medium` against the actual
+`agent/contracts` diff (not requested by anyone — the same "solid test
+coverage doesn't rule out a wrong claim in prose" discipline §0a used)
+found one real issue: this module's own docstring said ADR-021 "closes
+this for real" without qualifying that `PaperLiteOrchestrator` (AG-023)
+remains an unlocked party against the same table — a future reader could
+mistake this module's own lock participation for a system-wide guarantee.
+Fixed same day, `aabc2e4`: the claim is now scoped to the call sites
+ADR-021 actually names, with an explicit AG-023 cross-reference. Full
+`test_agent_decision_path.py` re-run (37/37) after the docstring-only
+change; ruff/mypy clean.
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
