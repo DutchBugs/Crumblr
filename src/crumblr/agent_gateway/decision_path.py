@@ -58,13 +58,19 @@ on every call rather than caching one (the original interim mitigation),
 but a fresh read alone is not race-free against a concurrent writer's own
 read-modify-write cycle -- two independent processes could each read the
 same "current" state and one's write could silently clobber the other's.
-ADR-021 closes this for real: every call now acquires
-`RiskLedgerLock.held(canonical_symbol)` around the `load_latest()` call
-below, serializing this read against `LiveDecisionOrchestrator`'s own
+ADR-021 closes this against every call site it names: every call here now
+acquires `RiskLedgerLock.held(canonical_symbol)` around the `load_latest()`
+call below, serializing this read against `LiveDecisionOrchestrator`'s own
 locked recover-update-persist cycle (`application/live_decision.py`) and
 `ExecutionOrchestrator`'s FINAL Risk read (`application/execution.py`,
 included for completeness -- ADR-021 section 5, it was never itself
-racy). This module still never calls `.save()` -- its own critical
+racy). **Not closed system-wide**: `application/paper_lite.py
+::PaperLiteOrchestrator` has its own separate, still-unlocked
+recover/persist pair against the same real `risk_session_states` table
+(AG-023, found while wiring this side, ADR-021 amended same day to name
+it) -- do not read this module's own participation as proof the table-wide
+race is fully eliminated. This module still never calls `.save()` -- its
+own critical
 section is `recover` only, not `recover-evaluate-persist`, since it has
 no realized P&L to write back until this path can reach `order_send`
 (confirmed while writing ADR-021's section 4). The lock is released
