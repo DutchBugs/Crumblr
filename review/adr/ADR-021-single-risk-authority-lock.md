@@ -30,13 +30,48 @@ not this ADR's implementation, but its interface contract).
 
 Three call sites read and/or write `risk_session_states` (the durable
 daily-loss/drawdown ledger, keyed implicitly by canonical symbol — this
-platform trades exactly one instrument today):
+platform trades exactly one instrument today) at the time this ADR was
+first drafted — a fourth was found afterward, see the amendment below the
+table:
 
 | Call site | Owner | Reads | Writes | Caches in memory? |
 |---|---|---|---|---|
 | `LiveDecisionOrchestrator.decide_once()` (intent-time Risk, internal strategies) | Dev 1 | `load_latest()`, once per process lifetime or trading-day rollover | `save()`, only on a cycle that reaches a risk-`PASS` decision | **Yes** — `self._ledger`, mutated in memory every cycle via `EquityLedger.update()`, only periodically flushed |
 | `agent_gateway/decision_path.py::evaluate_agent_trade_intent()` (intent-time Risk, external-agent proposals) | Dev 2 | `load_latest()`, fresh every call (AG-012's existing interim mitigation) | never | No — already re-derives every call |
 | `ExecutionOrchestrator._process()` (FINAL Risk, execution-time revalidation) | Dev 1 | `load_latest()`, fresh every pass (review 1.23 F-058) | never | No — already re-derives every pass |
+| `PaperLiteOrchestrator._recover_risk_session()`/`_persist_risk_session()` | Dev 3 | `load_latest()`, unlocked | `save()`, unlocked, from `_outcome()` — on essentially every decision outcome, not a rarely-flushed cache | No caching, but **not locked either** — see amendment |
+
+> **Amendment, 2026-09-04 (same day, before Dev 2's `decision_path.py`
+> side landed).** Dev 2 found this fourth party while checking every real
+> caller of `evaluate_agent_trade_intent()` before wiring their own side
+> through — not covered by this ADR's original three-party framing.
+> `application/paper_lite.py::PaperLiteOrchestrator` (Dev-3-owned,
+> `scripts/paper_lite.py` constructs it with a real
+> `PostgresRiskSessionStore(engine)`, not a test-only in-memory one) reads
+> and writes `risk_session_states` through neither `RiskLedgerLock` nor
+> any other synchronization — a genuine, verified (confirmed by direct
+> read of `application/paper_lite.py` lines 736-795 and
+> `scripts/paper_lite.py`, not accepted on report alone) two-step
+> read-then-later-write race against whichever other party writes the
+> same row in between, independent of caching duration.
+>
+> **This ADR's stated guarantee is therefore currently narrower than
+> written** — "serializes... across every process that reads or writes
+> it" is true for the three parties in the table above, not yet for
+> PAPER_LITE. Not fixed here: `paper_lite.py`'s own recover/persist
+> design is Dev-3-owned territory, and whether/how it should acquire
+> `RiskLedgerLock` is an architectural call for whoever owns that file —
+> bundling a fix into this ADR's own mechanical-signature-widening pass
+> would be exactly the kind of unilateral cross-track patch §2.1 already
+> declined to make for a *different* reason (needing both sides'
+> agreement on a *design*, not just a signature). Tracked as a Dev-2-filed
+> `AG-###` finding in `review/AGENT_FEEDBACK.md`; not escalated to a
+> project-wide `F-###`/reviewer finding, for the same reason the original
+> AG-012 race wasn't: PAPER_LITE's own broker is `SimulatedBroker` only,
+> `order_send` is unreachable from it exactly as from every other
+> pipeline, so this is a Phase-C-completeness gap, not a live safety one.
+> **Whoever picks this up next should re-read this table fresh rather
+> than trust it as exhaustive** — a third caller was already missed once.
 
 **The race is specifically between rows 1 and 2.** Two processes —
 `LiveDecisionOrchestrator` for internal strategies,
@@ -309,3 +344,8 @@ only.
   AG-012 closes for real (option 1 from its own row, "single shared
   risk-evaluation authority," superseding the interim option-2
   mitigation currently in `decision_path.py`).
+- **PAPER_LITE's own unlocked access remains open** (§1's amendment) —
+  a real, if currently non-safety-critical, gap between this ADR's
+  stated guarantee and what is actually locked. Whoever owns
+  `application/paper_lite.py` next should read §1's amendment before
+  assuming the guarantee is complete.
