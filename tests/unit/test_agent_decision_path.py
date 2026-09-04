@@ -646,6 +646,51 @@ class TestAG012RiskLedgerLockAcquired:
         assert result.risk_decision.verdict is RiskVerdict.PASS
 
 
+class RaisingRiskLedgerLock:
+    """AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`'s
+    own test): simulates the lock's own acquisition failing -- e.g. a
+    transient database outage. Before AG-024, this had no handling
+    anywhere in `evaluate_agent_trade_intent`'s own call chain and would
+    have propagated uncaught."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A lock/recover failure must halt and still seal a capsule --
+    never crash the process, and never silently proceed on unknown risk-
+    session state (ADR-021 section 8)."""
+
+    def test_a_lock_failure_trips_the_kill_switch_and_seals_a_blocked_capsule(self) -> None:
+        kill_switch = KillSwitch()
+        fixture = Fixture(risk_ledger_lock=RaisingRiskLedgerLock(), kill_switch=kill_switch)
+
+        # Must not raise -- the whole point of AG-024.
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in kill_switch.active_reasons
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in result.risk_decision.reason_codes
+        # Still evidence, per this module's own "every evaluated window is
+        # evidence, never dropped" rule -- not a `capsule=None` skip the
+        # way `LiveDecisionOutcome` supports, since this module's own
+        # `AgentDecisionPathResult.capsule` is never optional.
+        assert result.capsule.trade_intent is not None
+
+    def test_a_no_trade_evaluation_never_reaches_the_lock_at_all(self) -> None:
+        """NO_TRADE returns before any lock acquisition is attempted --
+        mirrors `TestAG012RiskLedgerLockAcquired`'s own no-trade case; a
+        raising lock must not be reached, let alone tripped over."""
+        fixture = Fixture(risk_ledger_lock=RaisingRiskLedgerLock())
+
+        result, _ = fixture.evaluate(None)  # must not raise
+
+        assert result.risk_decision is None
+
+
 class TestReplaySafety:
     def test_identical_outcome_id_and_content_reseals_the_identical_capsule(self) -> None:
         fixture = Fixture()

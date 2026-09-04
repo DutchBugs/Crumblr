@@ -64,19 +64,30 @@ call below, serializing this read against `LiveDecisionOrchestrator`'s own
 locked recover-update-persist cycle (`application/live_decision.py`) and
 `ExecutionOrchestrator`'s FINAL Risk read (`application/execution.py`,
 included for completeness -- ADR-021 section 5, it was never itself
-racy). **Not closed system-wide**: `application/paper_lite.py
-::PaperLiteOrchestrator` has its own separate, still-unlocked
-recover/persist pair against the same real `risk_session_states` table
-(AG-023, found while wiring this side, ADR-021 amended same day to name
-it) -- do not read this module's own participation as proof the table-wide
-race is fully eliminated. This module still never calls `.save()` -- its
-own critical
-section is `recover` only, not `recover-evaluate-persist`, since it has
-no realized P&L to write back until this path can reach `order_send`
-(confirmed while writing ADR-021's section 4). The lock is released
-before `policies.evaluate()` runs, mirroring `live_decision.py`'s own
-scope (the lock protects the durable read/write, not the CPU-bound
-evaluation against an already-recovered ledger).
+racy). `application/paper_lite.py::PaperLiteOrchestrator` (AG-023, found
+while wiring this side) was a fourth party ADR-021 §1 originally missed --
+now also lock-protected, though its own recover and persist remain two
+separately-locked calls rather than one atomic cycle (see that class's
+own docstring for the honest, narrower remaining gap there). This module
+still never calls `.save()` -- its own critical section is `recover`
+only, not `recover-evaluate-persist`, since it has no realized P&L to
+write back until this path can reach `order_send` (confirmed while
+writing ADR-021's section 4). The lock is released before
+`policies.evaluate()` runs, mirroring `live_decision.py`'s own scope (the
+lock protects the durable read/write, not the CPU-bound evaluation
+against an already-recovered ledger).
+
+**AG-024 (ADR-021 section 8) -- lock-acquisition failure now fail-closed
+too.** Mirrors `application/live_decision.py`/`application/execution.py`'s
+own fix: a failure acquiring the lock or opening its transaction
+previously had no handler anywhere in this call chain and would have
+propagated as an uncaught exception, unlike an ordinary store-read
+failure (`load_latest()` already turns that into
+`SessionRecord(unreadable=...)`, which `recover_session()` already turns
+into `must_halt`). The `try`/`except` below synthesizes the same halted
+`SessionRecovery` shape `risk.session._halt()` returns for its own
+internal failures, so the existing `recovery.must_halt` handling runs
+unchanged rather than needing a second, parallel halt path.
 
 **Exact open risk, not a count-based approximation (Owner Policy v1,
 `review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2, D1.4).** The owner's
@@ -172,12 +183,20 @@ from crumblr.domain.models import (
     VersionTag,
 )
 from crumblr.domain.timeutils import UtcDatetime
+from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, trading_window
-from crumblr.risk.kill_switch import KillSwitch
+from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
-from crumblr.risk.session import RiskLedgerLock, RiskSessionStore, recover_session
+from crumblr.risk.session import (
+    RiskLedgerLock,
+    RiskSessionStore,
+    SessionRecovery,
+    recover_session,
+)
 from crumblr.trading_agent.base import FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
+
+_log = get_logger("agent_decision_path")
 
 POLICY_VERSION = "external-agent-policy-v1"
 """Names what a `SupervisorDecision` sealed by this module actually means
@@ -343,14 +362,39 @@ def evaluate_agent_trade_intent(
     # same symbol-keyed advisory lock LiveDecisionOrchestrator's own
     # recover-update-persist cycle holds -- see the module docstring. No
     # `.save()` call here, so the lock's scope is just this one read.
-    with risk_ledger_lock.held(snapshot.symbol) as connection:
-        recovery = recover_session(
-            session_store.load_latest(connection=connection),
-            live_equity=portfolio.account.equity,
-            live_open_positions=len(portfolio.open_positions),
-            market_day=trading_day(now),
-            max_daily_loss=config.risk.max_daily_loss,
-            max_drawdown=config.risk.max_drawdown,
+    #
+    # AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`/
+    # `application/execution.py`): lock acquisition itself was never
+    # protected anywhere in the chain -- `load_latest()` already turns its
+    # own read failure into `SessionRecord(unreadable=...)`, which
+    # `recover_session()` already turns into `must_halt`, but a failure
+    # acquiring the lock (or opening its transaction) happens *before*
+    # `recover_session()` is ever called, so it previously had no handler
+    # and would have propagated as an uncaught exception. Not a
+    # data-integrity gap the way an unreadable record is -- "we could not
+    # safely determine this cycle's risk state at all" gets the same
+    # fail-closed answer: synthesize the same halted `SessionRecovery`
+    # shape `risk.session._halt()` itself returns for its own internal
+    # failures, so the existing `recovery.must_halt` handling below runs
+    # unchanged rather than needing a second, parallel halt path.
+    try:
+        with risk_ledger_lock.held(snapshot.symbol) as connection:
+            recovery = recover_session(
+                session_store.load_latest(connection=connection),
+                live_equity=portfolio.account.equity,
+                live_open_positions=len(portfolio.open_positions),
+                market_day=trading_day(now),
+                max_daily_loss=config.risk.max_daily_loss,
+                max_drawdown=config.risk.max_drawdown,
+            )
+    except Exception as error:
+        _log.error("agent_decision_path.risk_ledger_lock_failed", error=str(error))
+        recovery = SessionRecovery(
+            ledger=EquityLedger(starting_equity=portfolio.account.equity),
+            trading_day=trading_day(now),
+            resumed=False,
+            reason_codes=(ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+            detail=f"risk-ledger lock/recover failed: {error}",
         )
     if recovery.must_halt:
         _trip(

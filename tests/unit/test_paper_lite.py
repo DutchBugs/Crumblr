@@ -263,6 +263,35 @@ class TestAG023RiskLedgerLockAcquired:
         assert len(lock.held_for) >= 2
 
 
+class RaisingRiskLedgerLock:
+    """AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`'s
+    own test): simulates the lock's own acquisition failing -- e.g. a
+    transient database outage. Before AG-024, this had no handling
+    anywhere in `_recover_risk_session()`/`_persist_risk_session()`'s own
+    call chain and would have propagated uncaught."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A lock/recover/persist failure must halt, never crash the process
+    or silently proceed on unknown risk-session state (ADR-021 section
+    8) -- mirrors `application/live_decision.py`'s own AG-024 test."""
+
+    def test_a_lock_failure_trips_the_kill_switch_instead_of_raising(self, tmp_path: Path) -> None:
+        orchestrator, _ = Fixture(
+            tmp_path / "paper.jsonl", directional=False, risk_ledger_lock=RaisingRiskLedgerLock()
+        ).build()
+        snapshot, spec = compatible_snapshot()
+
+        # Must not raise -- the whole point of AG-024.
+        process_clear(orchestrator, snapshot, spec)
+
+        assert orchestrator._kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in orchestrator._kill_switch.active_reasons
+
+
 class TestTypedPaperOnlyBoundary:
     def test_module_has_no_real_execution_adapter_import(self) -> None:
         source = inspect.getsource(paper_lite_module)

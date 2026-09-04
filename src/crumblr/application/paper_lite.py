@@ -67,6 +67,7 @@ from crumblr.domain.models import ApprovedOrder, ExecutionResult, InstrumentSpec
 from crumblr.domain.money import ZERO, ExactDecimal
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.simulated import ClosedTrade
+from crumblr.observability.logging import get_logger
 from crumblr.persistence.paper_lite import (
     PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
@@ -82,6 +83,8 @@ from crumblr.trading_agent.sessions import (
     is_market_open,
     trading_day,
 )
+
+_log = get_logger("paper_lite")
 
 PAPER_LITE_MODE: Literal["PAPER_LITE"] = "PAPER_LITE"
 PAPER_LITE_POLICY_VERSION = "owner-risk-policy-v1-paper-lite"
@@ -754,9 +757,28 @@ class PaperLiteOrchestrator:
         # remaining gap.
         account = self._broker.account()
         positions = self._broker.positions()
-        with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
-            record = self._session_store.load_latest(connection=connection)
         market_day = trading_day(snapshot.event_time_utc)
+        # AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`/
+        # `application/execution.py`/`agent_gateway/decision_path.py`'s own
+        # fix): lock acquisition itself was never protected -- a failure
+        # here previously had no handler anywhere in this call chain and
+        # would have propagated as an uncaught exception, unlike an
+        # ordinary store-read failure (`load_latest()` already turns that
+        # into `SessionRecord(unreadable=...)`, handled below via
+        # `record.is_known`/`recover_session()`).
+        try:
+            with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+                record = self._session_store.load_latest(connection=connection)
+        except Exception as error:
+            _log.error("paper_lite.risk_ledger_lock_failed", error=str(error))
+            self._risk_ledger = EquityLedger(starting_equity=account.equity)
+            self._risk_trading_day = market_day
+            self._trip_risk_session(
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                snapshot,
+                f"risk-ledger lock/recover failed: {error}",
+            )
+            return
 
         if record.is_known and record.state is None and positions:
             self._risk_ledger = EquityLedger(starting_equity=account.equity)
@@ -817,6 +839,12 @@ class PaperLiteOrchestrator:
         cycle instead. That is a real behavioral tradeoff for whoever owns
         this class's fill-timing design, not something to decide
         unilaterally while closing a locking gap.
+
+        **AG-024**: a failure acquiring the lock, or writing through it, is
+        now fail-closed too (mirrors `_recover_risk_session()`'s own fix
+        and Dev 1's identical fix in `application/live_decision.py`/
+        `application/execution.py`) -- previously neither had any handler
+        anywhere in this call chain.
         """
         if (
             self._risk_ledger is None
@@ -836,8 +864,25 @@ class PaperLiteOrchestrator:
             open_position_count=len(positions),
             recorded_at_utc=self._risk_recorded_at,
         )
-        with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
-            self._session_store.save(state, connection=connection)
+        # AG-024 (ADR-021 section 8): mirrors `_recover_risk_session()`'s
+        # own fix above -- a lock-acquisition failure here previously had
+        # no handler either, and `RiskSessionStore.save()` has no internal
+        # try/except of its own (unlike `load_latest()`), so this covers
+        # both the lock and the write in one mechanism.
+        try:
+            with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+                self._session_store.save(state, connection=connection)
+        except Exception as error:
+            _log.error("paper_lite.risk_ledger_lock_failed", error=str(error))
+            self._trip_risk_session_at(
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                occurred_at_utc=self._risk_recorded_at,
+                correlation_id=uuid5(
+                    NAMESPACE_URL,
+                    f"crumblr:paper-lite:persist-lock-failure:{self._risk_recorded_at.isoformat()}",
+                ),
+                detail=f"risk-ledger lock/persist failed: {error}",
+            )
 
     def _trip_risk_session(
         self,
@@ -845,13 +890,32 @@ class PaperLiteOrchestrator:
         snapshot: MarketSnapshot,
         detail: str | None,
     ) -> None:
+        self._trip_risk_session_at(
+            reason_codes,
+            occurred_at_utc=snapshot.received_time_utc,
+            correlation_id=snapshot.snapshot_id,
+            detail=detail,
+        )
+
+    def _trip_risk_session_at(
+        self,
+        reason_codes: tuple[ReasonCode, ...],
+        *,
+        occurred_at_utc: UtcDatetime,
+        correlation_id: UUID,
+        detail: str | None,
+    ) -> None:
+        """The timestamp/correlation-id-only core of `_trip_risk_session()`
+        above -- factored out so `_persist_risk_session()` (AG-024, no
+        `MarketSnapshot` on hand, only `self._risk_recorded_at`) can trip
+        through the same mechanism without inventing a second one."""
         if self._kill_switch.is_halted:
             return
         state_before = self._kill_switch.state
         self._kill_switch.trip(
             reason_codes=reason_codes,
             tripped_by="paper_lite_risk_session_recovery",
-            occurred_at_utc=snapshot.received_time_utc,
+            occurred_at_utc=occurred_at_utc,
             detail=detail,
         )
         self._recorder.record(
@@ -862,8 +926,8 @@ class PaperLiteOrchestrator:
                 tripped_by="paper_lite_risk_session_recovery",
                 detail=detail,
             ),
-            correlation_id=snapshot.snapshot_id,
-            occurred_at_utc=snapshot.received_time_utc,
+            correlation_id=correlation_id,
+            occurred_at_utc=occurred_at_utc,
             source="paper_lite",
         )
         self._recorder.flush()

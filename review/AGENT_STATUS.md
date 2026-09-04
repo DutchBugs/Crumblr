@@ -1815,6 +1815,68 @@ AG-024 opened (Open).
 
 ---
 
+## 0z. AG-024 mirrored: risk-ledger lock failures fail closed on this side too — done 2026-09-04
+
+Dev 1 decided AG-024's cross-cutting design question (raised in §0y) and
+shipped the fix on their side (`live_decision.py`/`execution.py`,
+`6d51281`, new ADR-021 §8), then handed the exact shape to mirror: wrap
+the entire `with risk_ledger_lock.held(...) as connection: ...` block
+(not the lock primitive — a primitive-level fix would also wrongly catch
+the caller's own post-yield failures) in a plain `try`/`except
+Exception`, log, trip the kill switch with the new
+`ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, then refuse/skip through
+whatever fail-closed mechanism that call site already has.
+
+**`agent_gateway/decision_path.py::evaluate_agent_trade_intent()`**: on
+failure, synthesizes the same halted `SessionRecovery` shape
+`risk.session._halt()` itself returns for its own internal failures
+(`EquityLedger(starting_equity=portfolio.account.equity)`,
+`reason_codes=(ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,)`) — the existing
+`if recovery.must_halt: _trip(...)` handling below runs completely
+unchanged, so this needed no second, parallel halt path. Kept the
+module's "always seal a capsule" contract intact (`AgentDecisionPathResult
+.capsule` is never optional, unlike `LiveDecisionOutcome`'s own
+`capsule=None` skip state) rather than inventing a new result shape.
+
+**`application/paper_lite.py`'s two AG-023 methods**: `_recover_risk_session()`
+mirrors the same synthesize-and-fall-through-to-`_trip_risk_session()`
+pattern. `_persist_risk_session()` has no `MarketSnapshot` on hand (only
+`self._risk_recorded_at`), so `_trip_risk_session()` was factored into a
+new `_trip_risk_session_at(reason_codes, *, occurred_at_utc,
+correlation_id, detail)` — the original method becomes a one-line
+wrapper over it — so both call sites trip through one mechanism instead
+of `_persist_risk_session()` needing its own copy.
+
+**Self-review caught a real gap before this shipped**: the first pass
+left `paper_lite.py` without the `_log.error(...)` call ADR-021 §8
+explicitly prescribes for every site. Reasoned (wrongly) that since
+`paper_lite.py` has no logger anywhere else, adding one just for this
+would be inconsistent with "local convention" — checked the actual ADR
+text before accepting that reasoning, and it explicitly says "wrap ...
+in a plain try/except Exception, log, trip the kill switch" as the
+shape for all four sites including this one, not a suggestion. Fixed:
+`_log = get_logger("paper_lite")` (new for this module), both except
+blocks now log `"paper_lite.risk_ledger_lock_failed"` before tripping,
+matching `live_decision.py`'s own naming exactly.
+
+New tests: `tests/unit/test_agent_decision_path.py
+::TestAG024RiskLedgerLockFailureFailsClosed` (2 — a lock failure trips
+the switch and still seals a `BLOCK`/`SYSTEM_HALTED` capsule rather than
+raising; NO_TRADE never reaches the lock at all, mirroring
+`TestAG012`'s own no-trade case), `tests/unit/test_paper_lite.py
+::TestAG024RiskLedgerLockFailureFailsClosed` (1 — a lock failure trips
+the switch instead of raising).
+
+Evidence: full non-integration suite **1224 passed**, 1 pre-existing
+skip, 0 failed. ruff/ruff format/mypy clean. Full integration suite,
+against real PostgreSQL (`crumblr_test_dev2`): **256 passed, 2 skipped**
+(pre-existing `test_halt_survives_restart.py` Windows-permission-bits
+skips, unrelated), 0 failed, in 478s.
+
+`review/AGENT_FEEDBACK.md`: AG-024 moved to Closed with full resolution.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
