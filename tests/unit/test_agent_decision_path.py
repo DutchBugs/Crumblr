@@ -18,10 +18,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from crumblr.agent_gateway.contracts import (
+    AgentIdentity,
+    AgentRole,
+    AgentStatus,
+    ChampionShadowStatus,
     ExternalSupervisorReviewRecord,
     ExternalSupervisorVerdict,
     SupervisorReview,
     TradeProposal,
+    TradingAssignment,
 )
 from crumblr.agent_gateway.decision_path import (
     AgentDecisionPathResult,
@@ -29,13 +34,23 @@ from crumblr.agent_gateway.decision_path import (
     evaluate_agent_trade_intent,
 )
 from crumblr.agent_gateway.evidence import build_agent_context_evidence
+from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.agent_gateway.reference_supervisor import (
     LOW_CONFIDENCE,
     ReferenceSupervisor,
     ReferenceSupervisorConfig,
 )
+from crumblr.agent_gateway.stores import (
+    InMemoryAgentCredentialStore,
+    InMemoryAgentDecisionOutcomeStore,
+    InMemoryAgentIdentityStore,
+    InMemoryDecisionContextBundleStore,
+    InMemoryFeatureEvidenceStore,
+    InMemoryTradingAssignmentStore,
+)
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
+    DataQuality,
     EntryType,
     Environment,
     IncidentStatus,
@@ -43,6 +58,7 @@ from crumblr.domain.enums import (
     ReconciliationStatus,
     Regime,
     RiskVerdict,
+    SessionState,
     Side,
     SupervisorVerdict,
 )
@@ -52,6 +68,7 @@ from crumblr.domain.models import (
     InstrumentSpec,
     MarketSnapshot,
     PositionState,
+    TradeIntent,
 )
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import (
@@ -726,6 +743,162 @@ class TestStrategyNeutrality:
         assert result.risk_decision.verdict is RiskVerdict.PASS
         assert result.supervisor_decision is not None
         assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+
+class TestStrategyNeutralityThroughTheRealGateway:
+    """F-066 item 8, taken all the way through `AgentGateway` itself --
+    `TestStrategyNeutrality` above proves this module's own arguments are
+    not special-cased, but a `TradeIntent` built by hand does not prove
+    the *boundary* is strategy-neutral, only this one function. Two
+    independently-registered agents -- different identity, assignment,
+    `StrategyArtifact` hash, and a completely unrelated reason-code
+    vocabulary each -- are onboarded and submit a proposal through the
+    real, unmodified `AgentGateway.submit_trade_proposal`, and the
+    resulting real `TradeIntent`s (not hand-built ones) reach an
+    identical `RiskVerdict.PASS`/`SupervisorVerdict.APPROVE` through this
+    module. Zero code in either `AgentGateway` or `decision_path.py`
+    branches on which agent produced the intent -- the regression proof
+    `feedback.1.28.md` section 10 item 8 calls "a platform was built, not
+    another single-strategy integration.\""""
+
+    def _onboard_and_submit(
+        self,
+        gateway: AgentGateway,
+        snapshot: MarketSnapshot,
+        spec: InstrumentSpec,
+        *,
+        agent_suffix: str,
+        reason_codes: tuple[str, ...],
+        strategy_artifact_hash: str,
+    ) -> TradeIntent:
+        agent_id = uuid4()
+        assignment_id = uuid4()
+        credential_secret = f"secret-{agent_suffix}"
+        gateway.register_identity(
+            AgentIdentity(
+                agent_id=agent_id,
+                role=AgentRole.TRADER,
+                runtime_version=f"{agent_suffix}-v1",
+                service_identity=f"spiffe://crumblr/agents/{agent_suffix}",
+                status=AgentStatus.ACTIVE,
+                registered_at_utc=FIXED_NOW,
+            ),
+            credential_secret=credential_secret,
+        )
+        gateway.issue_assignment(
+            TradingAssignment(
+                assignment_id=assignment_id,
+                assignment_version="assignment-v1",
+                allowed_agent_id=agent_id,
+                canonical_symbol="EUR/USD",
+                timeframe="M5",
+                strategy_artifact_id=uuid4(),
+                strategy_artifact_hash=strategy_artifact_hash,
+                valid_from_utc=FIXED_NOW - timedelta(days=1),
+                valid_until_utc=FIXED_NOW + timedelta(days=30),
+                max_proposals_per_hour=10,
+                allowed_risk_fraction_min=Decimal("0.001"),
+                allowed_risk_fraction_max=Decimal("0.01"),
+                required_evidence_fields=(),
+                supervisor_policy_version="supervisor-policy-v1",
+                environment=Environment.PAPER,
+                champion_shadow_status=ChampionShadowStatus.SHADOW,
+            )
+        )
+        bundle = gateway.publish_context(
+            assignment_id=assignment_id,
+            symbol="EUR/USD",
+            market_snapshot_id=snapshot.snapshot_id,
+            instrument_spec_version=spec.spec_version,
+            portfolio_summary_hash=f"portfolio-{agent_suffix}",
+            session_state=SessionState.OPEN,
+            data_quality=DataQuality.GOOD,
+            now=FIXED_NOW,
+        )
+        proposal = TradeProposal(
+            proposal_id=uuid4(),
+            agent_id=agent_id,
+            assignment_id=assignment_id,
+            context_hash=bundle.content_hash,
+            strategy_artifact_hash=strategy_artifact_hash,
+            side=Side.BUY,
+            entry_type=EntryType.MARKET,
+            reference_price=Decimal("1.08500"),
+            stop_loss_price=Decimal("1.08000"),
+            take_profit_price=Decimal("1.09000"),
+            confidence=0.8,
+            requested_risk_fraction=Decimal("0.005"),
+            reason_codes=reason_codes,
+            evidence_refs=(),
+            submitted_at_utc=FIXED_NOW,
+            expires_at_utc=FIXED_NOW + timedelta(minutes=5),
+        )
+        result = gateway.submit_trade_proposal(
+            agent_id=agent_id,
+            credential_secret=credential_secret,
+            proposal=proposal,
+            now=FIXED_NOW,
+        )
+        assert result.accepted, f"{agent_suffix} proposal rejected: {result.reason}"
+        assert result.trade_intent is not None
+        return result.trade_intent
+
+    def test_two_unrelated_agents_reach_identical_approval_through_the_real_gateway(
+        self,
+    ) -> None:
+        gateway = AgentGateway(
+            identities=InMemoryAgentIdentityStore(),
+            credentials=InMemoryAgentCredentialStore(),
+            assignments=InMemoryTradingAssignmentStore(),
+            contexts=InMemoryDecisionContextBundleStore(),
+            outcomes=InMemoryAgentDecisionOutcomeStore(),
+            feature_evidence=InMemoryFeatureEvidenceStore(),
+        )
+        spec = make_instrument_spec()
+        snapshot = make_snapshot(symbol_spec_version=spec.spec_version)
+
+        alpha_intent = self._onboard_and_submit(
+            gateway,
+            snapshot,
+            spec,
+            agent_suffix="alpha-momentum",
+            reason_codes=("ALPHA_MOMENTUM_BREAK", "ALPHA_VOLUME_CONFIRM"),
+            strategy_artifact_hash="alpha-artifact-v1",
+        )
+        beta_intent = self._onboard_and_submit(
+            gateway,
+            snapshot,
+            spec,
+            agent_suffix="beta-meanrevert",
+            reason_codes=("BETA_MEAN_REVERT_SETUP", "BETA_RSI_DIVERGENCE"),
+            strategy_artifact_hash="beta-artifact-v9",
+        )
+
+        # The Gateway itself already produced genuinely different intents --
+        # not a test artifact, proof the two agents were never merged into
+        # one identity/assignment/artifact along the way.
+        assert alpha_intent.strategy_version != beta_intent.strategy_version
+        assert alpha_intent.reason_codes != beta_intent.reason_codes
+
+        alpha_result, _ = Fixture(spec=spec, snapshot=snapshot).evaluate(
+            alpha_intent, strategy_version=alpha_intent.strategy_version
+        )
+        beta_result, _ = Fixture(spec=spec, snapshot=snapshot).evaluate(
+            beta_intent, strategy_version=beta_intent.strategy_version
+        )
+
+        for label, result, intent in (
+            ("alpha", alpha_result, alpha_intent),
+            ("beta", beta_result, beta_intent),
+        ):
+            assert result.risk_decision is not None, label
+            assert result.risk_decision.verdict is RiskVerdict.PASS, label
+            assert result.supervisor_decision is not None, label
+            assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE, label
+            # The sealed capsule carries each agent's own real identity
+            # through unmodified -- not collapsed onto a shared/default one.
+            assert result.capsule.trade_intent is intent, label
+            assert result.capsule.strategy_version == intent.strategy_version, label
 
 
 class CountingSupervisor:
