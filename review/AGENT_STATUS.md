@@ -1805,7 +1805,10 @@ Evidence: `tests/unit/test_paper_lite.py::TestAG023RiskLedgerLockAcquired`
 (new — one full cycle acquires the lock at least twice, for exactly the
 assignment's canonical symbol). Full `test_paper_lite.py`: 21/21. Full
 non-integration suite: 1219 passed, 1 pre-existing skip, 0 failed.
-ruff/ruff format/mypy clean.
+ruff/ruff format/mypy clean. Full integration suite, against real
+PostgreSQL (`crumblr_test_dev2`): **255 passed, 2 skipped** (pre-existing
+`test_halt_survives_restart.py` Windows-permission-bits skips,
+unrelated), 0 failed, in 414s. Committed `dda707c`, pushed.
 
 `review/AGENT_FEEDBACK.md`: AG-023 moved to Closed with full resolution;
 AG-024 opened (Open).
