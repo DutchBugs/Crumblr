@@ -14,10 +14,10 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `6d51281` |
+| **`main` HEAD** | `c7ba505` — **`agent/contracts` merged via PR #3, 2026-09-04** (owner-merged; superseded the standing "not yet merged" note that appeared throughout this header and §13 up to this point) |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, all 6 slices now shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload) · **B5, done 2026-09-04** (`ADR-020`, real per-ticket close: `DemoOrderSendMt5Gateway.close_position()`/`.close_all_positions()`, `ExecutionOrchestrator._attempt_and_resolve_flatten()`, `FlattenCloseSink` Protocol, new `ReasonCode.FLATTEN_CLOSE_FAILED` tolerated by the flatten gate so retry survives its own halt; `_commit_flatten` deliberately unchanged — the real close only ever runs one pass later, via the same recovery branch ADR-009 already built — every existing flatten integration test passes unchanged as a result). All six deliberately **not wired into `ExecutionOrchestrator`'s entry path** (B5's close is real but its own adapter is unconstructed everywhere) — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet for entries; a flatten close needed no such authority, so B5 built and left it genuinely ready rather than also unwired-by-necessity. Full suite 1431 passed/3 skips/0 failed, 330.20s, real PostgreSQL against the isolated `crumblr_test_dev1` database (§13 seventy-ninth entry has the full breakdown). B6 (removing the flat-book reconciliation assumption) stays explicitly deferred by the work order until continuous-DEMO promotion — not part of the first canary. **Phase B is complete.** **Phase C (AG-012, single Risk authority) — Dev-1 side done same day, 2026-09-04** (`ADR-021`, cross-session-coordinated with Dev 2 before implementation, two rounds — a required-vs-lock-owns-the-transaction design correction found and fixed *before* code, both rounds acked): `risk/session.py::RiskLedgerLock` (new Protocol) + `InMemoryRiskLedgerLock`; `persistence/risk_session.py::PostgresRiskLedgerLock` (real `pg_advisory_xact_lock`, reuses `lock_assignment()`'s exact primitive, symbol-keyed); `RiskSessionStore.load_latest()`/`.save()` gain an optional `connection` param (source-compatible). `LiveDecisionOrchestrator.decide_once()` redesigned — no longer caches the ledger across calls, recovers/updates/persists fresh every cycle under the lock; closed a second, separately-found staleness gap in the same change (persistence previously only ran on a risk-`PASS` cycle, so a run of `NO_TRADE` decisions never updated the durable checkpoint). `ExecutionOrchestrator`'s FINAL Risk read joins the same lock for completeness (was already race-free, lock-for-read-consistency only). Both orchestrators' constructors gain a new *required* `risk_ledger_lock` param — every real construction site updated (`bootstrap.py::DurableRuntime`, both scripts, all test builders), plus one Dev-2-owned test file's one-line Protocol-conformance ripple found and fixed (`test_agent_decision_path.py::ExplodingSessionStore`, flagged in `review/INTEGRATION_NOTICES.md`). New tests: 2 unit (`TestADR021RiskLedgerPersistsEveryCycle`) + 2 integration against real PostgreSQL proving genuine mutual exclusion under real concurrent threads (`test_risk_ledger_lock.py`). Full suite green (exact count in §13 eightieth entry). **AG-012 closed on both sides, 2026-09-04**: Dev 2's `decision_path.py` side landed same day (4 new tests, `TestAG012RiskLedgerLockAcquired`; full suite 1217 passed unit + 255 passed integration against real PostgreSQL, 0 failed on their side), pushed to `origin/agent/contracts` (`6ac8cf2`) — **not yet merged to `main`**, that remains an owner/Dev-2 merge-timing decision per the existing standing note (see the Phase-0 entry above). One follow-on item opened while wiring this: **AG-023** — `application/paper_lite.py`'s own `risk_session_states` recover/persist pair (Dev-3-owned) was unlocked; **closed 2026-09-04** by Dev 2 (owner-authorized to cross the file-ownership line, no Dev-3 session available) — both methods now acquire `risk_ledger_lock`, deadlock-safety verified, one tradeoff left explicitly named (separately-locked methods, not one atomic section — ADR-021 §7). Dev 2's self-review while closing AG-023 surfaced **AG-024** — lock/recovery/persist failure had no exception handling anywhere and would have crashed the process on a transient database blip, deferred to Dev 1 as a design call — **fixed same day**: new `ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, the whole `with risk_ledger_lock.held(...)` block wrapped in try/except at both `live_decision.py::decide_once()` and `execution.py::ExecutionOrchestrator._process()`, converting a lock/store failure into the same fail-closed HALT/skip pattern every other `..._STATE_UNKNOWN` reason already uses (ADR-021 §8; 3 new tests; full suite 1438 passed/3 skips/0 failed). **Phase C is Dev-1-complete and both AG-012 and AG-023/AG-024 resolved on the Dev-1-actionable side**; only remaining gate before the real submission chain (entries) can be wired together at all is agent/contracts reaching `main` and any real order_send wiring, which stays owner-gated regardless (`feedback.2.0`). NEXT: message Dev 2 so `decision_path.py`/`paper_lite.py` mirror AG-024's fix with the same `ReasonCode`; otherwise idle pending owner/Dev-2 merge decision or a new work order. BLOCKED: none currently |
-| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, D2.2 wired to Dev 1's `assess_open_risk`. **AG-012 (Phase C) closed on the Dev-2 side, 2026-09-04** — `evaluate_agent_trade_intent()` acquires `RiskLedgerLock` around its existing `load_latest()` read (ADR-021 §4's exact scope), 4 new tests, full suite 1217 unit + 255 integration against real PostgreSQL. Independently found and flagged **AG-023** (`application/paper_lite.py`'s own unlocked `risk_session_states` access, Dev-3-owned, not fixed by either track) while checking every real caller before wiring this. **F-066 (Core must be strategy-neutral, review 1.28) down to conditions 2 and 7 only, both fork-dependent — condition 8 (a second, fully independent toy agent with its own identity/assignment/artifact/vocabulary reaching identical PASS/APPROVE through the real, unmodified `AgentGateway` boundary) closed 2026-09-04**, `AGENT_FEEDBACK.md`'s own F-066 row corrected in place (was stale — claimed `AgentMarketContextV1`/opaque reason-code handling still open after both had shipped weeks earlier). All pushed to `origin/agent/contracts` (`35e02f2`), **not yet merged to `main`** — same standing owner/Dev-2 merge-timing decision as before. NEXT: F-066 conditions 2/7 need the external Agent Developer's own fork/runtime work, which Dev 2 cannot substitute for — otherwise idle pending a new work order or the `agent/contracts` merge decision. BLOCKED: none currently on anything Dev-2-actionable |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, all 6 slices now shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload) · **B5, done 2026-09-04** (`ADR-020`, real per-ticket close: `DemoOrderSendMt5Gateway.close_position()`/`.close_all_positions()`, `ExecutionOrchestrator._attempt_and_resolve_flatten()`, `FlattenCloseSink` Protocol, new `ReasonCode.FLATTEN_CLOSE_FAILED` tolerated by the flatten gate so retry survives its own halt; `_commit_flatten` deliberately unchanged — the real close only ever runs one pass later, via the same recovery branch ADR-009 already built — every existing flatten integration test passes unchanged as a result). All six deliberately **not wired into `ExecutionOrchestrator`'s entry path** (B5's close is real but its own adapter is unconstructed everywhere) — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet for entries; a flatten close needed no such authority, so B5 built and left it genuinely ready rather than also unwired-by-necessity. Full suite 1431 passed/3 skips/0 failed, 330.20s, real PostgreSQL against the isolated `crumblr_test_dev1` database (§13 seventy-ninth entry has the full breakdown). B6 (removing the flat-book reconciliation assumption) stays explicitly deferred by the work order until continuous-DEMO promotion — not part of the first canary. **Phase B is complete.** **Phase C (AG-012, single Risk authority) — Dev-1 side done same day, 2026-09-04** (`ADR-021`, cross-session-coordinated with Dev 2 before implementation, two rounds — a required-vs-lock-owns-the-transaction design correction found and fixed *before* code, both rounds acked): `risk/session.py::RiskLedgerLock` (new Protocol) + `InMemoryRiskLedgerLock`; `persistence/risk_session.py::PostgresRiskLedgerLock` (real `pg_advisory_xact_lock`, reuses `lock_assignment()`'s exact primitive, symbol-keyed); `RiskSessionStore.load_latest()`/`.save()` gain an optional `connection` param (source-compatible). `LiveDecisionOrchestrator.decide_once()` redesigned — no longer caches the ledger across calls, recovers/updates/persists fresh every cycle under the lock; closed a second, separately-found staleness gap in the same change (persistence previously only ran on a risk-`PASS` cycle, so a run of `NO_TRADE` decisions never updated the durable checkpoint). `ExecutionOrchestrator`'s FINAL Risk read joins the same lock for completeness (was already race-free, lock-for-read-consistency only). Both orchestrators' constructors gain a new *required* `risk_ledger_lock` param — every real construction site updated (`bootstrap.py::DurableRuntime`, both scripts, all test builders), plus one Dev-2-owned test file's one-line Protocol-conformance ripple found and fixed (`test_agent_decision_path.py::ExplodingSessionStore`, flagged in `review/INTEGRATION_NOTICES.md`). New tests: 2 unit (`TestADR021RiskLedgerPersistsEveryCycle`) + 2 integration against real PostgreSQL proving genuine mutual exclusion under real concurrent threads (`test_risk_ledger_lock.py`). Full suite green (exact count in §13 eightieth entry). **AG-012 closed on both sides, 2026-09-04**: Dev 2's `decision_path.py` side landed same day (4 new tests, `TestAG012RiskLedgerLockAcquired`; full suite 1217 passed unit + 255 passed integration against real PostgreSQL, 0 failed on their side), pushed to `origin/agent/contracts` (`6ac8cf2`) — merged to `main` same day via PR #3 (`c7ba505`, see below). One follow-on item opened while wiring this: **AG-023** — `application/paper_lite.py`'s own `risk_session_states` recover/persist pair (Dev-3-owned) was unlocked; **closed 2026-09-04** by Dev 2 (owner-authorized to cross the file-ownership line, no Dev-3 session available) — both methods now acquire `risk_ledger_lock`, deadlock-safety verified, one tradeoff left explicitly named (separately-locked methods, not one atomic section — ADR-021 §7). Dev 2's self-review while closing AG-023 surfaced **AG-024** — lock/recovery/persist failure had no exception handling anywhere and would have crashed the process on a transient database blip, deferred to Dev 1 as a design call — **fixed same day**: new `ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, the whole `with risk_ledger_lock.held(...)` block wrapped in try/except at both `live_decision.py::decide_once()` and `execution.py::ExecutionOrchestrator._process()`, converting a lock/store failure into the same fail-closed HALT/skip pattern every other `..._STATE_UNKNOWN` reason already uses (ADR-021 §8; 3 new tests; full suite 1438 passed/3 skips/0 failed). **Phase C is Dev-1-complete and AG-012/AG-023/AG-024 are now resolved on both tracks** — Dev 2 mirrored AG-024 same day (`agent/contracts` `c35f4d5`, 3 new tests, full suite 1224 unit + 256 integration, 0 failed). **`agent/contracts` merged to `main` via PR #3, 2026-09-04** (owner-merged, `c7ba505`) — Core, the external-agent Gateway, and PAPER_LITE are now all on one branch for the first time. Re-ran the full quality gate and suite against this session's own worktree post-merge: ruff/format/mypy clean (197 source files), **1480 passed, 3 skips, 0 failed**, single Alembic head confirmed. No fresh *hosted* CI run confirmed for this exact merge commit (no `gh` auth in this environment — the local re-run above is this session's own substitute evidence, not a replacement for a real hosted run). Only remaining gate before the real submission chain (entries) can be wired together at all is real `order_send` wiring, which stays owner-gated regardless (`feedback.2.0`). NEXT: nothing queued — idle pending a hosted CI confirmation of the merge, or a new work order. BLOCKED: none currently |
+| **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, D2.2 wired to Dev 1's `assess_open_risk`. **AG-012 (Phase C) closed on the Dev-2 side, 2026-09-04** — `evaluate_agent_trade_intent()` acquires `RiskLedgerLock` around its existing `load_latest()` read (ADR-021 §4's exact scope), 4 new tests, full suite 1217 unit + 255 integration against real PostgreSQL. Independently found and flagged **AG-023** (`application/paper_lite.py`'s own unlocked `risk_session_states` access, Dev-3-owned, not fixed by either track) while checking every real caller before wiring this — **AG-023 closed 2026-09-04**, owner-authorized to cross the file-ownership line (no Dev-3 session available): both `paper_lite.py` recover/persist methods now acquire `risk_ledger_lock`, deadlock-safety verified, one tradeoff left explicitly named (ADR-021 §7). Own self-review while closing AG-023 surfaced **AG-024** (lock/recovery/persist failure had no exception handling anywhere, would crash the process on a transient DB blip), deferred the design to Dev 1 — **AG-024 mirrored on the Dev-2 side same day**: `decision_path.py` synthesizes the same halted `SessionRecovery` shape `risk.session._halt()` already returns, so `recovery.must_halt` handling runs unchanged; `paper_lite.py` factored `_trip_risk_session_at(...)` so both recover/persist trip through one mechanism, and added a logger (`paper_lite.py` had none before — caught in Dev 2's own self-review against ADR-021 §8's explicit logging requirement before it shipped, not assumed optional). 3 new tests, full suite 1224 unit + 256 integration against real PostgreSQL, 0 failed, ruff/mypy clean. Pushed to `origin/agent/contracts` (`c35f4d5`). **F-066 (Core must be strategy-neutral, review 1.28) down to conditions 2 and 7 only, both fork-dependent — condition 8 (a second, fully independent toy agent with its own identity/assignment/artifact/vocabulary reaching identical PASS/APPROVE through the real, unmodified `AgentGateway` boundary) closed 2026-09-04**, `AGENT_FEEDBACK.md`'s own F-066 row corrected in place (was stale — claimed `AgentMarketContextV1`/opaque reason-code handling still open after both had shipped weeks earlier). **`agent/contracts` merged to `main` via PR #3, 2026-09-04** (owner-merged, `c7ba505`) — everything on this row is now on `main`, not a separate branch. **AG-012/AG-023/AG-024 lock work is now closed across both tracks.** NEXT: F-066 conditions 2/7 need the external Agent Developer's own fork/runtime work, which Dev 2 cannot substitute for — otherwise idle pending a new work order. BLOCKED: none currently on anything Dev-2-actionable |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
 | **Owner blockers** | Confirm next hosted CI run is fully green (F-068 fix pending confirmation); decide when to enable terminal AlgoTrading. All risk/session-policy numbers now supplied and shipped (O-008, O-009) |
@@ -10920,6 +10920,124 @@ shape (`review/INTEGRATION_NOTICES.md`'s new entry already states this
 as the action required). Nothing else queued after that — idle pending
 Dev 2's own AG-024 mirror, the `agent/contracts` merge decision, or a
 new work order.
+
+---
+
+## Update 2026-09-04 (eighty-sixth entry) — AG-024 mirrored on the Dev-2 side; AG-012/AG-023/AG-024 lock work closed across both tracks
+
+Recorded on Dev 2's behalf per the standing convention — not this
+session's own engineering.
+
+Dev 2 mirrored the eighty-fifth entry's AG-024 shape same day, both
+call sites:
+
+- `agent_gateway/decision_path.py` synthesizes the same halted
+  `SessionRecovery` shape `risk.session._halt()` already returns
+  internally on lock/recover failure, so the existing
+  `recovery.must_halt` handling runs unchanged — no second halt path
+  introduced. Kept the module's existing "always seal a capsule"
+  contract intact rather than inventing a `capsule=None` skip state the
+  way `LiveDecisionOutcome` has.
+- `application/paper_lite.py::_recover_risk_session()` mirrors the same
+  pattern; `_persist_risk_session()` has no `MarketSnapshot` on hand, so
+  Dev 2 factored the existing `_trip_risk_session()` into a
+  `_trip_risk_session_at(reason_codes, *, occurred_at_utc,
+  correlation_id, detail)`, with the original becoming a one-line
+  wrapper — both trip through one mechanism instead of two.
+
+Dev 2's own self-review caught a real gap before shipping: a first pass
+skipped the `_log.error(...)` call since `paper_lite.py` had no logger
+anywhere else, almost rationalized as "matching local convention" —
+checked ADR-021 §8's text directly first, which explicitly prescribes
+logging as part of the shape at all four sites, not a style suggestion.
+Fixed: added `get_logger("paper_lite")` and both log calls before
+committing.
+
+3 new tests on their side. Full non-integration suite 1224 passed, full
+integration suite against real PostgreSQL 256 passed, 0 failed either
+way, ruff/mypy clean. Pushed to `origin/agent/contracts` (`c35f4d5`) —
+**not yet merged to `main`**, same standing owner/Dev-2 merge-timing
+decision as the rest of that branch. AG-024 moved to Closed in Dev 2's
+own `AGENT_FEEDBACK.md` tracker too.
+
+**This closes the AG-012/AG-023/AG-024 risk-ledger-lock work entirely
+across both tracks.** Compact header's Dev-1 and Dev-2 rows both
+rewritten to reflect this (Dev-1's own pending "message Dev 2" NEXT item
+from the eighty-fifth entry is now satisfied).
+
+Decision: documentation-only on this side — recording Dev 2's own
+already-tested, already-pushed work, not re-verifying it independently
+the way a shared-contract change would require (their file, their
+tests, their existing halt mechanisms).
+
+Next: nothing queued for Dev 1 — idle pending the `agent/contracts`
+merge decision or a new work order.
+
+---
+
+## Update 2026-09-04 (eighty-seventh entry) — `agent/contracts` merged to `main` via PR #3: all three tracks converge
+
+Observed, not performed by this session — the owner merged PR #3
+(`agent/contracts` → `main`, merge commit `c7ba505`, merge parents
+`0e5ab85`/`c35f4d5`) directly on GitHub while this session was mid-way
+through recording the eighty-sixth entry. Discovered via a routine
+`git fetch origin main` before pushing a documentation-only change —
+not announced to this session beforehand.
+
+**What this means:** for the first time, Core (Dev 1's track),
+the external-agent Gateway (Dev 2's `agent/contracts` track), and
+PAPER_LITE (merged 2026-09-03, `f645e75`) are all on one branch. Every
+item this document's compact header had been narrating as "pushed to
+`origin/agent/contracts`, not yet merged to `main`" — D2.2, F-066
+(conditions 8/9 closed on the Crumblr side), AG-012/AG-023/AG-024, the
+neutral second-agent onboarding proof, the reference Supervisor — is now
+real on `main`, not a parallel branch a reader needs to separately
+check.
+
+**Verification performed by this session before treating the merge as
+trustworthy** (this session's own file-ownership boundaries did not
+change — Dev 2's merged files were not audited line-by-line, but the
+integrated whole was verified to actually work together):
+- `git diff --stat` confirmed no conflict with any Dev-1-owned file —
+  the merge touched only `agent_gateway/**`, `application/paper_lite.py`,
+  `scripts/paper_lite.py`, and their tests/review docs; `status.md`
+  itself was untouched by the merge (this session's own uncommitted
+  eighty-sixth-entry edit fast-forwarded cleanly, no manual conflict
+  resolution needed).
+- Fast-forwarded this worktree's local branch to `origin/main`
+  (`git merge --ff-only`, no rebase, no forced anything).
+- Re-ran the full quality gate fresh against the merged state:
+  `ruff check .` clean, `ruff format --check .` clean (214 files),
+  `uv run mypy` clean (197 source files, up from 193 pre-merge — the
+  new `neutral_agent_client.py`/`reference_supervisor.py` modules).
+  `uv run alembic heads` — single head (`e91f4a7c2b53`), no migration
+  drift from the merge.
+- Full suite, isolated single run, real PostgreSQL against
+  `crumblr_test_dev1`: **1480 passed, 3 skipped, 0 failed, 439.90s** —
+  up from 1438 pre-merge (the new Gateway/PAPER_LITE tests merged in).
+
+**What was not done, and should not be assumed done:** no hosted CI run
+has been independently confirmed for commit `c7ba505` itself — this
+environment still has no `gh` auth (`gh auth status` confirms "not
+logged into any GitHub hosts"), so the "Last hosted CI result" row
+above remains the stale, owner-reported 2026-09-03 run #106 result
+against an earlier commit, not this merge. This session's own local
+re-run is real evidence the merged tree is internally consistent, but it
+is evidence from one worktree, not a substitute for the hosted pipeline
+the compact header's own "Owner blockers" row already asks the owner to
+confirm.
+
+Decision: no code changed by this session in this entry — the merge was
+the owner's action, this entry exists so `status.md` stops contradicting
+reality (§1 of the working agreement: the compact header wins over any
+stale prose, and "not yet merged to `main`" had become false the moment
+this session fetched and did not know it yet).
+
+Next: unchanged — nothing queued for Dev 1. Worth flagging to the owner
+in the next available channel: PR #3 merged without a hosted CI run this
+session could see confirmed green first: consider requesting that
+confirmation before treating `main` as unconditionally trustworthy for
+anything beyond what this session's own local re-run already checked.
 
 ---
 
