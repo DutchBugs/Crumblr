@@ -10666,6 +10666,42 @@ Next:
 
 ---
 
+## Update 2026-09-04 (eighty-first entry) — ADR-021 amendment: a fourth, currently-unlocked party found
+
+Dev 2, while wiring `decision_path.py`'s own side of ADR-021, checked
+every real caller of `risk_session_states` (not only their own file) and
+found `application/paper_lite.py::PaperLiteOrchestrator`
+(`_recover_risk_session()`/`_persist_risk_session()`, Dev-3-owned,
+`scripts/paper_lite.py` uses a real `PostgresRiskSessionStore`) reads and
+writes the same table with no lock and no caching guard — a genuine
+read-then-later-write race independent of the original AG-012 mechanism.
+Verified directly (not accepted on report alone): confirmed by reading
+`application/paper_lite.py` lines 736-795 and `scripts/paper_lite.py`
+myself.
+
+**Not fixed** — deliberately, same reasoning Dev 2 gave: `paper_lite.py`'s
+recover/persist design is Dev-3-owned, and whether/how it should acquire
+`RiskLedgerLock` is an architectural call for that file's owner, not a
+unilateral patch from either active track. `review/adr
+/ADR-021-single-risk-authority-lock.md` §1 amended in place (a fourth
+table row plus a full explanation) and §7 gets a matching consequence
+line, rather than letting the ADR's own stated guarantee stand
+overstated. Tracked as a Dev-2-filed `AG-###` finding in
+`review/AGENT_FEEDBACK.md`; not escalated to a project-wide `F-###` —
+`paper_lite.py` never reaches `order_send` either (`SimulatedBroker`
+only), so this is a Phase-C-completeness gap, not a live safety one, the
+same distinction the original AG-012 race was given.
+
+Decision: documentation-only change, no code touched — pushed directly
+without a separate approval round (matches this session's existing
+practice for pure `review/`/`status.md` updates).
+
+Next: whoever picks up PAPER_LITE's own risk-session handling should
+read ADR-021 §1's amendment before assuming its guarantee is complete —
+a third caller was already missed once when this ADR was first drafted.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
