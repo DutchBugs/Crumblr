@@ -1,126 +1,174 @@
 # Handover
 
-Everything a developer needs to pick this up cold.
+Everything a developer (or reviewing agent) needs to pick this up cold.
 
-**Written 2026-08-18. Rewritten 2026-08-24** when a Windows host became
-available and the repository got a remote. **Rewritten 2026-08-26** after
-MT5 first contact, M1/M2 passing, and the platform being wired end to end
-from real market data through to a (deliberately unreachable) order.
-**Updated three times more the same day**: once after reconciliation,
-decision-window durability and feature-value persistence were completed
-(F-053/F-054/D-031); again after a second review the same day found — and
-this session fixed — two real correctness gaps in that work (F-054's
-recovery treated a corrupted record the same as an absent one; F-053's
-instrument-spec comparison trusted whichever spec was observed first
-instead of an approved baseline); and again after **F-051 finally started**
-— it turns out the machine this session has been running on all along
-*is* a Windows/MT5 host (AMD64, `Pepperstone MetaTrader 5` installed and
-running), something every earlier version of this document got wrong by
-describing the development host as macOS-only. Discovery through
-reconciliation `MATCHED` is now proven for real (§0 below); a real Trader
-decision is the one piece still pending, on real M5 bar accumulation, not
-on host access.
+**Written 2026-08-18. Rewritten 2026-08-24, 2026-08-26** (see git history
+for those versions' own detail — first MT5 contact, M1/M2 passing, F-047
+through F-055 and F-051's own progress). **Rewritten again 2026-09-04**,
+after Phase 4 formally passed, all of Phase B shipped, and Phase C
+(AG-012, a real cross-process risk-authority lock) closed on both the
+Core and the external-agent track. This version reflects where the
+project actually stands today, not a point-in-time snapshot from a
+specific incident the way earlier versions did — read `status.md`'s own
+compact "Current state" header if you suspect this document has drifted
+since; it is the one place that always wins on disagreement.
 
-**Start at §0.** It is the exact point of handover. §4 tells you what is
-already proven against the real broker and what the very next session
-should do. Then `CLAUDE.md` §1 for the mandatory session-start protocol.
+**Start at §0.** Then `CLAUDE.md` §1 for the mandatory session-start
+protocol — it is not optional, and skipping it is how work gets
+compounded on top of an unaddressed reviewer finding.
 
 ---
 
 ## 0. Start here — the exact point this was handed over
 
-**Handed over 2026-08-26**, after review `feedback.1.19.md` was processed:
-it accepted F-053/F-054/D-031 as material progress but found two
-execution-grade gaps and reopened both the same day they were reported
-shipped — both fixed before this handover.
+**Handed over 2026-09-04.** In order, the state of the world:
 
-The last few things that happened, in order:
+1. **M0** is open only on two things: a hosted CI run actually confirmed
+   green on a real runner (the last known blocker, `UV_FROZEN`/`uv sync`
+   conflicts and a `ruff format`/reviewer-Markdown collision, were fixed
+   and owner-reported green — run #106, 1341 collected, 1339 passed, 2
+   known-unrelated failures — but this environment has no `gh`/Actions
+   access to independently re-pull that result), and a human actually
+   reading `review/domain_contracts.md` (reviewer-approved at the
+   technical level already, review 1.24 §7).
+2. **M1 PASSED, M2 PASSED.** Both real-terminal-validated; nothing new
+   here since the 2026-08-26 version of this document.
+3. **Phase 4 (non-sending execution engineering) formally PASSED**
+   (review 1.24, 2026-08-27) — the full intent-time-Risk → deterministic
+   Policy → `DecisionCapsule` → `ExecutionOrchestrator` → fresh broker
+   state → reconciliation → FINAL Risk → `ApprovedOrder` → `order_check`
+   chain is real, tested, and structurally stops before `order_send`.
+4. **The owner adopted an external-agent product direction** (review
+   1.25, 2026-08-27): Crumblr stays the trusted control plane; two
+   coordinated development tracks now exist — **Dev 1 (Core/Execution)**
+   and **Dev 2 (External Agent Integration)** — each with their own
+   instructions document in `review/`, their own worktree, and their own
+   local finding register (`F-###` project-wide for Dev 1,
+   `AG-###` in `review/AGENT_FEEDBACK.md` for Dev 2). §9 below has the
+   workspace-isolation setup.
+5. **Phase 5 (Convergence, Observability & DEMO Readiness)** opened
+   2026-09-01 (review 1.26, an owner-requested exception to the "no more
+   routine numbered reviews" cadence review 1.25 set). Three lanes: Lane
+   A (Dev 1, core submission safety), Lane B (Dev 2, external agent
+   integration), Lane C (read-only observability).
+6. **Phase B — Dev 1's core submission-safety critical path — is
+   complete**, all shipped 2026-08-28 through 2026-09-04: `SubmissionGate`
+   wired for real (F-049), durable execution-activation, `SUBMISSION_STARTED`
+   emitted at the correct pre-side-effect point, `order_send`
+   idempotence (a deterministic MT5 magic-number derivation), ambiguous-
+   outcome recovery, automatic weekly flatten **with a real per-ticket
+   close** (`review/adr/ADR-020-real-flatten-close.md`), post-fill
+   reconciliation, broker-side stop-loss verification, and an owner
+   account-reference pin plus a one-shot DEMO canary permit. Every real
+   mutating call site exists and is tested; every activation flag
+   defaults closed in every shipped config, and the one real mutating
+   MT5 adapter (`DemoOrderSendMt5Gateway`) is constructed by nothing in
+   `src/`/`scripts/` today — the same "real but genuinely unreachable"
+   discipline every slice used.
+7. **F-051 is fully closed, both parts** (2026-08-26 / 2026-09-01):
+   discovery through reconciliation `MATCHED` was proven for real against
+   the live Pepperstone demo terminal, and a real Trader/Risk/Supervisor
+   decision from a real closed M5 bar was proven too (`baseline_v1`,
+   per review 1.25 §8's explicit instruction not to wait for `ict_v1`'s
+   higher bar-count threshold).
+8. **Phase C (AG-012, a single serialized risk authority) closed on
+   both sides, 2026-09-04** — the last item the owner's coordination
+   order named before entries could ever be wired into a real submission
+   chain. `review/adr/ADR-021-single-risk-authority-lock.md` is the full
+   design: a real Postgres advisory lock (`pg_advisory_xact_lock`,
+   reusing the exact primitive `agent_gateway`'s own `lock_assignment()`
+   already proved out) now serializes `risk_session_states` across
+   `LiveDecisionOrchestrator` (internal strategies),
+   `agent_gateway/decision_path.py` (external-agent proposals) and
+   `ExecutionOrchestrator`'s FINAL Risk read. Found and closed a second,
+   independent bug in the same change: `LiveDecisionOrchestrator` used to
+   only persist its risk-session checkpoint on a cycle that reached a
+   full risk-`PASS` decision, so a run of `NO_TRADE` decisions never
+   updated the durable record at all — now persists every cycle. **One
+   known, deliberately-not-fixed gap remains**: `application/paper_lite.py`
+   (Dev-3-owned, a separate PAPER_LITE track) reads and writes the same
+   table completely unlocked — tracked as **AG-023**, open, not a live
+   safety gap (PAPER_LITE never reaches `order_send` either), but the
+   ADR's own stated guarantee is narrower than its title until whoever
+   owns `paper_lite.py` picks this up.
+9. **Dev 2's side of AG-012 landed on `agent/contracts`, not yet merged
+   to `main`.** `origin/agent/contracts` is currently *ahead* of `main`
+   with this fix (plus everything else that track has built —
+   `agent_gateway/`, the Static Agent bridge work, PAPER_LITE's own
+   convergence). Merging it is an explicit owner/Dev-2 decision, not
+   automatic, and has not been made as of this handover.
+10. **PAPER_LITE** (a separate, Dev-3-owned, self-contained track —
+    `application/paper_lite*.py`, its own worklog
+    `review/PAPER_LITE_DEV3_WORKLOG.md`) merged to `main` 2026-09-03,
+    zero file overlap with Dev 1's own slices.
 
-1. MT5 first contact succeeded (2026-08-24): the read-only gateway met the
-   real Pepperstone demo terminal for the first time, followed the same day
-   by a clean 30-minute continuous-read soak (Phase A) and two deliberate
-   terminal closures that both recovered automatically (Phase B).
-   **M1 PASSED** (`feedback.1.12.md`).
-2. Dashboard v0 was built, then visually rebuilt into its current dark
-   ops-console layout. Its visual scope is now **frozen** — only
-   operational data panels (broker state, reconciliation, live decisions)
-   may still be added, no more layout/framework work.
-3. The owner's direction (relayed via review 1.15) reprioritized engineering
-   onto one concrete near-term target: **one controlled, `feedback.2.0`-gated
-   autonomous MT5 **DEMO** canary order** — real decisioning, real demo
-   fills, zero live-money exposure (O-006). Not live trading, not a
-   profitability claim.
-4. Durable broker account/position/pending-order snapshots (F-047), a
-   coherent single-read account snapshot (F-052), a separate
-   `BrokerStateHealth` freshness concept (F-050), read-only reconciliation
-   v0, and `LiveDecisionOrchestrator` (F-048) — real MT5 market data
-   attached to the actual Trading Agent / Risk Engine / Supervisor chain,
-   execution left structurally unreachable.
-5. Review 1.17 named the next real checkpoint (F-051) and two engineering
-   gaps unblocked by F-048's own work (F-053, F-054); review 1.18, arriving
-   the same day, reopened a documentation-accuracy finding (F-033, a sixth
-   time) and gave an explicit instruction: build F-053/F-054 now rather
-   than deferring them again, since neither needs an MT5 host.
-6. F-053, F-054 and D-031 were all built and shipped the same day.
-7. Review 1.19 arrived the same day and found two real gaps in that work:
-   **F-054's recovery collapsed "record unreadable/corrupt" into "nothing
-   recorded"** — a genuinely dangerous conflation once an execution service
-   exists, since a corrupted duplicate-protection record would then look
-   exactly like a legitimate fresh start. **F-053's instrument-spec
-   comparison trusted whichever spec was observed first** as its baseline
-   (`InstrumentSpecStore.earliest()`) — trust-on-first-use, not authority: a
-   database reset (a workflow this project already has,
-   `scripts/reset_soak_database.py`) could observe an already-wrong spec
-   and reconciliation would call it `MATCHED` for comparing the broker to
-   its own new first observation. Both reopened as `F-054` (same ID,
-   hardened) and a new finding `F-055`, and both fixed the same day: F-054
-   now mirrors `RiskSessionStore`'s three-state recovery shape and trips
-   the kill switch on a corrupted record; F-055 replaced the
-   first-observation baseline with `config.MarketConfig.expected_spec_version`
-   — an explicit, human-approved, git-reviewable pin, `None` (→ `UNKNOWN`)
-   until a real F-051 observation is reviewed and accepted.
-8. **F-051 finally started, 2026-08-26** — this development host turned out
-   to *be* a Windows/MT5 host all along (AMD64, `Pepperstone MetaTrader 5`
-   installed, terminal running). Discovery through reconciliation `MATCHED`
-   all proven for real, zero defects found: real `InstrumentSpec` matched
-   the 2026-08-24 first-contact evidence field for field (except
-   `tick_value`, correctly excluded); a real flat account snapshot read
-   `COMPLETE`/`COMPLETE`, 0 positions, 0 pending orders; `reconcile()` read
-   `UNKNOWN` before a human-approved pin and **`MATCHED` after** — the
-   first real `MATCHED` result this project has produced. The remaining
-   piece — a real Trader/Risk/Supervisor decision — is honestly blocked on
-   real M5 bar accumulation (`ict_v1` needs 120 bars, `baseline_v1` needs
-   65, `crumblr_soak` has 49), not on anything else. See `status.md` §13
-   thirty-first entry for the full evidence.
-
-**The single most valuable thing the next developer can do is finish
-F-051** — the Trader-decision half. Everything else in the checklist is
-done. `mt5_live_reader.py` accumulates real M5 bars at one every five
-minutes with no backfill capability, so this is now purely a matter of
-running it for long enough (roughly 80 more minutes for a `baseline_v1`
-wiring proof, roughly six hours for the real `ict_v1` strategy) and then
-re-running `scripts/live_decision.py`. §4 below has the full runbook and
-now reflects what is actually proven.
+**The single most valuable thing the next session can do** depends on
+who you are: if you are continuing **Dev 1's** critical path, there is
+currently **nothing queued** — Phase B and Phase C are both done on this
+side, and the next real gate is the `feedback.2.0` readiness bundle
+(§6 below) or a fresh owner work order. If you are continuing **Dev 2's**
+track, the immediate items are landing `agent/contracts` on `main` (an
+owner decision to request, not to make unilaterally) and whatever Phase
+5 Lane B/Static Agent items `review/AGENT_STATUS.md` currently names. If
+you are the **reviewer**, `feedback.2.0.md` is the next routine target,
+and review 1.25 §10 lists exactly what the readiness bundle must contain
+before it can be requested.
 
 ### 0.1 If you are a new session (human or agent) picking this up
 
 Follow `CLAUDE.md` §1 before anything else: read `review/FEEDBACK.md`,
-resolve or explicitly answer everything under `## Open`, then start. At
-handover time, open findings are:
+resolve or explicitly answer everything genuinely open, then start. As of
+this handover, every `F-###` finding is `CLOSED` — the remaining open
+items are all evidence/owner-decision gates, not engineering defects:
 
-| Finding | What it needs | Blocked on |
+| Item | What it needs | Blocked on |
 |---|---|---|
-| **F-051, part 2** | A real Trader/Risk/Supervisor decision — discovery through reconciliation `MATCHED` is already proven (2026-08-26) | Real M5 bar accumulation only — run `mt5_live_reader.py` for longer, no host/credential/code blocker remains |
-| **CI** | Confirm the workflow actually ran green on a runner and record the result | `gh` CLI or GitHub Actions web access (this environment has neither) |
-| **Domain-contract review** | A human actually reads `review/domain_contracts.md` and approves or challenges it | A human reviewer |
+| **Hosted CI confirmation** | Someone with `gh`/Actions access to look at the current `main`'s Actions tab and confirm all jobs green | A human, or a future session with that access — this environment has neither |
+| **Domain-contract human countersign** | Optional — only if M0's "reviewed by a human" wording is read literally; already technically approved (review 1.24 §7) | A human, if the literal reading is wanted |
+| **`agent/contracts` → `main` merge** | An explicit decision that the accumulated agent-track work is ready to converge | Owner, or a joint Dev-1/Dev-2 decision |
+| **AG-023 (PAPER_LITE's unlocked risk-session access)** | An architectural call on whether/how `paper_lite.py` should acquire `RiskLedgerLock` | Whoever owns `application/paper_lite.py` next |
+| **Owner activation decisions** (AlgoTrading enable timing, first-canary risk cap, exact permit window) | Explicit owner acts, named in review 1.24 §12/1.25 §10's readiness-bundle checklist | Owner |
 
-**This machine is the Windows/MT5 host** — do not assume otherwise the way
-every earlier version of this document did. If you're continuing F-051,
-just run `mt5_live_reader.py` for a while (see §4) and then
-`scripts/live_decision.py`. CI and the domain-contract review remain
-genuinely blocked on something this environment cannot produce on its own.
+**This machine is the Windows/MT5 host** — AMD64, `Pepperstone MetaTrader 5`
+installed and running, confirmed since 2026-08-26. Do not assume
+otherwise; check `platform.machine()` and for a running `terminal64.exe`
+first if in doubt.
 
-### 0.2 Initialise the Windows host
+### 0.2 Which workspace am I in?
+
+Since the DEV1/DEV2 track split (2026-08-28), **the top-level checkout is
+not necessarily where active work happens.** Each track works in its own
+dedicated Git worktree:
+
+```powershell
+git worktree list
+```
+
+typically shows something like:
+
+```text
+<repo-root>                               [main]
+<repo-root>/.claude/worktrees/core        [core/<topic>]   <- Dev 1
+<repo-root>/.claude/worktrees/agent-dev2  [agent/contracts] <- Dev 2
+```
+
+**If the top-level checkout's own `main` looks stale relative to
+`origin/main` — check before trusting it.** Local branch refs are shared
+across worktrees but are not automatically fast-forwarded when a topic
+branch is pushed straight to the remote's `main`; a top-level checkout
+that was set up once and never revisited can sit many commits behind
+while the real work, visible via `git log origin/main`, has moved on
+entirely through the dedicated worktrees. Always `git fetch origin` and
+compare against `origin/main`, not local `main`, when orienting.
+
+Read `review/CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md` (Core) or
+`review/CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` (external
+agent) for the full workspace-isolation setup: separate branch prefix
+(`core/*`/`agent/*`), separate Python environment, separate integration-
+test database (`crumblr_test_dev1`/`crumblr_test_dev2` — never the shared
+`crumblr` or `crumblr_soak` databases for routine test runs).
+
+### 0.3 Initialise the Windows host
 
 ```powershell
 winget install Git.Git
@@ -145,7 +193,7 @@ git config --local user.email "<the address on the DutchBugs account>"
 git config --local credential.https://github.com.username DutchBugs
 ```
 
-### 0.3 Prove the transfer before trusting it
+### 0.4 Prove the transfer before trusting it
 
 ```powershell
 uv run python -c "import platform; print(platform.machine())"
@@ -157,9 +205,9 @@ uv run ruff check . ; uv run ruff format --check . ; uv run mypy ; uv run pytest
 |---|---|
 | `platform.machine()` | `AMD64`. `ARM64` means **stop** — no MT5 wheels exist for it |
 | `MetaTrader5.__version__` | a version string. An ImportError means `--extra mt5` was missed |
-| ruff, mypy | clean, 125 source files (2026-08-26 count — check `status.md` §13 for the latest) |
+| ruff, mypy | clean — check `status.md`'s compact header for the current source-file count |
 | pytest, **no database running** | most persistence tests skip silently — a green run here proves nothing about persistence |
-| pytest, **with `crumblr-pg` up** | **877 passed, 3 skipped** as of 2026-08-26. The 3 skips are two POSIX-permission-bit tests that don't apply on this platform's filesystem, and one `MetaTrader5` import-availability test — all expected, not failures |
+| pytest, **with `crumblr-pg` up**, `CRUMBLR_DATABASE_URL` pointed at your own isolated test database | check `status.md`'s compact header for the current exact pass count (well over 1400 as of this handover) — a materially lower number means something regressed or your database is stale/partially migrated |
 
 ```powershell
 docker run -d --name crumblr-pg `
@@ -173,32 +221,6 @@ Then watch the platform work against synthetic data, which needs no broker:
 uv run python scripts/run_replay.py --bars 4000
 ```
 
-### 0.4 Then — the F-051 real-terminal checklist
-
-`review/feedback.1.17.md` §6 lays out the exact sequence. In short:
-
-1. Start `scripts/mt5_live_reader.py` against the real, already-logged-in
-   terminal, pointed at `crumblr_soak` (never the shared test database —
-   §9 below explains why).
-2. Confirm it persists a real `InstrumentSpec`, a real `BrokerAccountSnapshot`
-   (correct balance/equity/margin/currency/leverage/`RETAIL_HEDGING`), and
-   that a flat account's positions/pending orders come back `COMPLETE` with
-   zero child rows — not `UNKNOWN`.
-3. Run `scripts/reconcile.py` against that snapshot and confirm it reports
-   `MATCHED` while the account is flat.
-4. Let at least one new real M5 bar close, then run
-   `scripts/live_decision.py` and confirm it persists a real Signal → Risk →
-   Supervisor chain, with the decision context correctly flagged as real
-   shadow output, not a replay artifact — and confirm execution remains
-   structurally unreachable (no `order_check`/`order_send` anywhere in the
-   call graph, which is true by construction, not by configuration).
-5. If the strategy produces `NO_TRADE`, **that is valid evidence.** Do not
-   force a setup to make the run "interesting" — review 1.17 §6 says so
-   explicitly.
-6. Record what happened in `status.md` §13 with the evidence attached, and
-   open a deviation for every disagreement between the terminal and the
-   code — same discipline as first contact, `APP-014`.
-
 ### 0.5 Two things that will look broken and are not
 
 - **The system refuses to trade on a fresh machine.** The safety latch at
@@ -209,6 +231,12 @@ uv run python scripts/run_replay.py --bars 4000
   if no instrument spec/bars/broker snapshot has been observed yet on that
   database. That is the orchestrator refusing to guess, not a bug — see
   `LiveDecisionOutcome.skipped_reason`.
+- **`order_send` will always refuse, however permissive the config.**
+  This is by construction, not configuration: `OrderCheckMt5Gateway
+  .order_send`/`.close_all_positions` are unconditional raises, and the
+  one real adapter that can genuinely submit
+  (`DemoOrderSendMt5Gateway`) is never constructed by any shipped script.
+  A test (`TestNotWiredIntoTheOrchestrator`) asserts this structurally.
 
 ---
 
@@ -216,19 +244,22 @@ uv run python scripts/run_replay.py --bars 4000
 
 | | |
 |---|---|
-| **Gate** | M0 open only on CI confirmation + human domain-contract review · **M1 PASSED** · **M2 PASSED** · M3/M4/M6/M7/M8 not passed (implemented, replay-tested) · **M5 and P2 NO-GO** |
-| **Capital at risk** | €0. No `order_check`/`order_send` call exists anywhere in this codebase's call graph — checked structurally by tests, not only by intent. |
-| **Tests** | 877 passing, 3 explained skips, `uv run pytest` with PostgreSQL up (2026-08-26 count) |
-| **Strategy** | `ict_v1` configured, feature-frozen since review F-004. `baseline_v1` retained as benchmark and used in integration tests (it triggers far more often than `ict_v1` on a short synthetic series) |
-| **Real MT5 data** | Yes, since 2026-08-24: real EUR/USD ticks and M5 bars have been observed, persisted, and (as of F-048, not yet real-terminal-run) fed all the way through the Trading Agent / Risk Engine / Supervisor chain. Nothing has ever submitted an order. |
-| **Reviews** | `feedback.1.0` … `1.19` all processed. `feedback.1.20.md` is the next expected review, triggered by F-051 real evidence + a real shadow decision + CI result + the domain-contract package actually being supplied — though review 1.19 also explicitly accepts a real integration defect exposed by F-051 as its own trigger. `feedback.2.0.md` is mandatory before any `order_send`, demo included, and is a separate, larger review from the numbered 1.x sequence |
+| **Gate** | M0 open only on hosted-CI confirmation + optional human countersign · **M1 PASSED** · **M2 PASSED** · **Phase 4 formally PASSED** · M3/M6/M7/M8 not passed (implemented/partial, replay-tested) · **M5/`order_send` NO-GO until `feedback.2.0` GO** |
+| **Capital at risk** | €0. `order_send` is structurally unreachable from every real construction path in `src/`/`scripts/` — checked by tests, not only by intent |
+| **Tests** | Well over 1400 passing (real PostgreSQL, isolated per-workspace database) — check `status.md`'s compact header for today's exact count, it changes every session with meaningful progress |
+| **Strategy** | `ict_v1` configured, feature-frozen since F-004. `baseline_v1` retained as benchmark and is the strategy F-051 part 2's real-terminal proof actually used. An external-agent path exists alongside both, strategy-neutral by explicit architectural decision (F-066) |
+| **Real MT5 data** | Yes, since 2026-08-24. F-051 (both parts) proved the whole chain — discovery, reconciliation `MATCHED`, and a real Trader/Risk/Supervisor decision — against the real terminal. Nothing has ever submitted an order |
+| **Execution chain** | Real and tested end to end through `order_check` and every non-sending gate (Phase 4 PASSED, Phase B complete); `order_send` itself remains structurally unreachable |
+| **Reviews** | `feedback.1.0` … `1.28.md` all processed. **Review cadence has changed** (review 1.25 §9): no more routine numbered reviews for ordinary progress — the next *routine* target is `feedback.2.0.md` directly. A numbered review only returns for a material safety defect, a proposed Phase-4-invariant change, an authority-boundary dispute, or the complete `feedback.2.0` bundle being ready |
 
-The honest one-line summary: **the full decide-and-audit pipeline now runs**
-**on real market data; nothing has ever submitted an order, and the new**
-**broker-state/reconciliation/decision code has only met a fake terminal.**
+The honest one-line summary: **the full decide-and-audit-and-preflight
+pipeline now runs on real market data and has met the real broker through
+`order_check`; the real submission chain (close/flatten included) is
+built, tested and structurally inert; nothing has ever submitted an
+order or genuinely closed one.**
 
-The single most valuable next step is closing that last gap — F-051, §0.4
-above and §4 below.
+The single most valuable next step depends on role — see §0 above and §6
+below.
 
 ---
 
@@ -322,11 +353,16 @@ than by convention.
 
 ```text
 domain/          contracts, events, money, time, hashing. No I/O, no SDKs.
-  models.py      TradeIntent, RiskDecision, DecisionCapsule, BrokerAccountSnapshot,
-                 BrokerPositionSnapshot, BrokerPendingOrderSnapshot, InstrumentSpec … all frozen
-  enums.py       Environment, SnapshotCompleteness (COMPLETE/FAILED/UNKNOWN),
+  models.py      TradeIntent, RiskDecision, DecisionCapsule, ApprovedOrder,
+                 ExecutionResult, FlattenInstruction/FlattenPlan,
+                 BrokerAccountSnapshot, BrokerPositionSnapshot,
+                 BrokerPendingOrderSnapshot, InstrumentSpec … all frozen
+  enums.py       Environment, ReasonCode, ExecutionEventType, FlattenEventType,
+                 SnapshotCompleteness (COMPLETE/FAILED/UNKNOWN),
                  ReconciliationStatus (MATCHED/MISMATCHED/UNKNOWN), …
   events.py      the journal vocabulary; typed envelopes
+  hashing.py     content-derived identity, incl. mt5_magic_number()
+                 (order_send idempotence, ADR-007)
   money.py       Decimal only — floats are rejected at the boundary
   timeutils.py   UTC only — naive datetimes are rejected
 
@@ -335,40 +371,67 @@ trading_agent/   features and strategies. Produces TradeIntent, nothing else.
   registry.py    strategy_id → implementation; unknown ids fail loudly
   ict.py         the ICT entry model, ten enforceable conditions
   structure.py, imbalance.py, liquidity.py, sessions.py   ICT primitives
-  baseline.py    the §9.2 benchmark
+  baseline.py    the §9.2 benchmark; also F-051 part 2's real-terminal proof
 
 risk/            the deterministic gate. Nothing bypasses this.
-  policies.py    the full §8.1 pre-trade checklist
+  policies.py    the full §8.1 pre-trade checklist, incl. execution-time
+                 revalidation (ADR-001)
   sizing.py      equity + stop distance + broker spec → volume, rounded down
+  portfolio_risk.py  exact open-risk assessment (owner risk policy v1, D1.4)
   kill_switch.py durable halt; fails closed on startup
   safety_state.py  the store protocol + atomic file implementation
-  session.py     the daily-loss budget, which survives a restart
+  session.py     the daily-loss budget (survives a restart) + RiskLedgerLock
+                 (ADR-021 — a real cross-process serialization primitive)
+  submission_gate.py   the real order_send multi-gate (ADR-006, F-049)
+  flatten_gate.py      the real automatic-flatten multi-gate (ADR-009)
+  execution_preflight_gate.py, execution_eligibility.py
   operator_controls.py  halt / cancel / flatten, deliberately decoupled
 
 evaluator/       the supervisor. May veto or halt; may not trade.
-  pretrade.py    layer 1, deterministic — the only layer built so far
+  pretrade.py    layer 1, deterministic — the only internal layer built so far
 
-mt5_gateway/     port.py (the contract), simulated.py (replay),
+agent_gateway/   the external-agent trust boundary (ADR-005, Dev-2-owned).
+                 Identity/credential auth, assignment authorization,
+                 context binding, idempotent proposal claiming,
+                 TradeProposal -> platform TradeIntent mapping,
+                 decision_path.py's shared Risk/Policy wiring
+
+mt5_gateway/     port.py (the BrokerPort contract), simulated.py (replay),
                  client.py (connection), readonly.py (M1 — reads only,
-                 including account_with_extras(), pending_orders())
+                 incl. account_with_extras(), pending_orders()),
+                 execution.py (OrderCheckMt5Gateway — real order_check,
+                 order_send/close always unconditional raises),
+                 demo_execution.py (DemoOrderSendMt5Gateway — the one real,
+                 separate, genuinely unwired mutating adapter: order_send,
+                 close_position/close_all_positions, Phase B)
 market_data/     synthetic generator; tick → bar pipeline
 persistence/     PostgreSQL schema, event journal, capsule store, market
-                 store, broker-state store, instrument-spec store, safety
-                 and risk-session state, Alembic migrations
+                 store, broker-state store, instrument-spec store,
+                 execution.py (requests/events), flatten.py (requests/events),
+                 risk_session.py (session store + PostgresRiskLedgerLock,
+                 ADR-021), agent_gateway.py, safety and risk-session state,
+                 Alembic migrations
 application/     orchestration.py — the replay §3 transaction flow, end to end
-                 recording.py, bootstrap.py, reconstruction.py
+                 recording.py, bootstrap.py (DurableRuntime — the real
+                 composition root for a durable run), reconstruction.py
                  live_reader.py     — M1: observes + persists real MT5 state
                                        (market data, broker account/position/
                                        pending-order snapshots, instrument spec)
                  broker_state.py   — composes one gateway read into a
                                        durable broker-state observation (F-047)
                  reconciliation.py — compares durable observed broker state
-                                       against expected platform state (v0:
-                                       flat, pre-execution)
+                                       against expected platform state
                  live_decision.py — LiveDecisionOrchestrator (F-048): real
                                        closed M5 bar -> Trading Agent -> Risk
-                                       -> Supervisor -> persist. Execution
-                                       structurally unreachable
+                                       -> Supervisor -> persist. This class
+                                       itself never reaches order_send
+                 execution.py      — ExecutionOrchestrator: the real,
+                                       non-sending Phase-4 execution chain,
+                                       plus the real automatic-flatten
+                                       machinery (Phase B)
+                 execution_outcome.py, expected_state.py, flatten_plan.py
+                 paper_lite.py     — a separate, Dev-3-owned, self-contained
+                                       track; see its own worklog
 dashboard/       Dashboard v0 — read-only FastAPI app, outside the broker
                  execution boundary (F-035). Visual scope frozen (F-042..046)
 api/             control API — authenticated operator functions (M8, not built)
@@ -378,49 +441,60 @@ observability/   structured logging
 **Three rules that explain most design choices:**
 
 1. *The agent proposes, the risk engine constrains.* `TradeIntent` has no
-   field for position size, so a strategy cannot name one. A test fails if
-   such a field is ever added.
+   field for position size, so a strategy — internal or external — cannot
+   name one. A test fails if such a field is ever added.
 2. *Absence of evidence is not evidence of safety.* Safety-critical state is
    `MATCHED`/`MISMATCHED`/`UNKNOWN` or `COMPLETE`/`FAILED`/`UNKNOWN`, never a
    boolean, and `UNKNOWN` fails closed — never silently upgraded to the safe
-   value.
+   value. An external Supervisor's timeout/error/malformed response reads
+   the same way — `UNKNOWN`, never an implicit approval.
 3. *`build.md` is the specification and is never edited to match the code.*
    Gaps go in `review/DEVIATIONS.md`.
 
-A fourth rule arrived with F-048 and is worth knowing before touching this
-code: **`LiveReader` observes and persists; `LiveDecisionOrchestrator`
-decides from what was persisted; an eventual execution service (M5) is the
-only thing that will ever execute.** These three responsibilities must stay
-in three different classes — review 1.16 §9 was explicit about this, and it
-is now load-bearing: `LiveDecisionOrchestrator` never talks to MT5 directly,
-only to `MarketDataStore`/`BrokerStateStore`/`InstrumentSpecStore`.
+A fourth rule arrived with F-048 and is still load-bearing: **`LiveReader`
+observes and persists; `LiveDecisionOrchestrator` decides from what was
+persisted; `ExecutionOrchestrator` is the only thing with a real (if
+still unreachable) path to a broker mutation.** These responsibilities
+stay in separate classes — `LiveDecisionOrchestrator` never talks to MT5
+directly, only to `MarketDataStore`/`BrokerStateStore`/`InstrumentSpecStore`.
+
+A fifth rule arrived with the external-agent direction (O-007) and Phase
+C: **Crumblr is strategy-neutral, and there is exactly one risk
+authority.** Core never re-implements or maps onto an external strategy's
+own vocabulary (F-066), and every process that reads or writes the
+risk-session ledger — internal or external-agent-driven — goes through
+the same real, symbol-keyed Postgres lock (`RiskLedgerLock`, ADR-021),
+not an independent in-memory cache.
 
 ---
 
 ## 4. MetaTrader 5 — what is proven, and what is next
 
-M1 first contact happened 2026-08-24 (`feedback.1.12.md`, PASSED). This
-section used to be "the runbook to first contact"; it is now "what first
-contact and everything since actually proved, and the one thing left to
-prove."
+M1 first contact happened 2026-08-24 (`feedback.1.12.md`, PASSED). F-051
+(both parts) closed the remaining real-terminal gap for the read/decide
+side 2026-08-26/2026-09-01. This section is now "what has actually met
+the real broker, and what genuinely has not yet."
 
 ### 4.1 What is real-terminal-validated today
 
 | Capability | Status |
 |---|---|
 | Connect, discover symbol/account/instrument spec | **Proven** — first contact, 2026-08-24 |
-| Continuous tick/bar read into the pipeline | **Proven** — Phase A, 30 clean minutes, 2,920 real ticks + 17 real M5 bars, `GOOD` quality, zero gaps |
-| Reconnect with full revalidation (symbol, account, spec, clock offset) | **Proven** — Phase B, two deliberate terminal closures, owner present, both recovered automatically |
-| Broker-clock offset detection, not hard-coded | **Proven** — measured ~2:59:39-2:59:40 ahead of true UTC, stable across both phases |
-| Durable broker account/position/pending-order snapshots (F-047) | **Built and unit/integration-tested against `FakeMt5`/`ScriptedMt5` only — never against the real terminal** |
-| One coherent account read per snapshot (F-052) | Same — fake-terminal-tested only |
-| Broker-state freshness as its own health concept (F-050) | Same — fake-terminal-tested only |
-| Read-only reconciliation v0 | Same — the one database-only smoke test against `crumblr_soak` correctly returned `UNKNOWN` (no real broker-state observation existed yet), which is the fail-closed result working as intended, not evidence of a match |
-| `LiveDecisionOrchestrator` (F-048) | Same — unit-tested against fakes, integration-tested against real PostgreSQL with a synthetic bar series, never against a real closed M5 bar |
-| Instrument-spec durable persistence | Same |
+| Continuous tick/bar read into the pipeline, reconnect with full revalidation | **Proven** — Phase A/B, 2026-08-24 |
+| Broker-clock offset detection | **Proven** — measured, not hard-coded |
+| Durable broker account/position/pending-order snapshots (F-047) | **Proven** — F-051 part 1, 2026-08-26 |
+| One coherent account read per snapshot (F-052) | **Proven**, same run |
+| Reconciliation, including the instrument-spec pinned baseline | **Proven — real `MATCHED`**, F-051 part 1 |
+| `LiveDecisionOrchestrator` (F-048) — a real Trader/Risk/Supervisor decision | **Proven** — F-051 part 2, 2026-09-01, `baseline_v1`, real EUR/USD data |
+| Real `order_check` (Phase 4) | **Proven** — 2026-08-27, one genuine `ORDER_CHECK_REJECTED` (AlgoTrading deliberately off at the terminal, not a defect) |
+| `RiskLedgerLock` cross-process serialization (ADR-021) | Proven against **real PostgreSQL concurrency** (real threads, real advisory lock) — never against two genuinely separate real MT5-connected processes simultaneously, since neither pipeline can reach `order_send` for that to matter yet |
+| Real `order_send`, real per-ticket close, real flatten | **Not proven and not reachable.** The real adapter (`DemoOrderSendMt5Gateway`) exists and is unit-tested against a fake terminal only — nothing in `src/`/`scripts/` constructs it |
+| AlgoTrading enabled at the terminal | **Deliberately never done.** APP-016: an explicit owner act, never automatic, never "to make a check pass" |
 
-Everything in the second column of that table is exactly what **F-051**
-exists to close. Read §0.4 above for the exact sequence.
+Everything in the last two rows is what `feedback.2.0.md`'s readiness
+bundle (§6 below) and an eventual owner activation decision exist to
+close — not an engineering gap in the ordinary sense; every piece behind
+it is built and tested, only genuinely never turned on.
 
 ### 4.2 Credentials
 
@@ -442,17 +516,15 @@ traceback or a debugger frame. The raw account login is masked
 call site (F-031) — the account number should never appear unmasked
 anywhere in this repository's logs, status entries, or review artifacts.
 
-### 4.3 The three MT5 scripts
+### 4.3 The MT5 scripts
 
 | Script | Purpose | Trades? |
 |---|---|---|
 | `scripts/mt5_probe.py` | One-shot first contact: connect, read, print | No — holds a `ReadOnlyMt5Gateway`, whose execution methods raise |
 | `scripts/mt5_live_reader.py` | Continuous read: ticks/bars/broker-state, reconnect+revalidate, writes a JSON health snapshot | No — same read-only gateway |
-| `scripts/live_decision.py` | Runs `LiveDecisionOrchestrator.decide_once()` in a loop: real closed bar → Signal → Risk → Supervisor → persist | **No** — prints an "EXECUTION DISABLED" banner; no `order_check`/`order_send` call exists in its call graph |
-
-`scripts/reconcile.py` is a one-shot CLI over `application/reconciliation.py`
-— compares the latest durable broker snapshot against the expected
-(currently: flat, pre-execution) platform state.
+| `scripts/live_decision.py` | Runs `LiveDecisionOrchestrator.decide_once()` in a loop: real closed bar → Signal → Risk → Supervisor → persist | **No** — no `order_check`/`order_send` call exists in this process's own call graph |
+| `scripts/run_execution_preflight_evidence.py` | One-shot: wires `ExecutionOrchestrator` to real dependencies for a labeled evidence-only capsule | Reaches real `order_check` under explicit, logged, temporary owner authorization only — never `order_send` |
+| `scripts/reconcile.py` | One-shot CLI over `application/reconciliation.py` | No |
 
 **The raw `--json` output of `mt5_probe.py`/`mt5_live_reader.py` carries the
 real MT5 account number** and must stay local — `var/` is git-ignored for
@@ -461,55 +533,15 @@ everything else kept) may be attached to a status entry, a review document,
 or pasted into chat (F-031).
 
 Point every real-terminal run at `crumblr_soak`, **never** the shared
-`crumblr` test/dev database — that database's schema gets dropped by the
-integration test fixture teardown, and mixing them crashed a real soak
-attempt early on (see `status.md` §13, ninth entry). `scripts/mt5_live_reader.py`
-refuses to start at all unless `CRUMBLR_DATABASE_URL` is explicitly set.
+`crumblr` test/dev database or either track's own `crumblr_test_dev1`/
+`crumblr_test_dev2` isolated database — those get bootstrapped and torn
+down by test fixtures. `scripts/mt5_live_reader.py` refuses to start at
+all unless `CRUMBLR_DATABASE_URL` is explicitly set.
 
 ```powershell
 $env:CRUMBLR_DATABASE_URL = "postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_soak"
 uv run python scripts/mt5_live_reader.py --duration 1800 --json var/live_reader_health.json
 ```
-
-### 4.4 What to do with what it prints
-
-If you have never done this before, work through these in order — each is
-a claim the code makes today, discovered from documentation before first
-contact and confirmed or corrected by the real terminal on 2026-08-24.
-Anything already settled is marked; anything still open needs a real read.
-
-1. **`resolved_symbol`** — settled: `EURUSD`, no suffix.
-2. **`margin_mode`** — settled: `RETAIL_HEDGING`, read from `account_info()`.
-3. **`company`/`server`** — settled: `Pepperstone Limited`,
-   `PepperstoneUK-Demo` (O-005, demo scope only — a future live account
-   needs its own determination).
-4. **`digits`/`point`/`tick_size`/`tick_value`/`contract_size`/`volume_min/max/step`** —
-   settled from first contact; `tick_value` is deliberately excluded from
-   `InstrumentSpec.spec_version`'s hash because it drifts live with the
-   account/quote cross-currency rate (F-039) — not broker policy.
-5. **`filling_modes`/`stops_level`** — settled: `filling_mode=2` → IOC,
-   `trade_mode=4` → FULL, matching the documented mapping (F-032).
-6. **`swap_long`/`swap_short`** — recorded, still not modelled in the fill
-   model (`D-010`).
-7. **F-047's broker account balance/equity/margin/positions/pending orders,
-   `SnapshotCompleteness` per side** — **not yet observed against the real
-   terminal.** This is the open item.
-8. **Approve and pin the instrument-spec baseline (F-055).** After
-   confirming the observed spec's fields against what steps 1-6 above
-   already settled, set `expected_spec_version` on the `EUR/USD` entry in
-   `config/paper.yaml`'s `markets` list to the observed `spec_version` —
-   this is the explicit, git-reviewed act F-055 requires, not something
-   the code does for you. Nothing is pinned yet in any shipped config.
-9. **Reconciliation's `MATCHED` verdict on a real flat account, including
-   the pinned instrument spec** — **not yet observed.** Open, and cannot
-   read `MATCHED` for the spec dimension until step 8 above is done.
-10. **A real Signal/Risk/Supervisor decision from `LiveDecisionOrchestrator`
-    against a real closed M5 bar** — **not yet observed.** Open.
-
-Record the results in `status.md` §13 with evidence attached, and open a
-deviation for each disagreement between the terminal and the code — do not
-edit code to match the terminal before writing down what differed. That
-discipline is `APP-014` and it is the whole point of this step.
 
 ---
 
@@ -518,22 +550,36 @@ discipline is `APP-014` and it is the whole point of this step.
 An independent reviewing agent files versioned reviews in `review/`.
 
 **At the start of every session, read `review/FEEDBACK.md`** and resolve
-(or explicitly answer with a reason) anything still open before starting
-new work. The full protocol is `CLAUDE.md` §1.
+(or explicitly answer with a reason) anything still genuinely open before
+starting new work. The full protocol is `CLAUDE.md` §1.
 
-`feedback.1.0.md` through `feedback.1.17.md` are all processed.
-**`feedback.1.18.md` is the next expected review** — review 1.17 §19 names
-its trigger: F-051 real evidence + a real shadow Agent decision + the CI
-result + `review/domain_contracts.md` actually supplied, arriving together.
+`feedback.1.0.md` through `feedback.1.28.md` are all processed — every
+`F-###` finding is `CLOSED`. **The review cadence changed 2026-08-27**
+(review 1.25 §9): routine engineering progress no longer triggers a new
+numbered review. The next *routine* target is `feedback.2.0.md` directly
+— the formal readiness review before `order_send` can ever become
+reachable, demo included. Bring a numbered reviewer artifact back early
+only for: a material safety defect, a proposed change to a Phase-4
+invariant, an unresolved Dev-1/Dev-2 authority dispute, an unexpected
+path that could reach execution, or the complete `feedback.2.0` bundle
+being ready. (2026-09-01's `feedback.1.26`/`1.27`/`1.28` were deliberate
+owner-requested exceptions to this rule, not a reversion of it.)
 
 ```text
 review/
-  FEEDBACK.md        the tracker — start here
-  feedback.1.0.md    … 1.17.md — the reviews themselves, never edited
+  FEEDBACK.md        the project-wide tracker — start here
+  feedback.1.0.md    … 1.28.md — the reviews themselves, never edited
+  AGENT_FEEDBACK.md  Dev 2's own local AG-### finding register
   DEVIATIONS.md      every departure from build.md, keyed D-NNN
-  domain_contracts.md  the M0 contract package, assembled but not yet
-                        reviewed by an actual human — review 1.17 §10
-  adr/               architecture decisions, keyed ADR-NNN
+  INTEGRATION_NOTICES.md  the Dev-1/Dev-2 shared-contract change log
+  domain_contracts.md  the M0 contract package — reviewer-approved,
+                        optional human countersign only
+  adr/               architecture decisions, keyed ADR-NNN (through
+                      ADR-021 as of this handover)
+  CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md   Dev 1's own operating rules
+  CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md   Dev 2's own operating rules
+  OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md   the current staged
+                      coordination order (Phases 0-F) toward one DEMO canary
 ```
 
 The tracker uses **two** status fields, and the distinction matters:
@@ -542,75 +588,67 @@ The tracker uses **two** status fields, and the distinction matters:
 - **Implementation** — what actually exists? `SHIPPED`, `DECIDED` (an ADR
   with no code), `PENDING M5`.
 
-Do not read "most findings CLOSED" as "all work reviewed" or "all work
-real-terminal-proven." As of this handover: **F-047, F-048, F-050, F-052
-and reconciliation v0 are all SHIPPED/CLOSED and all still fake-terminal-only.**
-F-051 exists precisely to close that gap, and until it does, treat every
-claim above the M1 line as REPLAY-TESTED at best, exactly the same maturity
-label the ladder in `status.md` §1 already uses.
-
-`feedback.2.0.md` is **mandatory before the first real or demo `order_send`**
-and must rely on integration evidence, not tracker claims.
+Do not read "every finding CLOSED" as "`order_send` may now be enabled."
+`feedback.2.0.md` is **mandatory before the first real or demo
+`order_send`** and must rely on integration evidence, not tracker claims
+— review 1.25 §10 lists the exact required bundle.
 
 ---
 
 ## 6. What to build next, in order
 
-### The one blocking checkpoint
+### The immediate gate — evidence and owner acts, not engineering
 
-1. **F-051** — the real-terminal checklist, §0.4/§4 above
-   (`feedback.1.19.md` §8, 18 steps, now covering F-047 through F-055 and
-   D-031 together). Needs a Windows/MT5 host, which is the only thing
-   blocking it. As of 2026-08-26 there is no unblocked engineering work
-   queued ahead of it — F-053, F-054, F-055 and D-031 (the things that
-   used to be listed here) are all shipped.
+1. **Confirm hosted CI is actually green** on a real runner (this
+   environment has no `gh`/Actions access — needs a human or a future
+   session with it). Owner-reported green as of run #106, not
+   independently re-pulled.
+2. **`agent/contracts` → `main`.** An explicit owner/Dev-2 decision on
+   merge timing, not automatic just because the branch is green.
+3. **AG-023** — `application/paper_lite.py`'s own unlocked
+   `risk_session_states` access. Not urgent (PAPER_LITE never reaches
+   `order_send`), but a real gap in ADR-021's stated guarantee until
+   whoever owns that file picks it up.
+4. **Optional domain-contract human countersign** — only if M0's
+   "reviewed by a human" wording is read literally.
 
-### Evidence/approval tasks — not engineering
+### Toward `feedback.2.0` — the formal readiness bundle
 
-2. **CI** — confirm the workflow actually ran green on a runner (commit
-   SHA, Linux job, Windows job, PostgreSQL tests, gitleaks, unexpected
-   skips) and record the result. Needs `gh` CLI or GitHub Actions web
-   access.
-3. **Domain-contract human review** — supply `review/domain_contracts.md`
-   unchanged to the reviewer; it has been assembled but never actually
-   read by the reviewer (review 1.17 §10, reconfirmed 1.19 §10).
+Review 1.25 §10 (and review 1.24 §12) name the full required bundle:
+hosted CI green, owner-approved risk policy (done, O-008/O-009), F-051
+evidence (done, both parts), the real `SubmissionGate`/execution-safety
+chain (done, Phase B), real `order_check` evidence (done, 2026-08-27),
+exact approved DEMO account/server pin (done, B7), the one-shot canary
+permit mechanism (done, B8), and — per the owner's Phase-D dry-drill
+requirement (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`) — a
+full run of the intended agent-driven path up to (never past) the
+`order_send` boundary, with a genuine external Supervisor and AG-012's
+shared authority both actually exercised for real, not only unit-tested.
+That dry drill has not yet been run.
 
 ### Blocked on a human decision
 
-4. Confirm the risk budget in `config/paper.yaml` (build.md §29 Q7-Q8) —
-   placeholders, not policy (`D-013`).
-5. Confirm the intraday cut-off and flatten offsets (`ADR-004` §3).
-6. Production/demo HALT-reset authority (Q12).
+- Whether/when to enable terminal AlgoTrading, and under what conditions
+  (APP-016).
+- The first canary's exact maximum requested-risk fraction and one-shot
+  permit expiry/window (reviewer recommendation: 0.25% of equity or
+  lower, explicitly not yet owner-approved policy).
+- Whether the `feedback.2.0` bundle should be the narrower "Crumblr
+  execution proof" (may use `baseline_v1`, internal-strategy-driven) or
+  the wider "agent-driven MVP" bundle, per review 1.25's own Milestone
+  A/B split.
 
-### After F-051 succeeds
+### After `feedback.2.0` gives an explicit GO
 
-7. **Pin the instrument-spec baseline (F-055).** The first real,
-   human-verified observation from step 1 becomes
-   `config.MarketConfig.expected_spec_version` — see §4.4 step 8 above.
-   Without this, reconciliation reads `UNKNOWN` for the instrument-spec
-   dimension forever, by design.
-8. **Dashboard operational data** — balance, equity, open P/L, free
-   margin, open positions, pending orders, broker-state age,
-   reconciliation status, live/shadow pipeline (review 1.17 §15's exact
-   list, reconfirmed 1.19 §11). No further visual redesign — the layout is
-   frozen.
-9. **Phase 4 — execution engineering, may be prepared in parallel with
-   F-051, but nothing may become order-capable until F-054's fail-closed
-   fix is in — it now is (review 1.19 §5, fixed 2026-08-26).** A separate
-   execution-capable MT5 adapter, `order_check`, an `ApprovedOrder`
-   contract, an `ExecutionResult` contract, a durable `order_request_id`
-   (build directly on `DecisionWindowState`'s identity, per D-046's own
-   "watch for"), ADR-001's final execution-time risk revalidation, the
-   automatic intraday flatten, post-result reconciliation. None of this is
-   built yet, correctly — see the note in §3 above about keeping
-   `LiveDecisionOrchestrator` and any future execution adapter as separate
-   classes, the same way `LiveReader` stays separate from both.
-10. **F-049** — the multi-gated execution enablement rule (environment,
-    account/server, reconciliation, data health, safety state, risk
-    policy, execution adapter, terminal AlgoTrading, `feedback.2.0` — all
-    simultaneously true). Not built, correctly, since M5 is NO-GO.
-11. `feedback.2.0.md`, then one deliberately constrained canary DEMO order
-    (O-006) — a technical proof, not a profitability claim.
+- The owner confirms the exact approved risk/config hash, DEMO account
+  reference, immutable Static Agent assignment/artifact (if agent-
+  driven), first-canary risk cap, permit window, and whether/when to
+  enable AlgoTrading.
+- Only then may the relevant execution/flatten activation flags be set
+  true for the canary. **Merging code must never enable them by itself**
+  — every flag in every shipped config defaults closed today, and that
+  is a property this session's own tests assert structurally, not a
+  promise.
 
 ---
 
@@ -635,10 +673,11 @@ exactly why `SnapshotCompleteness` exists as `COMPLETE`/`FAILED`/`UNKNOWN`
 rather than a boolean. Reading a failed call as "flat" is exactly how a
 reconciliation check would pass while the terminal is down.
 
-**`LiveReader` observes; `LiveDecisionOrchestrator` decides; a future
-execution service executes.** Keep these three responsibilities in three
-classes. `LiveDecisionOrchestrator` never imports `MetaTrader5` or talks to
-a gateway directly — only to the durable stores `LiveReader` already wrote
+**`LiveReader` observes; `LiveDecisionOrchestrator` decides;
+`ExecutionOrchestrator` is the one class with a real (if unreachable) path
+to a broker mutation.** Keep these responsibilities in separate classes.
+`LiveDecisionOrchestrator` never imports `MetaTrader5` or talks to a
+gateway directly — only to the durable stores `LiveReader` already wrote
 to. Merging any two of these back together undoes the entire point of
 building them separately (review 1.16 §9).
 
@@ -651,21 +690,22 @@ encoded; do not re-derive it ad hoc elsewhere (F-050).
 **Reconciliation's `UNKNOWN` must never be upgraded to `MATCHED`.** A
 missing, stale, or incomplete broker-state observation is not the same
 fact as "confirmed flat," and the two must never collapse into each other
-just because `UNKNOWN` is inconvenient for a caller. This is the same
-fail-closed shape as `SnapshotCompleteness` and `IncidentStatus`.
+just because `UNKNOWN` is inconvenient for a caller.
 
 **A restart may never hand back headroom.** `risk/session.py` recovers the
 daily-loss and drawdown state, and every value it restores is seeded so
-that recovery can only tighten. If you add a field there, ask which
-direction losing it moves the limits — and if the answer is "outwards," it
-has to halt instead.
+that recovery can only tighten. Since ADR-021, this recovery also happens
+under a real cross-process lock, every cycle, not once cached in memory —
+if you touch `LiveDecisionOrchestrator.decide_once()`, read that ADR
+first, the caching removal was a deliberate, reviewed behavioural change,
+not a simplification to casually reintroduce.
 
-**Do not give a journalled event a random id.** `event_id` is derived from
-the event type, its window and its payload. The journal's append is
-idempotent on that id, so a rerun after a crash converges instead of
-writing history twice. A `uuid4` there would silently double a run. The
-same discipline is why `LiveDecisionOrchestrator`'s eventual durable
-decision-window identity (F-054) must be content-derived, not random.
+**Do not give a journalled event a random id.** `event_id`/`order_request_id`/
+`flatten_request_id` are all derived from content, never `uuid4()` — the
+store's append/claim is idempotent on that id, so a rerun after a crash
+converges instead of writing history twice or resubmitting a broker
+action. This discipline runs all the way through the execution/flatten
+chain, not only the original replay journal.
 
 **Do not order journal reads by insertion time.** Three clocks exist:
 `occurred_at_utc` (market time — order by this), `recorded_at_utc` (write
@@ -674,25 +714,31 @@ after a reconnect backfill, which is exactly when order matters.
 
 **Do not let logging into stdout.** See §2.
 
-**The FX day ends at 17:00 New York, not at midnight UTC.** Everything
-about the intraday policy and the daily-loss baseline hangs off that. A
-position closed at midnight UTC has already been through a rollover and
-paid swap for it. See `risk/trading_window.py` and `ADR-004`.
+**The FX day ends at 17:00 New York on Friday, not at midnight UTC every
+day.** Owner session policy v1 (2026-09-03, `ADR-012`) made the intraday/
+overnight rule *weekly*, not daily — Monday-Thursday now permits holding
+overnight; only Friday carries the last-entry cutoff and mandatory
+flatten. If you find code or a comment describing this as a daily rule,
+it predates that change and is stale.
 
 **A bar's origin is part of the bar.** A bar the broker sent and one this
 platform built from ticks are not interchangeable evidence. `MarketBar.origin`
 and `pipeline_version` exist so nobody has to guess which is which months
 from now.
 
-**A halt is not a flatten.** `HALT NEW ORDERS`, `CANCEL PENDING` and
-`FLATTEN POSITIONS` are three separate controls and must stay decoupled —
-there are tests asserting the decoupling in both directions.
+**A halt is not a flatten, and a flatten is not the same as closing.**
+`HALT NEW ORDERS`, `CANCEL PENDING` and `FLATTEN POSITIONS` are three
+separate operator controls and stay decoupled. The *automatic* flatten
+(ADR-009/ADR-020) is a fourth, distinct, policy-driven path — it must
+never be implemented by reusing the operator's own button, and a test
+(`test_the_operator_flatten_control_is_never_reached`) asserts this
+structurally.
 
 **The supervisor's default context is UNSAFE by design.** `SupervisorContext()`
-defaults both safety fields to `UNKNOWN`, which halts. Tests that want to
-exercise a policy rule must say explicitly that reconciliation and
-incidents were checked. See `known_good_context` in
-`tests/unit/test_supervisor.py`.
+defaults both safety fields to `UNKNOWN`, which halts. An external
+Supervisor's own unreachable/malformed/timed-out response reads the same
+way. Tests that want to exercise a policy rule must say explicitly that
+reconciliation and incidents were checked.
 
 **Two supervisor checks are still inert** — the confidence band and the
 signal frequency threshold are configured to values nothing can fall
@@ -701,17 +747,38 @@ observations exist, not deleting.
 
 **The live decision path's `AccountState.login` is a placeholder `0`, on
 purpose.** `BrokerAccountSnapshot` never carries the raw MT5 login
-(build.md §21 — never persist it), so `LiveDecisionOrchestrator` forces
-`RiskContext.expected_login=None` and verifies account identity through
-reconciliation's `account_ref` fingerprint comparison instead (D-046). If
-you ever wire up a real `expected_login` check, revisit
-`_account_state_from_snapshot` first — otherwise it will silently `BLOCK`
-every live intent, safely but confusingly.
+(build.md §21 — never persist it); account identity for the live path is
+verified through reconciliation's `account_ref` fingerprint comparison
+instead (D-046).
 
-**M5 must not be built by relaxing `ReadOnlyMt5Gateway`.** Execution
-belongs in a separate adapter satisfying the same port, so the read-only
-one stays available for shadow mode, where reading without submitting is
-the whole point. `D-036`.
+**M5 was not built by relaxing `ReadOnlyMt5Gateway`.** The real mutating
+capability lives in a separate adapter (`OrderCheckMt5Gateway` for
+`order_check`, `DemoOrderSendMt5Gateway` for the one real `order_send`/
+close capability) satisfying the same `BrokerPort`, so the read-only one
+stays available for shadow mode. `D-036`.
+
+**A close is not a widened `close_all_positions`.** Real per-ticket
+closes (`DemoOrderSendMt5Gateway.close_position`) always name the exact
+MT5 `position` (ticket) explicitly — on a hedging account, closing by
+symbol/side alone would let the broker net or open ambiguously against
+whichever other position happens to exist on that symbol. Never simplify
+this back to a symbol-only close.
+
+**`RiskLedgerLock` opens its own transaction and yields the connection
+out — it does not take one in.** Neither `LiveDecisionOrchestrator` nor
+`agent_gateway/decision_path.py` owns a raw `Engine`; a required-external-
+`connection` design was tried first for ADR-021 and reverted before
+implementation for exactly this reason. If you add a new reader/writer of
+`risk_session_states`, follow this same shape, not `lock_assignment()`'s
+literal signature.
+
+**Crumblr does not compute or emulate an external strategy's own setup
+detection.** F-066 (review 1.28): Core hands an external agent a neutral
+market/context bundle and enforces only structural shape on whatever
+comes back — never a semantic mapping onto `ict_v1`'s own vocabulary,
+never a fabricated shared vocabulary. If a change to Core starts
+requiring knowledge of a specific external strategy's internal states,
+that is the wrong layer for it.
 
 ---
 
@@ -722,23 +789,26 @@ Ranked by how much weight it can bear.
 | Evidence | Strength |
 |---|---|
 | Contract invariants, ICT primitives | Strong — hand-constructed cases with known answers |
-| Persistence invariants | Strong — real PostgreSQL, all ten ADR-003 criteria |
+| Persistence invariants | Strong — real PostgreSQL, all ten ADR-003 criteria, plus a real pg_dump/restore proof on hosted CI |
 | Durable halt across restart | Strong — real child processes, not two objects in one interpreter |
 | A run rebuilt from the journal | Strong — same decision fingerprint, same tally, read back through a fresh connection |
-| Restart-safe risk budget | Strong for the local record — broker history is not consulted (`D-032`) |
+| Restart-safe risk budget, now cross-process-locked | Strong for the local record — broker history itself is not consulted (`D-032`); the lock itself is proven under real concurrent PostgreSQL connections (ADR-021), not yet under two genuinely separate real MT5-connected processes |
 | Replay determinism | Strong — byte-identical, checked in the gate |
 | Real MT5 connectivity, continuous read, reconnect | **Strong** — Phase A/B, real Pepperstone demo, 2026-08-24 |
-| Risk/Supervisor decision logic | Moderate — correct in replay and now wired to real market data (F-048), but that wiring itself has only run against synthetic bars through real PostgreSQL, never a real closed M5 bar |
-| Broker-state persistence, reconciliation v0 (F-047/F-050/F-052) | **Moderate at best — tested only against `FakeMt5`/`ScriptedMt5`, never the real terminal.** This is exactly F-051's gap |
-| MT5 broker execution behaviour | **None.** No execution path exists at all |
+| Discovery through reconciliation `MATCHED`, a real Trader/Risk/Supervisor decision | **Strong** — F-051, both parts, real terminal, real market data |
+| Real `order_check` | **Strong for what it tested** — one real, honest `ORDER_CHECK_REJECTED` (AlgoTrading off); never yet tested with AlgoTrading on, deliberately |
+| The full non-sending execution/flatten chain (Phase 4 + Phase B) | **Strong on architecture and fake-terminal test coverage; zero real-broker evidence for `order_send`/a real close**, since neither is reachable from any real process today |
+| Broker-state persistence, reconciliation (F-047/F-050/F-052) | **Strong — real-terminal-validated**, F-051 part 1 |
+| MT5 broker `order_send`/close execution behaviour | **None.** No process can reach either today |
 | Fill model | **Weak** — intrabar ordering is an assumption; swap and commission are not modelled at all |
-| Strategy performance | **None.** No number from this system is decision-grade evidence |
+| Strategy performance, internal or external-agent | **None.** No number from this system is decision-grade evidence |
 
-The fill model is the softest link in the *replay* evidence chain and is
-documented as `D-010`. The freshest gap in the *real-broker* evidence chain
-is F-051 — everything built since first contact (F-047 onward) is
-architecturally sound and unit/integration-tested, but has never met the
-thing it is meant to observe.
+The fill model is the softest link in the *replay* evidence chain
+(`D-010`). The freshest real gap in the *real-broker* evidence chain is
+`order_send`/a real close itself — everything built since Phase 4 started
+is architecturally sound and fake-terminal-tested, but has never met the
+thing it is meant to eventually do for real, by design, until
+`feedback.2.0` and an explicit owner activation decision.
 
 ---
 
@@ -747,52 +817,48 @@ thing it is meant to observe.
 - **This working copy runs on Windows x86-64 (AMD64) with the MT5 terminal
   already installed and running** (`Pepperstone MetaTrader 5`, confirmed
   2026-08-26) — the same machine does development *and* real MT5 work.
-  Earlier versions of this document described a two-host setup (a macOS
-  arm64 development machine, plus a separate Windows host for MT5 only);
-  whether that separate macOS machine still exists elsewhere is not
-  something this session can verify, but **do not assume the machine you
-  are on cannot reach MT5 — check `platform.machine()` and for a running
-  `terminal64.exe` first.** Everything except the MT5 gateway is still
-  host-independent code-wise — the `mt5` extra is marked
-  `sys_platform == 'win32'`, so the same `uv sync` command is safe on a
-  non-Windows machine too, it simply skips that extra. Windows-on-ARM does
-  not work for the MT5 half — the wheels do not exist for it.
+  Windows-on-ARM does not work for the MT5 half — the wheels do not exist
+  for it.
+- **Two development tracks, two dedicated worktrees, since 2026-08-28.**
+  `.claude/worktrees/core` (Dev 1, branch prefix `core/*`) and
+  `.claude/worktrees/agent-dev2` (Dev 2, branch prefix `agent/*`) are the
+  real active workspaces — see §0.2 above. The top-level checkout can
+  drift stale; always `git fetch origin` and compare against
+  `origin/main`, not local `main`, before trusting what you see there.
 - **Docker Desktop** does not start automatically. Most persistence tests
   skip silently without a database, so check before believing a green run.
-- **Two separate PostgreSQL databases matter.** `crumblr` is the shared
-  dev/test database — its schema gets bootstrapped and torn down by test
-  fixtures, so it must never be used for a real soak/live run.
-  `crumblr_soak` is dedicated to real-MT5 runs and must be migrated
-  manually (`alembic upgrade head`, or `scripts/reset_soak_database.py` to
-  reset it cleanly without drifting `alembic_version` — F-041).
-  `scripts/mt5_live_reader.py` refuses to start without
-  `CRUMBLR_DATABASE_URL` explicitly set, specifically to prevent this
-  mistake.
+- **Several PostgreSQL databases matter, and mixing them up causes real
+  incidents.** `crumblr` is the original shared dev/test database.
+  `crumblr_test_dev1`/`crumblr_test_dev2` are each track's own isolated
+  integration-test database (never share these between tracks, and never
+  use them for a real soak/live run). `crumblr_soak` is dedicated to
+  real-MT5 runs and must be migrated manually (`alembic upgrade head`, or
+  `scripts/reset_soak_database.py` to reset it cleanly without drifting
+  `alembic_version` — F-041). `scripts/mt5_live_reader.py` refuses to
+  start without `CRUMBLR_DATABASE_URL` explicitly set, specifically to
+  prevent this mistake.
 - **The local safety latch** lives at `.crumblr/safety_state.json` and is
-  git-ignored — a property of the host, never of the repository. **The
-  Windows host has its own**, and it starts closed.
+  git-ignored — a property of the host, never of the repository.
 - **History starts at one commit.** The owner held commits until a working
   prototype existed (F-006); `fd6a890` on 2026-08-24 is the initial import
   of everything through M2. `status.md` §13 is the detailed record of how
-  the code got here since.
+  the code got here since — it is long (80+ chronological entries as of
+  this handover) but is the authoritative "what actually happened, with
+  evidence" record when this document's own summary is not enough.
 - **The remote is `DutchBugs/Crumblr`, private, on a personal account kept
   separate from the owner's work account.** Identity and credentials are
   pinned **repo-locally**: `user.email`, and
   `credential.https://github.com.username`. Do not move either to the
   global config, and do not switch the remote to SSH — the default key on
   the macOS host is a deploy key belonging to an unrelated work repository.
-- **CI ran for the first time 2026-08-26 and failed both platform jobs** —
-  the owner relayed GitHub's own failure notifications directly, since no
-  session so far has had `gh` CLI or GitHub Actions web access to check a
-  run directly. Root cause reproduced and fixed the same day (F-056):
-  `numpy` was an undeclared test dependency (only present as a side effect
-  of the `mt5` extra, which — correction to every earlier version of this
-  document — **neither CI job actually installs**; the Windows job's own
-  comment says it deliberately proves the platform code is
-  host-independent, not that it exercises the MT5 gateway against a real
-  terminal). Fixed locally against the exact failing commands; **still not
-  confirmed green on an actual runner** — that needs a push and a human
-  (or a future session with `gh`/Actions access) to check the result.
+- **Hosted CI has run for real since 2026-08-26.** Three real defects were
+  found and fixed on the first few hosted runs (an undeclared `numpy` test
+  dependency, a `UV_FROZEN`/`--locked` conflict, `ruff format` rewriting
+  immutable reviewer Markdown, a PostgreSQL client/server major-version
+  mismatch on the restore-proof test) — each fixed the same day it was
+  found, per `review/FEEDBACK.md`'s F-056/F-063/F-065/F-067/F-068 rows.
+  The fixes are pushed and owner-reported green (run #106); this
+  environment still has no `gh`/Actions access to independently confirm.
 - **`.gitattributes` pins the checkout to LF.** With two operating systems
   in play, a CRLF checkout would change the determinism hash and the
   format check without changing any code.
@@ -803,12 +869,15 @@ thing it is meant to observe.
 
 | Question | Answer lives in |
 |---|---|
+| Where does the project stand *right now*, more current than this document? | `status.md`'s own compact "Current state" header at the top |
 | Why is the code like this? | `review/DEVIATIONS.md`, keyed `D-NNN` |
 | Why was this decided? | `review/adr/`, and `status.md` §10 |
 | What happened when? | `status.md` §13, chronological with evidence |
-| What is broken or open? | `status.md` §3 (`APP-NNN`), §5 (`EV-NNN`), `review/FEEDBACK.md`'s finding register |
+| What is broken or open? | `review/FEEDBACK.md`'s finding register (project-wide `F-###`), `review/AGENT_FEEDBACK.md` (Dev-2-local `AG-###`) |
 | What does the spec require? | `build.md` — and it is never edited to match the code |
-| What did the reviewer say? | `review/feedback.1.*.md`, newest first |
+| What did the reviewer say? | `review/feedback.1.*.md`, newest first; cadence changed 2026-08-27, see §5 above |
 | Has this been proven against the real broker, or only against a fake one? | §4/§8 above, and the Implementation column in `review/FEEDBACK.md` |
 | How do I connect to MT5? | §4 above, and `scripts/mt5_probe.py` / `scripts/mt5_live_reader.py` |
-| What is the very next thing to do? | §0/§6 above — F-051 if you have a Windows/MT5 host; otherwise CI evidence, the domain-contract supply, or an owner-policy decision are the only unblocked items |
+| Which workspace/worktree should I be in? | §0.2 above |
+| What is the very next thing to do? | §0/§6 above — depends on which track you are continuing |
+| What is a shared-contract change, and how does it get coordinated between tracks? | `review/CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md` §4, `review/INTEGRATION_NOTICES.md` for the actual log of every such change made so far |
