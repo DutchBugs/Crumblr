@@ -744,9 +744,18 @@ class PaperLiteOrchestrator:
         )
 
     def _recover_risk_session(self, snapshot: MarketSnapshot) -> None:
+        # AG-023 (`review/AGENT_FEEDBACK.md`): the read is now serialized
+        # against LiveDecisionOrchestrator's/decision_path.py's own
+        # RiskLedgerLock-protected cycles (ADR-021) via the same lock, so
+        # this can no longer observe a torn/uncommitted write from either.
+        # Does not by itself make this method's later, separate
+        # `_persist_risk_session()` call part of the same atomic
+        # transaction -- see that method's own docstring for the honest
+        # remaining gap.
         account = self._broker.account()
         positions = self._broker.positions()
-        record = self._session_store.load_latest()
+        with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+            record = self._session_store.load_latest(connection=connection)
         market_day = trading_day(snapshot.event_time_utc)
 
         if record.is_known and record.state is None and positions:
@@ -783,6 +792,32 @@ class PaperLiteOrchestrator:
             return
 
     def _persist_risk_session(self) -> None:
+        """AG-023 (`review/AGENT_FEEDBACK.md`): the write is now serialized
+        against the same `RiskLedgerLock` `LiveDecisionOrchestrator`/
+        `decision_path.py` hold (ADR-021) -- closes the torn-write class of
+        the race and means a later `_recover_risk_session()` call (here or
+        in either Core pipeline) is guaranteed to observe this write
+        wholly, never partially.
+
+        **Honest remaining gap, not fixed here:** this method and
+        `_recover_risk_session()` are two separate, independently-locked
+        critical sections, not one atomic recover-update-persist
+        transaction the way `LiveDecisionOrchestrator.decide_once()`'s own
+        ADR-021 redesign is. A concurrent writer could still commit a
+        newer state in the window between this class's own recover call
+        and this call, which this call's own write would then silently
+        overwrite -- a genuine, narrower, but non-zero lost-update window.
+        Closing it fully would mean moving this call to run immediately
+        after `_recover_risk_session()` (mirroring the Core redesign
+        exactly), but unlike `LiveDecisionOrchestrator`, this class's
+        `_broker` can synchronously fill an order *within the same
+        `process()` call*, after `_recover_risk_session()` already ran --
+        moving the persist earlier would silently stop capturing a
+        same-cycle fill's own realized P&L/equity change until the next
+        cycle instead. That is a real behavioral tradeoff for whoever owns
+        this class's fill-timing design, not something to decide
+        unilaterally while closing a locking gap.
+        """
         if (
             self._risk_ledger is None
             or self._risk_trading_day is None
@@ -793,16 +828,16 @@ class PaperLiteOrchestrator:
         positions = self._broker.positions()
         open_risk = self._broker.open_risk_assessment()
         self._risk_ledger.update(account.equity)
-        self._session_store.save(
-            session.snapshot(
-                self._risk_ledger,
-                trading_day=self._risk_trading_day,
-                realized_pnl=self._broker.portfolio_view().realized_profit,
-                open_risk_fraction=open_risk.fraction,
-                open_position_count=len(positions),
-                recorded_at_utc=self._risk_recorded_at,
-            )
+        state = session.snapshot(
+            self._risk_ledger,
+            trading_day=self._risk_trading_day,
+            realized_pnl=self._broker.portfolio_view().realized_profit,
+            open_risk_fraction=open_risk.fraction,
+            open_position_count=len(positions),
+            recorded_at_utc=self._risk_recorded_at,
         )
+        with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+            self._session_store.save(state, connection=connection)
 
     def _trip_risk_session(
         self,

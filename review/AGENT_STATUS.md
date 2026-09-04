@@ -1741,6 +1741,77 @@ something.
 
 ---
 
+## 0y. AG-023 closed: `PaperLiteOrchestrator`'s own risk-session read/write now lock-protected — done 2026-09-04
+
+With every genuinely-unblocked Dev-2 item done (§0v-§0x) and no Dev-3 or
+Static Agent Developer session available, checked with the user before
+crossing a line stated explicitly to Dev 1 ("not fixing this myself —
+`paper_lite.py`'s own recover/persist design is Dev-3-owned"). Confirmed:
+go ahead.
+
+`PaperLiteOrchestrator._recover_risk_session()`/`_persist_risk_session()`
+each now wrap their own `session_store` call in
+`self._risk_ledger_lock.held(self._assignment.canonical_symbol)` — the
+same constructor parameter §0v/§0w already threaded through for the
+Protocol-widening fix, now actually used for its real purpose.
+
+**Verified deadlock-safe before writing anything**, not assumed: re-read
+`process()`'s actual body end to end. `_recover_risk_session()` runs near
+the top (its lock acquired and released before anything else); a *first*
+`_persist_risk_session()` runs shortly after (before any Gateway/decision
+evaluation); `evaluate_agent_trade_intent()` — which independently
+acquires the same lock on its own connection — only runs after that,
+well clear of either PAPER_LITE-side hold; a *second*
+`_persist_risk_session()` call (inside `_outcome()`) runs after
+`evaluate_agent_trade_intent()` has already released its own lock. None
+of these holds ever overlaps another, so there is no nested-acquisition
+deadlock risk between PAPER_LITE's own two locks and `decision_path.py`'s
+internal one, even though all three ultimately contend for the same
+Postgres advisory lock key.
+
+**Deliberately not a full fix, and said so in the code, not just here**:
+this closes the "torn read of a concurrent writer's partial state" class
+of issue and serializes each individual read/write against the real
+Core pipelines' own lock-protected cycles — but `_recover_risk_session()`
+and `_persist_risk_session()` remain two separately-locked calls, not one
+atomic critical section the way `LiveDecisionOrchestrator`'s own ADR-021
+redesign is. A real, narrower lost-update window remains between this
+class's own recover and its own later persist. Closing that fully would
+mean moving the persist to run immediately after recovery — but unlike
+`LiveDecisionOrchestrator`, `PaperLiteOrchestrator`'s `SimulatedBroker`
+can fill an order *within the same `process()` call*, so moving the
+persist earlier would silently stop capturing a same-cycle fill's P&L
+until the next cycle. That is a real behavioral tradeoff for whoever
+owns PAPER_LITE's fill-timing design next, not something to decide
+unilaterally while closing a locking gap — documented plainly in
+`_persist_risk_session()`'s own docstring, not just in this entry.
+
+**Self-review (`/code-review medium`) found one real thing, correctly
+scoped**: `RiskLedgerLock.held(...)` acquisition has no exception
+handling anywhere in the chain — a transient DB/lock failure propagates
+uncaught rather than degrading gracefully the way
+`RiskSessionStore.load_latest()`'s own failure mode was designed to.
+Checked before accepting this as a finding worth recording: is this new,
+or inherited? Grepped `application/live_decision.py` — identical
+property, already reviewed and shipped as part of ADR-021 itself; checked
+`scripts/live_decision.py`'s main loop — only catches `KeyboardInterrupt`,
+so a lock failure there crashes the process exactly the same way. Not a
+regression this fix introduced, and not fixed here — recorded as AG-024,
+a cross-cutting ADR-021 design question for whoever owns that decision
+(most likely Dev 1), not something to patch asymmetrically in only one
+of three-plus call sites.
+
+Evidence: `tests/unit/test_paper_lite.py::TestAG023RiskLedgerLockAcquired`
+(new — one full cycle acquires the lock at least twice, for exactly the
+assignment's canonical symbol). Full `test_paper_lite.py`: 21/21. Full
+non-integration suite: 1219 passed, 1 pre-existing skip, 0 failed.
+ruff/ruff format/mypy clean.
+
+`review/AGENT_FEEDBACK.md`: AG-023 moved to Closed with full resolution;
+AG-024 opened (Open).
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
