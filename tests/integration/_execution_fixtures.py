@@ -418,6 +418,7 @@ def orchestrator(
     clock: Any = None,
     kill_switch: KillSwitch | None = None,
     flatten_close_adapter: FlattenCloseSink | None = None,
+    risk_ledger_lock: Any = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=LOGIN, password="x", server=SERVER))
@@ -435,7 +436,7 @@ def orchestrator(
         broker_state=BrokerStateStore(engine),
         instrument_specs=InstrumentSpecStore(engine),
         session_store=PostgresRiskSessionStore(engine),
-        risk_ledger_lock=PostgresRiskLedgerLock(engine),
+        risk_ledger_lock=risk_ledger_lock or PostgresRiskLedgerLock(engine),
         kill_switch=kill_switch or KillSwitch(),
         adapter=adapter,
         canonical_symbol="EUR/USD",

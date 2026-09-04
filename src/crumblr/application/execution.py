@@ -464,14 +464,38 @@ class ExecutionOrchestrator:
         # the marginal cost is small — this call site has no write-back
         # either, so it is lock-for-read-consistency only, the same as
         # `agent_gateway/decision_path.py`'s side (ADR-021 §5).
-        with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
-            session_recovery = recover_session(
-                self._session_store.load_latest(connection=connection),
-                live_equity=observation.account_state.equity,
-                live_open_positions=len(observation.position_states),
-                market_day=trading_day(final_now),
-                max_daily_loss=self._config.risk.max_daily_loss,
-                max_drawdown=self._config.risk.max_drawdown,
+        # AG-024 (ADR-021 §8): `load_latest()` already has its own internal
+        # try/except (any read failure becomes `record.unreadable`, which
+        # `recover_session()`'s own `if not record.is_known` branch already
+        # turns into `must_halt`) — the one thing that was never protected
+        # is *acquiring the lock itself*. A failure there previously had no
+        # handling anywhere in the call chain.
+        try:
+            with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
+                session_recovery = recover_session(
+                    self._session_store.load_latest(connection=connection),
+                    live_equity=observation.account_state.equity,
+                    live_open_positions=len(observation.position_states),
+                    market_day=trading_day(final_now),
+                    max_daily_loss=self._config.risk.max_daily_loss,
+                    max_drawdown=self._config.risk.max_drawdown,
+                )
+        except Exception as error:
+            _log.error("execution.risk_ledger_lock_failed", error=str(error))
+            if not self._kill_switch.is_halted:
+                self._kill_switch.trip(
+                    reason_codes=(ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                    tripped_by="execution_orchestrator",
+                    occurred_at_utc=final_now,
+                    detail=f"risk-ledger lock unavailable: {error}",
+                )
+            return self._refuse(
+                order_request_id,
+                capsule,
+                ExecutionEventType.FINAL_RISK_BLOCKED,
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                final_now,
+                detail=f"risk-ledger lock unavailable: {error}",
             )
         if session_recovery.must_halt:
             if not self._kill_switch.is_halted:
