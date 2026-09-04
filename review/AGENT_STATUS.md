@@ -1518,7 +1518,79 @@ regardless, so neither is exploitable today.
 
 ---
 
-## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
+## 0v. Generic neutral-Agent wire envelope moved into Agent Gateway (Phase A item 1) — done 2026-09-04
+
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §2 Phase A names this
+track's first post-Phase-C item explicitly: "Move the reusable neutral
+external-Agent HTTP response envelope/adapter into the Agent Gateway
+layer. PAPER_LITE must not be the owner of the production wire contract."
+Confirmed by reading the actual code, not assumed from the work order's
+own description: `application/paper_lite_agent.py::HttpPaperLiteTradingAgent`
+(response-envelope parsing/binding-validation for a neutral-context Agent
+host) and `PAPER_LITE_AGENT_SCHEMA_VERSION` were defined inside the
+PAPER_LITE (Dev-3-owned) application module, not `agent_gateway/` — exactly
+the ownership inversion the work order names. `application/paper_lite.py`
+itself only depends on the `PaperLiteTradingAgent` `Protocol` (duck-typed:
+`agent_id`/`credential_secret`/`decide()`), not on the concrete class, so
+the move does not touch that file at all.
+
+New `agent_gateway/neutral_agent_client.py`: `HttpNeutralAgentClient`,
+`NeutralAgentResponseError`, `NEUTRAL_AGENT_RESPONSE_SCHEMA_VERSION` — the
+Gateway-owned counterpart of `market_context.py`'s outbound
+`AgentMarketContextV1` (that module builds the outbound neutral context;
+this one parses the inbound response into the same authoritative
+`TradeProposal`/`NoTradeDecision` contracts). Transport itself is not
+duplicated — reuses `static_agent_client.evaluate()` (timeout/redirect/
+size-bound stdlib HTTP client) unchanged.
+
+**Deliberately not a same-session rewrite of PAPER_LITE's file.** The work
+order itself splits this: Dev 2 "moves" (creates the canonical, Gateway-
+owned version); a separate line item explicitly assigns "Replace paper-only
+wire-envelope ownership with Dev 2's generic Agent adapter" to **Dev 3**.
+`application/paper_lite_agent.py` and its own test
+(`tests/unit/test_paper_lite_agent.py`) are untouched — rewriting a file and
+test suite this track does not own, unilaterally, risks exactly the kind of
+one-sided cross-track patch this repository's process has repeatedly
+avoided elsewhere (AG-012's own §0n is the clearest precedent). The new
+module's schema-version string (`"neutral-agent-response-1.0"`) is
+therefore deliberately distinct from PAPER_LITE's still-active
+`"paper-lite-agent-1.0"` — nothing in production speaks either value today
+(F-064: no HTTP transport is deployed anywhere), so there is no live wire
+compatibility being broken, and consolidating onto one name is exactly the
+substitution Dev 3's own pass makes next.
+
+Also folded in, since a fresh module was the chance to close a coverage gap
+the original never had: tests for a `TRADE_PROPOSAL` success parse, an
+unsupported `schema_version`, a missing `decision` object, an unsupported
+`decision_type`, and a decision payload that violates the Crumblr contract
+at the `pydantic.ValidationError` layer — none of these had a direct test
+against `HttpPaperLiteTradingAgent` originally (only the `NO_TRADE` success
+case, binding mismatches and a non-200 status were covered).
+
+Evidence: `tests/unit/test_neutral_agent_client.py` (11 tests, all new).
+`uv run ruff check .` / `ruff format --check .` — clean (213 files).
+`uv run mypy` — no issues in 196 source files. Full non-integration suite:
+**1202 passed**, 1 skipped (pre-existing, unrelated), 0 failed — no
+existing test needed a single edit, confirming the move is additive.
+Integration suite launched against the dedicated `crumblr_test_dev2` URL,
+as this track's own convention requires. First attempt reported honestly
+rather than glossed over: no PostgreSQL was reachable in this session's
+environment at that point (234 tests skipped). Docker was available but no
+container was running; started the repo's own documented `crumblr-pg`
+container (`tests/integration/conftest.py`'s own recipe — a stopped
+container from an earlier session already existed under that name, reused
+rather than recreated) against the same `crumblr_test_dev2` database this
+track already uses. Re-ran for real: **249 passed, 2 skipped** (pre-existing
+`test_halt_survives_restart.py` Windows-permission-bits skips, unrelated —
+matches every prior session's own note that Windows does not enforce POSIX
+permission bits), 0 failed, in 411s.
+
+Full gate now genuinely green (unit + integration + ruff + ruff format +
+mypy). Committing next.
+
+---
+
+## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
 |---|---|---|
@@ -1530,9 +1602,11 @@ regardless, so neither is exploitable today.
 | — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → strategy-neutral Policy → capsule boundary | **DONE, merged, pushed** (`475331f`, strategy-neutral Policy Gate `c50312c` — §0f). |
 | — Static Agent bridge, unhealthy-market smoke | honest transport/schema/identity/HTTP proof against the real fork | **Core wiring + real HTTP client done, merged, pushed** (`34ddbe6`, HTTP client pending push — §0g/§0h/§0j). Response→`NoTradeDecision`→Gateway submission not yet built. |
 | — Agent Gateway event-conflict hardening | `append_event` fail-closed on same-key-different-content | **DONE, merged, pushed** (§0i, this entry). |
-| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), next per the user's current priority order. |
+| — Phase 0 convergence with `main` | rebase/merge, exact-open-risk, PL-006 fixes, PR review | **DONE — corrected 2026-09-04**: PR #2 merged 2026-09-03 (§0t). Table row below was stale. |
+| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Corrected 2026-09-04 — DONE, not committed to `main` yet** (AG-003 closed 2026-09-03, §0u): in-process `ReferenceSupervisor` reference implementation, real transport/AG-012 closure still open. |
+| — Phase A item 1: generic neutral-Agent wire envelope | move the response-envelope/adapter out of PAPER_LITE into Agent Gateway | **DONE 2026-09-04** (§0v) — `agent_gateway/neutral_agent_client.py`. PAPER_LITE's own switch-over is a separate, Dev-3-owned step. |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP. |
-| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on C + a HEALTHY genuine Static Agent decision (blocked on fork-side strategy-runtime work, F-066). |
+| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on a HEALTHY genuine Static Agent decision (fork-side strategy-runtime work, F-066) and AG-012 closure. |
 
 **Nothing in `src/crumblr/agent_gateway/` or `src/crumblr/persistence/agent_gateway.py`
 is imported by anything outside itself and its own tests** — verified by
@@ -1575,14 +1649,17 @@ this track's own six tables.
 
 ### What's still open
 
-- **The shared no-MT5 integration path** — review 1.26 §7 item 3: wire
-  the constructed `TradeIntent` through intent-time Risk, the
-  deterministic Policy Gate, and `DecisionCapsule` sealing. Next up.
-- **`ProposalWithdrawal` enforcement** — needs the integration path above
-  first (its `SUBMISSION_STARTED`-cutoff rule needs a real execution
-  timeline to check against).
-- **External Supervisor boundary** (AG-003) — review 1.26 §7 item 5,
-  after the integration path.
+- **This list is stale as of 2026-09-04 — see §0f/§0u/§0v.** The shared
+  no-MT5 integration path (review 1.26 §7 item 3) and the External
+  Supervisor boundary (AG-003) are both **done** (§0f, §0u), not "next up."
+  Kept here unedited below as the historical record of what was true at
+  the time this section was written; do not read it as current.
+- **`ProposalWithdrawal` enforcement** — still genuinely open: needs a real
+  execution timeline to check its `SUBMISSION_STARTED`-cutoff rule against,
+  which does not exist while `order_send` is unreachable.
+- AG-012 (single final-Risk authority across the internal and Gateway
+  decision paths) remains open — §0n's design analysis, not yet taken to
+  Dev 1/the reviewer for sign-off.
 - **F-064** — HTTP transport not authorized for remote/public exposure
   yet (not blocking current work).
 
