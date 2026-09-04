@@ -1666,8 +1666,12 @@ Evidence: `tests/unit/test_agent_decision_path.py` 33→37 passed.
 suite (merged onto `origin/main` at `2275908`, which brought in Dev 1's
 own ADR-021 core-side commits): **1217 passed**, 1 pre-existing unrelated
 skip, 0 failed. ruff/ruff format/mypy clean (197 source files). Full
-gate including integration, against real PostgreSQL
-(`crumblr_test_dev2`), launched the same way as §0v — result to follow.
+integration suite, against real PostgreSQL (`crumblr_test_dev2`, the
+same `crumblr-pg` container from §0v): **255 passed, 2 skipped**
+(pre-existing `test_halt_survives_restart.py` Windows-permission-bits
+skips, unrelated), 0 failed, in 1177s (~20 min — the full suite,
+including Dev 1's own new `test_risk_ledger_lock.py` concurrency proof).
+Committed `f0a18ed`, merged Dev 1's ADR-021 amendment on top, pushed.
 
 ---
 
