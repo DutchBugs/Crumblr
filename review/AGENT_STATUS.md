@@ -1586,7 +1586,7 @@ matches every prior session's own note that Windows does not enforce POSIX
 permission bits), 0 failed, in 411s.
 
 Full gate now genuinely green (unit + integration + ruff + ruff format +
-mypy). Committing next.
+mypy). Committed `c1f1544`.
 
 ---
 
