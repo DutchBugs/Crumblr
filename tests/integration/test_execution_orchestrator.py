@@ -890,4 +890,62 @@ class TestEndToEnd:
         assert len(outcomes) == 1
         assert outcomes[0].event_type == ExecutionEventType.RECONCILIATION_BLOCKED
         assert not fake.order_check_requests
+
+
+class RaisingRiskLedgerLock:
+    """AG-024: simulates the risk-ledger lock's own acquisition failing —
+
+    e.g. a transient database outage — the one thing `load_latest()`'s
+    own internal try/except never protected, since it only wraps the read
+    itself, not acquiring the lock around it. Before AG-024, this had no
+    handling anywhere in `_process()`'s own call chain and would have
+    propagated uncaught, aborting the whole `run_once()` pass."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A FINAL Risk lock failure must refuse the request and halt, never
+
+    crash the pass or reach `order_check` on unknown risk-session state
+    (ADR-021 §8)."""
+
+    def test_a_lock_failure_refuses_and_halts_without_reaching_order_check(
+        self, engine: Engine
+    ) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = platform_config(expected_spec_version=the_spec.spec_version)
+        capsule = sealed_capsule(engine, config)
+        fake = FakeMt5()
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            kill_switch=kill_switch,
+            risk_ledger_lock=RaisingRiskLedgerLock(),
+        )
+
+        # Must not raise — the whole point of AG-024.
+        outcomes = orch.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].capsule_id == capsule.capsule_id
+        assert outcomes[0].event_type == ExecutionEventType.FINAL_RISK_BLOCKED
+        assert outcomes[0].reason_codes == (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,)
+        assert not fake.order_check_requests  # never reached — refused before it
+
+        assert kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in kill_switch.active_reasons
+
+        events = ExecutionEventStore(engine).events_for(outcomes[0].order_request_id)
+        event_types = [event.event_type for event in events]
+        assert event_types == [
+            ExecutionEventType.REQUEST_CLAIMED,
+            ExecutionEventType.FINAL_RISK_BLOCKED,
+        ]
         assert fake.order_send_calls == 0

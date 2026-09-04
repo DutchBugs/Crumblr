@@ -382,6 +382,101 @@ class TestADR021RiskLedgerPersistsEveryCycle:
         assert lock.held_calls == ["EUR/USD", "EUR/USD"]
 
 
+class RaisingRiskLedgerLock:
+    """AG-024: simulates the lock's own acquisition (or anything inside its
+
+    held block — most concretely `RiskSessionStore.save()`, which unlike
+    `load_latest()` has no internal try/except of its own) failing, e.g.
+    a transient database outage. Before AG-024, this had no handling
+    anywhere in `decide_once()`'s own call chain and would have propagated
+    uncaught."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A lock/recover/persist failure must halt and skip the cycle, never
+
+    crash the process or proceed on unknown risk-session state (ADR-021
+    §8)."""
+
+    def test_a_lock_failure_trips_the_kill_switch_and_is_reported_as_a_skip(self) -> None:
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        kill_switch = KillSwitch()
+
+        live = LiveDecisionOrchestrator(
+            config(),
+            market_data=market,
+            broker_state=broker,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=kill_switch,
+            session_store=InMemoryRiskSessionStore(),
+            risk_ledger_lock=RaisingRiskLedgerLock(),
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+
+        # Must not raise — the whole point of AG-024.
+        outcome = live.decide_once()
+
+        assert outcome.skipped
+        assert outcome.skipped_reason is not None
+        assert "risk-ledger lock" in outcome.skipped_reason
+        assert kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in kill_switch.active_reasons
+
+    def test_a_recovered_lock_on_the_next_cycle_proceeds_normally(self) -> None:
+        """The halt is real and does not auto-clear (matching every other
+
+        halt in this codebase) — but a fresh orchestrator against the
+        same durable store, once the lock is healthy again, is not
+        permanently bricked by the earlier failure."""
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        session_store = InMemoryRiskSessionStore()
+
+        failing = LiveDecisionOrchestrator(
+            config(),
+            market_data=market,
+            broker_state=broker,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=KillSwitch(),
+            session_store=session_store,
+            risk_ledger_lock=RaisingRiskLedgerLock(),
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+        failing.decide_once()
+        assert session_store.saves == 0  # the failed cycle persisted nothing
+
+        recovered = LiveDecisionOrchestrator(
+            config(),
+            market_data=market,
+            broker_state=broker,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=KillSwitch(),  # a fresh switch — an operator reset in practice
+            session_store=session_store,
+            risk_ledger_lock=InMemoryRiskLedgerLock(),
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+        outcome = recovered.decide_once()
+
+        assert not outcome.skipped
+        assert session_store.saves == 1
+
+
 class TestD031FeatureValuesArePersisted:
     """Review 1.17 §9 / review 1.18 §8: the actual feature values a decision
 

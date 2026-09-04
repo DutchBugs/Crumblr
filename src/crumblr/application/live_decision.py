@@ -385,11 +385,35 @@ class LiveDecisionOrchestrator:
         # day-rollover branch — `EquityLedger.start_new_session()` is no
         # longer called directly here, `recover_session()` is now the only
         # place that decision is made.
-        with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
-            self._recover_session(account_snapshot, market_day, connection=connection)
-            assert self._ledger is not None
-            self._ledger.update(account_snapshot.equity)
-            self._persist_session(positions, open_risk, now, connection=connection)
+        #
+        # AG-024 (ADR-021 §8): lock acquisition, the recover, and the
+        # persist can all fail for the same underlying reason (the
+        # database is unreachable) — `RiskSessionStore.save()` has no
+        # internal try/except of its own, unlike `load_latest()`, so a
+        # failure here previously had no handling anywhere in the call
+        # chain and would have crashed the whole process. This is not a
+        # data-integrity gap the way an unreadable *record* is — it is
+        # "we could not safely determine or record this cycle's risk
+        # state at all" — so it gets the exact same fail-closed answer:
+        # halt and skip this cycle, never proceed on unknown information
+        # and never take the process down over what may be a transient
+        # database blip the next cycle would recover from on its own.
+        try:
+            with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
+                self._recover_session(account_snapshot, market_day, connection=connection)
+                assert self._ledger is not None
+                self._ledger.update(account_snapshot.equity)
+                self._persist_session(positions, open_risk, now, connection=connection)
+        except Exception as error:
+            _log.error("live_decision.risk_ledger_lock_failed", error=str(error))
+            self._trip(
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                "risk_ledger_lock",
+                now,
+                uuid5(NAMESPACE_URL, f"crumblr:live-lock-failure:{now.isoformat()}"),
+                detail=f"risk-ledger lock/recover/persist failed: {error}",
+            )
+            return self._skip(f"risk-ledger lock/recover/persist failed: {error}")
 
         self._check_loss_gates(now)
         self._check_session_boundary(tick.event_time_utc, positions, now)

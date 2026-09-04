@@ -344,8 +344,112 @@ only.
   AG-012 closes for real (option 1 from its own row, "single shared
   risk-evaluation authority," superseding the interim option-2
   mitigation currently in `decision_path.py`).
-- **PAPER_LITE's own unlocked access remains open** (§1's amendment) —
-  a real, if currently non-safety-critical, gap between this ADR's
-  stated guarantee and what is actually locked. Whoever owns
-  `application/paper_lite.py` next should read §1's amendment before
-  assuming the guarantee is complete.
+- ~~**PAPER_LITE's own unlocked access remains open**~~ — **CLOSED
+  2026-09-04, AG-023.** With the owner explicitly authorizing Dev 2 to
+  cross the file-ownership line (no Dev-3 session ever became
+  available), `_recover_risk_session()`/`_persist_risk_session()` in
+  `application/paper_lite.py` now each acquire
+  `risk_ledger_lock.held(canonical_symbol)` around their own store call.
+  Verified deadlock-safe first (the two PAPER_LITE-side holds never
+  overlap with `evaluate_agent_trade_intent()`'s own internal one,
+  despite all three contending for the same advisory-lock key). **One
+  remaining, explicitly-named tradeoff, not decided here**: the two
+  methods are separately locked, not one atomic critical section the
+  way `decide_once()`'s redesign is — closing that fully would mean
+  moving the persist to run immediately after recovery, but
+  PAPER_LITE's `SimulatedBroker` can fill synchronously within the same
+  `process()` call (unlike the live pipeline), so that change would
+  silently delay a same-cycle fill's P&L bookkeeping by one cycle. Left
+  as a real, documented tradeoff in the method's own docstring, not
+  resolved unilaterally.
+
+## 8. AG-024 amendment — lock/recovery/persist failure must fail closed, not crash
+
+Found by Dev 2's own self-review while closing AG-023, flagged as "your
+call, since it's your design" rather than patched asymmetrically in one
+call site. Decided and implemented here (Dev-1 side); Dev 2 mirrors the
+same shape on their side.
+
+**The gap.** Neither `RiskLedgerLock.held(...)`'s acquisition nor
+`RiskSessionStore.save()` had any exception handling anywhere in the
+call chain. `load_latest()` already degrades gracefully on its own — any
+read failure becomes `SessionRecord(unreadable=...)`, which
+`session.recover_session()`'s `if not record.is_known` branch already
+turns into a `must_halt` recovery — but `save()` has no equivalent
+internal try/except, and acquiring the lock itself (`engine.begin()` /
+the `pg_advisory_xact_lock` call) was completely unprotected. A
+transient database blip during either would have raised an uncaught
+exception all the way out of `decide_once()`/`_process()`, and
+`scripts/live_decision.py`'s own loop only catches `KeyboardInterrupt` —
+so this would have **crashed the whole process**, not merely refused one
+cycle.
+
+**The decision.** Treat a lock/recovery/persist failure exactly the same
+way an unreadable durable record already is: fail closed, halt, skip
+this one cycle — never crash the process, and never proceed on unknown
+risk-session state. This is not a new philosophy, it is applying the one
+this codebase already uses everywhere (`SnapshotCompleteness`,
+`ReconciliationStatus`, `SessionRecord.unreadable`, F-054's decision-
+window recovery) to one place that had been missed. A transient failure
+recovers on its own the next cycle, the same way a stale broker-state
+read already does; a persistent one shows up as a durably logged HALT an
+operator can see and act on, not a silently dead process.
+
+**The shape, deliberately simple rather than making the lock primitive
+itself swallow errors.** Making `RiskLedgerLock.held()` internally
+distinguish "acquisition failed" from "the caller's own code inside the
+block failed" turns out to be genuinely fiddly with a generator-based
+context manager wrapping another context manager (`engine.begin()`) —
+an outer `try/except` around the whole `with self._engine.begin()...`
+block would also (wrongly) catch exceptions raised by the caller's code
+*after* the `yield`, misattributing an unrelated failure to "the lock is
+unavailable." Rather than fight that, the fix lives at each **call
+site**: wrap the entire `with self._risk_ledger_lock.held(...) as
+connection: ...` block (not the primitive itself) in a plain
+`try/except Exception`, log, trip the kill switch with the new
+`ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, and refuse/skip. This also
+gives broader protection for free — it covers a `save()` failure inside
+the block too, not only acquisition, with one mechanism instead of two.
+
+**Where it landed:**
+
+- `application/live_decision.py::LiveDecisionOrchestrator.decide_once()`
+  — wraps the full recover→update→persist block; on failure, trips the
+  kill switch and returns a skip outcome (never raises out of
+  `decide_once()`).
+- `application/execution.py::ExecutionOrchestrator._process()` — wraps
+  the lock-acquisition-plus-`recover_session()` block (its own
+  `load_latest()` already degrades gracefully internally, so this call
+  site's real gap was acquisition itself); on failure, appends
+  `FINAL_RISK_BLOCKED` with the new reason code via the existing
+  `_refuse()` helper, exactly like any other FINAL Risk refusal.
+- `agent_gateway/decision_path.py::evaluate_agent_trade_intent()` and
+  `application/paper_lite.py`'s two methods — Dev 2's side, same shape:
+  wrap the `held()` block, convert to whatever that call site's own
+  existing fail-closed halt mechanism already is, using the same
+  `ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`.
+
+**New `ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`** (`domain/enums.py`,
+additive, shared-contract territory — logged in
+`review/INTEGRATION_NOTICES.md`), in the same `..._STATE_UNKNOWN`-shaped
+family as `SAFETY_STATE_UNKNOWN`/`DECISION_STATE_UNKNOWN`/
+`OPEN_RISK_UNKNOWN`, deliberately its own distinct code rather than
+reusing `SAFETY_STATE_UNKNOWN` — a future operator reading the halt
+reason should be able to tell "the risk-ledger lock/store failed" apart
+from "the safety-state store failed," since they point at different
+subsystems to check.
+
+**Tests:** `tests/unit/test_live_decision.py::TestAG024RiskLedgerLockFailureFailsClosed`
+(2 — a lock failure halts and reports a skip rather than raising; a
+fresh orchestrator against the same durable store, once the lock is
+healthy again, is not permanently bricked by the earlier failure).
+`tests/integration/test_execution_orchestrator.py::TestAG024RiskLedgerLockFailureFailsClosed`
+(1, real PostgreSQL — a lock failure refuses with `FINAL_RISK_BLOCKED`
+and never reaches `order_check`).
+
+**What this does not do.** Does not make `RiskLedgerLock.held()` itself
+retry or degrade — a caller that wants retry-then-give-up semantics
+(none currently do) would build that at its own call site, the same way
+B5's flatten-close retry lives in the flatten driver, not in the lock
+primitive. Does not change what happens once *inside* a successfully
+held lock and a successful `save()` — only the failure path.

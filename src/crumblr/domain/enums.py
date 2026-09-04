@@ -219,6 +219,22 @@ class ReasonCode(StrEnum):
     corrupted idempotence record look identical to a legitimate fresh
     start, which is exactly the failure class F-054 exists to prevent."""
 
+    RISK_LEDGER_LOCK_UNAVAILABLE = "RISK_LEDGER_LOCK_UNAVAILABLE"
+    """AG-024 (found in Dev 2's self-review while closing AG-023,
+
+    2026-09-04): `RiskLedgerLock.held(...)` (ADR-021) — or anything
+    inside its held block, most concretely `RiskSessionStore.save()`,
+    which unlike `load_latest()` has no internal try/except of its own —
+    raised. Before this reason code existed, that exception had no
+    handling anywhere in the chain and would have crashed the whole
+    process (`scripts/live_decision.py`'s own loop only catches
+    `KeyboardInterrupt`). Same fail-closed philosophy as every other
+    `..._STATE_UNKNOWN` member in this group: a failure to safely
+    determine or record the shared risk-ledger state for this cycle
+    halts and skips that cycle rather than proceeding on stale/unknown
+    information or taking down the process. See
+    `review/adr/ADR-021-single-risk-authority-lock.md` §8."""
+
     OPEN_RISK_UNKNOWN = "OPEN_RISK_UNKNOWN"
     """Owner risk policy v1 (D1.4, `review/adr/ADR-011-owner-risk-policy
 

@@ -752,3 +752,46 @@ be built against the real thing on main. Full design/reasoning:
 review/adr/ADR-021-single-risk-authority-lock.md.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-04 - DEV1
+Changed: AG-024 (ADR-021 Sec8). Dev 2 found, while closing AG-023, that
+RiskLedgerLock.held(...) acquisition and RiskSessionStore.save() had no
+exception handling anywhere in the call chain - unlike load_latest(),
+which already degrades to SessionRecord(unreadable=...) on its own, a
+failure here would have raised uncaught out of decide_once()/_process(),
+and scripts/live_decision.py's loop only catches KeyboardInterrupt - a
+transient database blip would have crashed the whole process, not
+refused one cycle. Dev 2 explicitly deferred the fix design to Dev 1
+("your call, since it's your design"). Added ReasonCode
+.RISK_LEDGER_LOCK_UNAVAILABLE (domain/enums.py, additive, same
+..._STATE_UNKNOWN-shaped family as SAFETY_STATE_UNKNOWN/
+DECISION_STATE_UNKNOWN/OPEN_RISK_UNKNOWN but its own distinct code so an
+operator can tell the ledger lock/store apart from the safety-state
+store). Wrapped the whole `with self._risk_ledger_lock.held(...)` block
+(not the lock primitive itself - a generator-context-manager-wrapping-
+another-context-manager approach for the primitive to internally
+distinguish "acquisition failed" from "caller's own code after yield
+failed" proved architecturally messy) in try/except at each Dev-1-owned
+call site: application/live_decision.py::decide_once() (full
+recover-update-persist block; on failure, trips the kill switch and
+returns a skip outcome) and application/execution.py
+::ExecutionOrchestrator._process() (the lock-acquisition-plus-
+recover_session() block; on failure, appends FINAL_RISK_BLOCKED via the
+existing _refuse() helper). Full design reasoning:
+review/adr/ADR-021-single-risk-authority-lock.md Sec8.
+Impact: domain/enums.py is shared-contract territory - additive-only,
+no existing ReasonCode member renamed or removed. No constructor
+signatures changed (this reuses the risk_ledger_lock parameter ADR-021
+already added).
+Action required: Dev 2 - mirror the same shape (wrap the whole
+`with self._risk_ledger_lock.held(...)` block in try/except, convert to
+whatever that call site's own existing fail-closed halt mechanism
+already is) using the same ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE, at
+agent_gateway/decision_path.py::evaluate_agent_trade_intent() and
+application/paper_lite.py's two AG-023 call sites
+(_recover_risk_session()/_persist_risk_session()).
+Relevant commit: (this commit)
+```
