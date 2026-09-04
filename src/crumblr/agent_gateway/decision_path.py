@@ -49,16 +49,28 @@ from a Core-adjacent process that holds the live MT5 connection --
 structurally a sibling of `application/live_decision.py`, not code that
 lives here (confirmed with Dev 1, `review/INTEGRATION_NOTICES.md`).
 
-**AG-012 (`review/AGENT_FEEDBACK.md`).** `risk.policies.evaluate()`'s
-`PortfolioState.ledger` is stateful per-process by design --
-`application/live_decision.py` holds and mutates one across cycles. This
-module deliberately does *not* do that: every call re-derives the ledger
-fresh via `risk.session.recover_session()` rather than caching one across
-calls -- the accepted shadow-only interim mitigation for two independent
-processes each capable of evaluating against the same shared risk budget.
-Not race-free without a single shared risk authority (still required
-before `feedback.2.0` could treat agent-driven submission as real) --
-this narrows the staleness window, it does not close it.
+**AG-012 (`review/AGENT_FEEDBACK.md`) -- CLOSED via ADR-021.** `risk.policies
+.evaluate()`'s `PortfolioState.ledger` is stateful per-process by design --
+`application/live_decision.py` used to hold and mutate one across cycles
+without ever observing a concurrent writer mid-lifetime. This module
+already re-derived the ledger fresh via `risk.session.recover_session()`
+on every call rather than caching one (the original interim mitigation),
+but a fresh read alone is not race-free against a concurrent writer's own
+read-modify-write cycle -- two independent processes could each read the
+same "current" state and one's write could silently clobber the other's.
+ADR-021 closes this for real: every call now acquires
+`RiskLedgerLock.held(canonical_symbol)` around the `load_latest()` call
+below, serializing this read against `LiveDecisionOrchestrator`'s own
+locked recover-update-persist cycle (`application/live_decision.py`) and
+`ExecutionOrchestrator`'s FINAL Risk read (`application/execution.py`,
+included for completeness -- ADR-021 section 5, it was never itself
+racy). This module still never calls `.save()` -- its own critical
+section is `recover` only, not `recover-evaluate-persist`, since it has
+no realized P&L to write back until this path can reach `order_send`
+(confirmed while writing ADR-021's section 4). The lock is released
+before `policies.evaluate()` runs, mirroring `live_decision.py`'s own
+scope (the lock protects the durable read/write, not the CPU-bound
+evaluation against an already-recovered ledger).
 
 **Exact open risk, not a count-based approximation (Owner Policy v1,
 `review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2, D1.4).** The owner's
@@ -157,7 +169,7 @@ from crumblr.domain.timeutils import UtcDatetime
 from crumblr.risk import policies, trading_window
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
-from crumblr.risk.session import RiskSessionStore, recover_session
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore, recover_session
 from crumblr.trading_agent.base import FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
 
@@ -256,6 +268,7 @@ def evaluate_agent_trade_intent(
     config: PlatformConfig,
     portfolio_state: PortfolioStateProvider,
     session_store: RiskSessionStore,
+    risk_ledger_lock: RiskLedgerLock,
     kill_switch: KillSwitch,
     recorder: RunRecorder,
     environment: Environment,
@@ -320,16 +333,19 @@ def evaluate_agent_trade_intent(
         source="agent_gateway",
     )
 
-    # AG-012: recovered fresh on every call, deliberately never cached
-    # across calls -- see the module docstring.
-    recovery = recover_session(
-        session_store.load_latest(),
-        live_equity=portfolio.account.equity,
-        live_open_positions=len(portfolio.open_positions),
-        market_day=trading_day(now),
-        max_daily_loss=config.risk.max_daily_loss,
-        max_drawdown=config.risk.max_drawdown,
-    )
+    # ADR-021 (AG-012/Phase C): recovered fresh on every call, inside the
+    # same symbol-keyed advisory lock LiveDecisionOrchestrator's own
+    # recover-update-persist cycle holds -- see the module docstring. No
+    # `.save()` call here, so the lock's scope is just this one read.
+    with risk_ledger_lock.held(snapshot.symbol) as connection:
+        recovery = recover_session(
+            session_store.load_latest(connection=connection),
+            live_equity=portfolio.account.equity,
+            live_open_positions=len(portfolio.open_positions),
+            market_day=trading_day(now),
+            max_daily_loss=config.risk.max_daily_loss,
+            max_drawdown=config.risk.max_drawdown,
+        )
     if recovery.must_halt:
         _trip(
             kill_switch,

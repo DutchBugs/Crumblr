@@ -1590,6 +1590,87 @@ mypy). Committed `c1f1544`.
 
 ---
 
+## 0w. AG-012 closed for real — `RiskLedgerLock` wired into `decision_path.py` (ADR-021, Phase C) — done 2026-09-04
+
+Cross-session coordination with Dev 1 (`crumblr-59`), same day: Dev 1
+drafted ADR-021 (a Postgres advisory transaction lock, symbol-keyed,
+closing AG-012's original per-process-caching race for real), I reviewed
+the actual draft twice — not the summaries — catching one real interface
+gap before Dev 1 wrote code (`held()`'s first draft required an external
+`connection` neither `LiveDecisionOrchestrator` nor `decision_path.py`
+has a natural source for; fixed to open its own transaction and yield the
+connection out) and one imprecise supporting claim (its "no orchestrator
+code holds an Engine" grep missed `RunRecorder`, which does, privately —
+didn't change the design, but the ADR's stated justification is accurate
+now instead of overstated).
+
+**A genuine gap found while building my own side, not Dev 1's:** checked
+every real caller of `evaluate_agent_trade_intent`, not only this
+module's own tests, and found `application/paper_lite.py
+::PaperLiteOrchestrator._recover_risk_session()`/`_persist_risk_session()`
+is a fourth, unaccounted reader/writer of `risk_session_states` —
+unlocked, and real (`scripts/paper_lite.py` constructs
+`PostgresRiskSessionStore(engine)`, not an in-memory store). Reported to
+Dev 1 immediately rather than sitting on it; Dev 1 independently verified
+by reading the same two files and amended ADR-021 §1/§7 same day
+(`main` at `2275908`) rather than waiting to bundle it. Tracked here as
+AG-023 (`review/AGENT_FEEDBACK.md`) — not fixed in either track's pass,
+since `paper_lite.py`'s own recover/persist design is Dev-3-owned and
+whether/how it should acquire the lock is that track's call, not
+something to bundle into a mechanical Protocol-conformance pass. Not a
+live safety gap today by the same reasoning ADR-021 already applies:
+PAPER_LITE never reaches `order_send` either.
+
+**The actual wiring, `agent_gateway/decision_path.py`:**
+`evaluate_agent_trade_intent()` gained a required `risk_ledger_lock:
+RiskLedgerLock` parameter; the existing fresh-every-call
+`session_store.load_latest()` now runs inside
+`risk_ledger_lock.held(snapshot.symbol)`, with the yielded `connection`
+threaded into `load_latest(connection=...)`. The lock is released before
+`policies.evaluate()` runs — mirrors `live_decision.py`'s own choice to
+protect the durable read/write, not the CPU-bound evaluation against an
+already-recovered ledger. This module still never calls `.save()` (AG-012
+docstring section rewritten to say so plainly, matching ADR-021 §4) — its
+critical section is `recover` only.
+
+**Forced, mechanical downstream fixes** (the same category as Dev 1's own
+one-line fix to my test file for the widened `RiskSessionStore` Protocol):
+`application/paper_lite.py`'s two `evaluate_agent_trade_intent()` calls
+and `PaperLiteOrchestrator.__init__` gained a threaded-through
+`risk_ledger_lock` parameter (explicitly documented at the constructor as
+*not* covering `_recover_risk_session`/`_persist_risk_session` — AG-023);
+`scripts/paper_lite.py` now constructs `PostgresRiskLedgerLock(engine)`
+alongside its existing `PostgresRiskSessionStore(engine)`; both
+`PaperLiteOrchestrator` construction sites in `tests/unit/test_paper_lite.py`
+gained a matching `InMemoryRiskLedgerLock()`.
+
+**New tests**, `tests/unit/test_agent_decision_path.py::TestAG012RiskLedgerLockAcquired`
+(4 tests, a `SpyRiskLedgerLock`/`ConnectionCapturingSessionStore` pair):
+the lock is acquired for exactly the snapshot's canonical symbol; the
+store read runs with the exact connection the lock yielded, not merely
+*some* connection; a NO_TRADE evaluation never acquires the lock (mirrors
+the existing NO_TRADE/session-store test); the lock is released before
+Policy evaluation runs (proven with a non-reentrant fake that asserts if
+entered twice). `TestAG012FreshSessionRecoveryEveryCall`'s existing tests
+are unchanged and still pass — they proved "fresh every call" before this
+change and still do; the new class proves the lock is now the actual
+mechanism, not just a habit.
+
+`review/AGENT_FEEDBACK.md`: AG-012 closed (superseded by ADR-021, option
+1's real single-authority property achieved via the shared lock rather
+than merging the two processes). AG-023 opened (the PAPER_LITE gap
+above).
+
+Evidence: `tests/unit/test_agent_decision_path.py` 33→37 passed.
+`tests/unit/test_paper_lite.py` 20/20 unchanged. Full non-integration
+suite (merged onto `origin/main` at `2275908`, which brought in Dev 1's
+own ADR-021 core-side commits): **1217 passed**, 1 pre-existing unrelated
+skip, 0 failed. ruff/ruff format/mypy clean (197 source files). Full
+gate including integration, against real PostgreSQL
+(`crumblr_test_dev2`), launched the same way as §0v — result to follow.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |

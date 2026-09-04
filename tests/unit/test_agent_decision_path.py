@@ -9,6 +9,8 @@ broker-state capture instead.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -52,7 +54,12 @@ from crumblr.domain.models import (
     PositionState,
 )
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionState
+from crumblr.risk.session import (
+    InMemoryRiskLedgerLock,
+    InMemoryRiskSessionStore,
+    RiskLedgerLock,
+    RiskSessionState,
+)
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import (
     FIXED_NOW,
@@ -145,6 +152,7 @@ class Fixture:
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
+    risk_ledger_lock: RiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     recorder: RecordingRunRecorder = field(default_factory=RecordingRunRecorder)
     incident_status: IncidentStatus = IncidentStatus.CLEAR
@@ -170,6 +178,7 @@ class Fixture:
                 reconciliation_status=self.reconciliation_status,
             ),
             "session_store": self.session_store,
+            "risk_ledger_lock": self.risk_ledger_lock,
             "kill_switch": self.kill_switch,
             "recorder": self.recorder,
             "environment": Environment.PAPER,
@@ -518,6 +527,106 @@ class TestAG012FreshSessionRecoveryEveryCall:
         assert second.risk_decision is not None
         assert second.risk_decision.verdict is RiskVerdict.BLOCK
         assert ReasonCode.SYSTEM_HALTED in second.risk_decision.reason_codes
+
+
+class SpyRiskLedgerLock:
+    """Records every `held()` call and the sentinel connection it yields --
+    proves this module actually acquires ADR-021's lock around its
+    `session_store.load_latest()` read, not merely that a fresh read still
+    happens (`TestAG012FreshSessionRecoveryEveryCall` above already proved
+    that part; this proves the lock is the mechanism now, not just a
+    fresh-every-call habit)."""
+
+    def __init__(self) -> None:
+        self.held_for: list[str] = []
+        self.connection = object()
+
+    @contextmanager
+    def held(self, canonical_symbol: str) -> Iterator[Any]:
+        self.held_for.append(canonical_symbol)
+        yield self.connection
+
+
+class ConnectionCapturingSessionStore(InMemoryRiskSessionStore):
+    """Records the `connection` it was called with, so a test can assert
+    it is exactly the one the lock yielded -- not merely that some
+    connection was passed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_latest_connections: list[Any] = []
+
+    def load_latest(self, *, connection: Any = None) -> Any:
+        self.load_latest_connections.append(connection)
+        return super().load_latest(connection=connection)
+
+
+class TestAG012RiskLedgerLockAcquired:
+    """ADR-021: the fresh-every-call recovery above now runs inside
+    `RiskLedgerLock.held(canonical_symbol)`, serializing this read against
+    `LiveDecisionOrchestrator`'s own locked recover-update-persist cycle
+    and `ExecutionOrchestrator`'s FINAL Risk read -- not merely re-reading
+    the store, which alone is not race-free against a concurrent writer's
+    read-modify-write (AG-012's original finding)."""
+
+    def test_the_lock_is_acquired_for_the_snapshot_canonical_symbol(self) -> None:
+        lock = SpyRiskLedgerLock()
+        fixture = Fixture(risk_ledger_lock=lock)
+        assert fixture.snapshot is not None
+
+        fixture.evaluate(agent_intent())
+
+        assert lock.held_for == [fixture.snapshot.symbol]
+
+    def test_the_store_read_runs_inside_the_lock_yielded_connection(self) -> None:
+        lock = SpyRiskLedgerLock()
+        store = ConnectionCapturingSessionStore()
+        fixture = Fixture(risk_ledger_lock=lock, session_store=store)
+
+        fixture.evaluate(agent_intent())
+
+        assert store.load_latest_connections == [lock.connection]
+
+    def test_a_no_trade_evaluation_never_acquires_the_lock(self) -> None:
+        """Mirrors `TestNoTrade::test_no_trade_never_touches_the_risk_session_store`
+        -- NO_TRADE cannot breach a loss gate, so there is nothing here to
+        serialize against a concurrent writer for."""
+        lock = SpyRiskLedgerLock()
+        fixture = Fixture(risk_ledger_lock=lock)
+
+        fixture.evaluate(None)
+
+        assert lock.held_for == []
+
+    def test_the_lock_is_released_before_policy_evaluation_runs(self) -> None:
+        """The lock's scope is `recover` only, matching `live_decision.py`'s
+        own choice to release before the CPU-bound Risk/Policy evaluation
+        -- proven here by a lock whose `held()` raises if entered twice
+        (would happen if some later step tried to re-acquire it while
+        still "held", the way a non-reentrant real Postgres advisory lock
+        held twice by the same session would just silently stack rather
+        than deadlock, masking a scoping bug)."""
+
+        class SingleEntryLock(SpyRiskLedgerLock):
+            def __init__(self) -> None:
+                super().__init__()
+                self._entered = False
+
+            @contextmanager
+            def held(self, canonical_symbol: str) -> Iterator[Any]:
+                assert not self._entered, "lock re-entered while still held"
+                self._entered = True
+                try:
+                    with super().held(canonical_symbol) as connection:
+                        yield connection
+                finally:
+                    self._entered = False
+
+        fixture = Fixture(risk_ledger_lock=SingleEntryLock())
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
 
 
 class TestReplaySafety:

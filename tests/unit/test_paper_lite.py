@@ -53,7 +53,11 @@ from crumblr.persistence.paper_lite import (
     PaperJournalEventType,
 )
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionState
+from crumblr.risk.session import (
+    InMemoryRiskLedgerLock,
+    InMemoryRiskSessionStore,
+    RiskSessionState,
+)
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import FIXED_NOW, make_instrument_spec, make_snapshot, paper_config_payload
 
@@ -143,6 +147,7 @@ class Fixture:
     path: Path
     directional: bool = True
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
+    risk_ledger_lock: InMemoryRiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
 
     def build(self) -> tuple[PaperLiteOrchestrator, DurablePaperBroker]:
         lite_settings = settings(self.path)
@@ -185,6 +190,7 @@ class Fixture:
             broker=broker,
             recorder=NullRecorder(),
             session_store=self.session_store,
+            risk_ledger_lock=self.risk_ledger_lock,
             kill_switch=KillSwitch(),
             code_commit="test-commit",
             incident_clear_assertion=PaperLiteIncidentClearAssertion(
@@ -235,6 +241,7 @@ class TestTypedPaperOnlyBoundary:
                 broker=broker,
                 recorder=NullRecorder(),
                 session_store=InMemoryRiskSessionStore(),
+                risk_ledger_lock=InMemoryRiskLedgerLock(),
                 kill_switch=KillSwitch(),
                 code_commit="test",
             )

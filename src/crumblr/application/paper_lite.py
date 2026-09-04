@@ -75,7 +75,7 @@ from crumblr.persistence.paper_lite import (
 )
 from crumblr.risk import session
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
-from crumblr.risk.session import RiskSessionStore
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
 from crumblr.trading_agent.sessions import (
     NEW_YORK,
     WEEK_CLOSE_HOUR_ET,
@@ -351,6 +351,13 @@ class PaperLiteOrchestrator:
         broker: DurablePaperBroker,
         recorder: RunRecorder,
         session_store: RiskSessionStore,
+        # Forced by ADR-021's widened `evaluate_agent_trade_intent` signature
+        # -- threaded through to the two calls below unchanged. This class's
+        # own `_recover_risk_session()`/`_persist_risk_session()` pair does
+        # *not* acquire this lock (AG-023, `review/AGENT_FEEDBACK.md`):
+        # whether/how PAPER_LITE's separate recover/persist cycle should is
+        # a Dev-3 design decision, not made here.
+        risk_ledger_lock: RiskLedgerLock,
         kill_switch: KillSwitch,
         code_commit: str,
         incident_clear_assertion: PaperLiteIncidentClearAssertion | None = None,
@@ -369,6 +376,7 @@ class PaperLiteOrchestrator:
         self._broker = broker
         self._recorder = recorder
         self._session_store = session_store
+        self._risk_ledger_lock = risk_ledger_lock
         self._kill_switch = kill_switch
         self._code_commit = code_commit
         self._incident_clear_assertion = incident_clear_assertion
@@ -541,6 +549,7 @@ class PaperLiteOrchestrator:
                 config=self._config,
                 portfolio_state=PaperLitePortfolioProvider(self._broker),
                 session_store=self._session_store,
+                risk_ledger_lock=self._risk_ledger_lock,
                 kill_switch=self._kill_switch,
                 recorder=self._recorder,
                 environment=Environment.PAPER,
@@ -613,6 +622,7 @@ class PaperLiteOrchestrator:
             config=self._config,
             portfolio_state=PaperLitePortfolioProvider(self._broker),
             session_store=self._session_store,
+            risk_ledger_lock=self._risk_ledger_lock,
             kill_switch=self._kill_switch,
             recorder=self._recorder,
             environment=Environment.PAPER,
