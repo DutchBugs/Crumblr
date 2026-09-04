@@ -67,6 +67,7 @@ from crumblr.domain.models import ApprovedOrder, ExecutionResult, InstrumentSpec
 from crumblr.domain.money import ZERO, ExactDecimal
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.simulated import ClosedTrade
+from crumblr.observability.logging import get_logger
 from crumblr.persistence.paper_lite import (
     PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
@@ -75,13 +76,15 @@ from crumblr.persistence.paper_lite import (
 )
 from crumblr.risk import session
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
-from crumblr.risk.session import RiskSessionStore
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
 from crumblr.trading_agent.sessions import (
     NEW_YORK,
     WEEK_CLOSE_HOUR_ET,
     is_market_open,
     trading_day,
 )
+
+_log = get_logger("paper_lite")
 
 PAPER_LITE_MODE: Literal["PAPER_LITE"] = "PAPER_LITE"
 PAPER_LITE_POLICY_VERSION = "owner-risk-policy-v1-paper-lite"
@@ -351,6 +354,13 @@ class PaperLiteOrchestrator:
         broker: DurablePaperBroker,
         recorder: RunRecorder,
         session_store: RiskSessionStore,
+        # Forced by ADR-021's widened `evaluate_agent_trade_intent` signature
+        # -- threaded through to the two calls below unchanged. This class's
+        # own `_recover_risk_session()`/`_persist_risk_session()` pair does
+        # *not* acquire this lock (AG-023, `review/AGENT_FEEDBACK.md`):
+        # whether/how PAPER_LITE's separate recover/persist cycle should is
+        # a Dev-3 design decision, not made here.
+        risk_ledger_lock: RiskLedgerLock,
         kill_switch: KillSwitch,
         code_commit: str,
         incident_clear_assertion: PaperLiteIncidentClearAssertion | None = None,
@@ -369,6 +379,7 @@ class PaperLiteOrchestrator:
         self._broker = broker
         self._recorder = recorder
         self._session_store = session_store
+        self._risk_ledger_lock = risk_ledger_lock
         self._kill_switch = kill_switch
         self._code_commit = code_commit
         self._incident_clear_assertion = incident_clear_assertion
@@ -541,6 +552,7 @@ class PaperLiteOrchestrator:
                 config=self._config,
                 portfolio_state=PaperLitePortfolioProvider(self._broker),
                 session_store=self._session_store,
+                risk_ledger_lock=self._risk_ledger_lock,
                 kill_switch=self._kill_switch,
                 recorder=self._recorder,
                 environment=Environment.PAPER,
@@ -613,6 +625,7 @@ class PaperLiteOrchestrator:
             config=self._config,
             portfolio_state=PaperLitePortfolioProvider(self._broker),
             session_store=self._session_store,
+            risk_ledger_lock=self._risk_ledger_lock,
             kill_switch=self._kill_switch,
             recorder=self._recorder,
             environment=Environment.PAPER,
@@ -734,10 +747,38 @@ class PaperLiteOrchestrator:
         )
 
     def _recover_risk_session(self, snapshot: MarketSnapshot) -> None:
+        # AG-023 (`review/AGENT_FEEDBACK.md`): the read is now serialized
+        # against LiveDecisionOrchestrator's/decision_path.py's own
+        # RiskLedgerLock-protected cycles (ADR-021) via the same lock, so
+        # this can no longer observe a torn/uncommitted write from either.
+        # Does not by itself make this method's later, separate
+        # `_persist_risk_session()` call part of the same atomic
+        # transaction -- see that method's own docstring for the honest
+        # remaining gap.
         account = self._broker.account()
         positions = self._broker.positions()
-        record = self._session_store.load_latest()
         market_day = trading_day(snapshot.event_time_utc)
+        # AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`/
+        # `application/execution.py`/`agent_gateway/decision_path.py`'s own
+        # fix): lock acquisition itself was never protected -- a failure
+        # here previously had no handler anywhere in this call chain and
+        # would have propagated as an uncaught exception, unlike an
+        # ordinary store-read failure (`load_latest()` already turns that
+        # into `SessionRecord(unreadable=...)`, handled below via
+        # `record.is_known`/`recover_session()`).
+        try:
+            with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+                record = self._session_store.load_latest(connection=connection)
+        except Exception as error:
+            _log.error("paper_lite.risk_ledger_lock_failed", error=str(error))
+            self._risk_ledger = EquityLedger(starting_equity=account.equity)
+            self._risk_trading_day = market_day
+            self._trip_risk_session(
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                snapshot,
+                f"risk-ledger lock/recover failed: {error}",
+            )
+            return
 
         if record.is_known and record.state is None and positions:
             self._risk_ledger = EquityLedger(starting_equity=account.equity)
@@ -773,6 +814,38 @@ class PaperLiteOrchestrator:
             return
 
     def _persist_risk_session(self) -> None:
+        """AG-023 (`review/AGENT_FEEDBACK.md`): the write is now serialized
+        against the same `RiskLedgerLock` `LiveDecisionOrchestrator`/
+        `decision_path.py` hold (ADR-021) -- closes the torn-write class of
+        the race and means a later `_recover_risk_session()` call (here or
+        in either Core pipeline) is guaranteed to observe this write
+        wholly, never partially.
+
+        **Honest remaining gap, not fixed here:** this method and
+        `_recover_risk_session()` are two separate, independently-locked
+        critical sections, not one atomic recover-update-persist
+        transaction the way `LiveDecisionOrchestrator.decide_once()`'s own
+        ADR-021 redesign is. A concurrent writer could still commit a
+        newer state in the window between this class's own recover call
+        and this call, which this call's own write would then silently
+        overwrite -- a genuine, narrower, but non-zero lost-update window.
+        Closing it fully would mean moving this call to run immediately
+        after `_recover_risk_session()` (mirroring the Core redesign
+        exactly), but unlike `LiveDecisionOrchestrator`, this class's
+        `_broker` can synchronously fill an order *within the same
+        `process()` call*, after `_recover_risk_session()` already ran --
+        moving the persist earlier would silently stop capturing a
+        same-cycle fill's own realized P&L/equity change until the next
+        cycle instead. That is a real behavioral tradeoff for whoever owns
+        this class's fill-timing design, not something to decide
+        unilaterally while closing a locking gap.
+
+        **AG-024**: a failure acquiring the lock, or writing through it, is
+        now fail-closed too (mirrors `_recover_risk_session()`'s own fix
+        and Dev 1's identical fix in `application/live_decision.py`/
+        `application/execution.py`) -- previously neither had any handler
+        anywhere in this call chain.
+        """
         if (
             self._risk_ledger is None
             or self._risk_trading_day is None
@@ -783,16 +856,33 @@ class PaperLiteOrchestrator:
         positions = self._broker.positions()
         open_risk = self._broker.open_risk_assessment()
         self._risk_ledger.update(account.equity)
-        self._session_store.save(
-            session.snapshot(
-                self._risk_ledger,
-                trading_day=self._risk_trading_day,
-                realized_pnl=self._broker.portfolio_view().realized_profit,
-                open_risk_fraction=open_risk.fraction,
-                open_position_count=len(positions),
-                recorded_at_utc=self._risk_recorded_at,
-            )
+        state = session.snapshot(
+            self._risk_ledger,
+            trading_day=self._risk_trading_day,
+            realized_pnl=self._broker.portfolio_view().realized_profit,
+            open_risk_fraction=open_risk.fraction,
+            open_position_count=len(positions),
+            recorded_at_utc=self._risk_recorded_at,
         )
+        # AG-024 (ADR-021 section 8): mirrors `_recover_risk_session()`'s
+        # own fix above -- a lock-acquisition failure here previously had
+        # no handler either, and `RiskSessionStore.save()` has no internal
+        # try/except of its own (unlike `load_latest()`), so this covers
+        # both the lock and the write in one mechanism.
+        try:
+            with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
+                self._session_store.save(state, connection=connection)
+        except Exception as error:
+            _log.error("paper_lite.risk_ledger_lock_failed", error=str(error))
+            self._trip_risk_session_at(
+                (ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+                occurred_at_utc=self._risk_recorded_at,
+                correlation_id=uuid5(
+                    NAMESPACE_URL,
+                    f"crumblr:paper-lite:persist-lock-failure:{self._risk_recorded_at.isoformat()}",
+                ),
+                detail=f"risk-ledger lock/persist failed: {error}",
+            )
 
     def _trip_risk_session(
         self,
@@ -800,13 +890,32 @@ class PaperLiteOrchestrator:
         snapshot: MarketSnapshot,
         detail: str | None,
     ) -> None:
+        self._trip_risk_session_at(
+            reason_codes,
+            occurred_at_utc=snapshot.received_time_utc,
+            correlation_id=snapshot.snapshot_id,
+            detail=detail,
+        )
+
+    def _trip_risk_session_at(
+        self,
+        reason_codes: tuple[ReasonCode, ...],
+        *,
+        occurred_at_utc: UtcDatetime,
+        correlation_id: UUID,
+        detail: str | None,
+    ) -> None:
+        """The timestamp/correlation-id-only core of `_trip_risk_session()`
+        above -- factored out so `_persist_risk_session()` (AG-024, no
+        `MarketSnapshot` on hand, only `self._risk_recorded_at`) can trip
+        through the same mechanism without inventing a second one."""
         if self._kill_switch.is_halted:
             return
         state_before = self._kill_switch.state
         self._kill_switch.trip(
             reason_codes=reason_codes,
             tripped_by="paper_lite_risk_session_recovery",
-            occurred_at_utc=snapshot.received_time_utc,
+            occurred_at_utc=occurred_at_utc,
             detail=detail,
         )
         self._recorder.record(
@@ -817,8 +926,8 @@ class PaperLiteOrchestrator:
                 tripped_by="paper_lite_risk_session_recovery",
                 detail=detail,
             ),
-            correlation_id=snapshot.snapshot_id,
-            occurred_at_utc=snapshot.received_time_utc,
+            correlation_id=correlation_id,
+            occurred_at_utc=occurred_at_utc,
             source="paper_lite",
         )
         self._recorder.flush()

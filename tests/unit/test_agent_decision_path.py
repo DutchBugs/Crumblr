@@ -9,26 +9,56 @@ broker-state capture instead.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from crumblr.agent_gateway.contracts import (
+    AgentIdentity,
+    AgentRole,
+    AgentStatus,
+    ChampionShadowStatus,
+    ExternalSupervisorReviewRecord,
+    ExternalSupervisorVerdict,
+    SupervisorReview,
+    TradeProposal,
+    TradingAssignment,
+)
 from crumblr.agent_gateway.decision_path import (
     AgentDecisionPathResult,
     PortfolioSnapshot,
     evaluate_agent_trade_intent,
 )
 from crumblr.agent_gateway.evidence import build_agent_context_evidence
+from crumblr.agent_gateway.gateway import AgentGateway
+from crumblr.agent_gateway.reference_supervisor import (
+    LOW_CONFIDENCE,
+    ReferenceSupervisor,
+    ReferenceSupervisorConfig,
+)
+from crumblr.agent_gateway.stores import (
+    InMemoryAgentCredentialStore,
+    InMemoryAgentDecisionOutcomeStore,
+    InMemoryAgentIdentityStore,
+    InMemoryDecisionContextBundleStore,
+    InMemoryFeatureEvidenceStore,
+    InMemoryTradingAssignmentStore,
+)
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
+    DataQuality,
+    EntryType,
     Environment,
     IncidentStatus,
     ReasonCode,
     ReconciliationStatus,
     Regime,
     RiskVerdict,
+    SessionState,
     Side,
     SupervisorVerdict,
 )
@@ -38,9 +68,15 @@ from crumblr.domain.models import (
     InstrumentSpec,
     MarketSnapshot,
     PositionState,
+    TradeIntent,
 )
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionState
+from crumblr.risk.session import (
+    InMemoryRiskLedgerLock,
+    InMemoryRiskSessionStore,
+    RiskLedgerLock,
+    RiskSessionState,
+)
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import (
     FIXED_NOW,
@@ -133,6 +169,7 @@ class Fixture:
     open_positions: tuple[PositionState, ...] = ()
     reconciliation_status: ReconciliationStatus = ReconciliationStatus.MATCHED
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
+    risk_ledger_lock: RiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
     recorder: RecordingRunRecorder = field(default_factory=RecordingRunRecorder)
     incident_status: IncidentStatus = IncidentStatus.CLEAR
@@ -158,6 +195,7 @@ class Fixture:
                 reconciliation_status=self.reconciliation_status,
             ),
             "session_store": self.session_store,
+            "risk_ledger_lock": self.risk_ledger_lock,
             "kill_switch": self.kill_switch,
             "recorder": self.recorder,
             "environment": Environment.PAPER,
@@ -177,6 +215,33 @@ def agent_intent(**overrides: Any) -> Any:
     }
     fields.update(overrides)
     return make_intent(**fields)
+
+
+def agent_proposal(**overrides: Any) -> TradeProposal:
+    """A `TradeProposal` for the external-Supervisor wiring tests below --
+    content need not match any particular `agent_intent()`, since the
+    wiring binds proposal and intent explicitly by id/hash, not by
+    field-for-field agreement."""
+    fields: dict[str, Any] = {
+        "proposal_id": uuid4(),
+        "agent_id": uuid4(),
+        "assignment_id": uuid4(),
+        "context_hash": "context-hash-abc",
+        "strategy_artifact_hash": "abc123",
+        "side": Side.BUY,
+        "entry_type": EntryType.MARKET,
+        "reference_price": Decimal("1.08500"),
+        "stop_loss_price": Decimal("1.08000"),
+        "take_profit_price": Decimal("1.09000"),
+        "confidence": 0.8,
+        "requested_risk_fraction": Decimal("0.005"),
+        "reason_codes": ("sweep_and_shift",),
+        "evidence_refs": (),
+        "submitted_at_utc": FIXED_NOW,
+        "expires_at_utc": FIXED_NOW + timedelta(minutes=5),
+    }
+    fields.update(overrides)
+    return TradeProposal.model_validate(fields)
 
 
 class TestNoTrade:
@@ -481,6 +546,151 @@ class TestAG012FreshSessionRecoveryEveryCall:
         assert ReasonCode.SYSTEM_HALTED in second.risk_decision.reason_codes
 
 
+class SpyRiskLedgerLock:
+    """Records every `held()` call and the sentinel connection it yields --
+    proves this module actually acquires ADR-021's lock around its
+    `session_store.load_latest()` read, not merely that a fresh read still
+    happens (`TestAG012FreshSessionRecoveryEveryCall` above already proved
+    that part; this proves the lock is the mechanism now, not just a
+    fresh-every-call habit)."""
+
+    def __init__(self) -> None:
+        self.held_for: list[str] = []
+        self.connection = object()
+
+    @contextmanager
+    def held(self, canonical_symbol: str) -> Iterator[Any]:
+        self.held_for.append(canonical_symbol)
+        yield self.connection
+
+
+class ConnectionCapturingSessionStore(InMemoryRiskSessionStore):
+    """Records the `connection` it was called with, so a test can assert
+    it is exactly the one the lock yielded -- not merely that some
+    connection was passed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_latest_connections: list[Any] = []
+
+    def load_latest(self, *, connection: Any = None) -> Any:
+        self.load_latest_connections.append(connection)
+        return super().load_latest(connection=connection)
+
+
+class TestAG012RiskLedgerLockAcquired:
+    """ADR-021: the fresh-every-call recovery above now runs inside
+    `RiskLedgerLock.held(canonical_symbol)`, serializing this read against
+    `LiveDecisionOrchestrator`'s own locked recover-update-persist cycle
+    and `ExecutionOrchestrator`'s FINAL Risk read -- not merely re-reading
+    the store, which alone is not race-free against a concurrent writer's
+    read-modify-write (AG-012's original finding)."""
+
+    def test_the_lock_is_acquired_for_the_snapshot_canonical_symbol(self) -> None:
+        lock = SpyRiskLedgerLock()
+        fixture = Fixture(risk_ledger_lock=lock)
+        assert fixture.snapshot is not None
+
+        fixture.evaluate(agent_intent())
+
+        assert lock.held_for == [fixture.snapshot.symbol]
+
+    def test_the_store_read_runs_inside_the_lock_yielded_connection(self) -> None:
+        lock = SpyRiskLedgerLock()
+        store = ConnectionCapturingSessionStore()
+        fixture = Fixture(risk_ledger_lock=lock, session_store=store)
+
+        fixture.evaluate(agent_intent())
+
+        assert store.load_latest_connections == [lock.connection]
+
+    def test_a_no_trade_evaluation_never_acquires_the_lock(self) -> None:
+        """Mirrors `TestNoTrade::test_no_trade_never_touches_the_risk_session_store`
+        -- NO_TRADE cannot breach a loss gate, so there is nothing here to
+        serialize against a concurrent writer for."""
+        lock = SpyRiskLedgerLock()
+        fixture = Fixture(risk_ledger_lock=lock)
+
+        fixture.evaluate(None)
+
+        assert lock.held_for == []
+
+    def test_the_lock_is_released_before_policy_evaluation_runs(self) -> None:
+        """The lock's scope is `recover` only, matching `live_decision.py`'s
+        own choice to release before the CPU-bound Risk/Policy evaluation
+        -- proven here by a lock whose `held()` raises if entered twice
+        (would happen if some later step tried to re-acquire it while
+        still "held", the way a non-reentrant real Postgres advisory lock
+        held twice by the same session would just silently stack rather
+        than deadlock, masking a scoping bug)."""
+
+        class SingleEntryLock(SpyRiskLedgerLock):
+            def __init__(self) -> None:
+                super().__init__()
+                self._entered = False
+
+            @contextmanager
+            def held(self, canonical_symbol: str) -> Iterator[Any]:
+                assert not self._entered, "lock re-entered while still held"
+                self._entered = True
+                try:
+                    with super().held(canonical_symbol) as connection:
+                        yield connection
+                finally:
+                    self._entered = False
+
+        fixture = Fixture(risk_ledger_lock=SingleEntryLock())
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+
+
+class RaisingRiskLedgerLock:
+    """AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`'s
+    own test): simulates the lock's own acquisition failing -- e.g. a
+    transient database outage. Before AG-024, this had no handling
+    anywhere in `evaluate_agent_trade_intent`'s own call chain and would
+    have propagated uncaught."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A lock/recover failure must halt and still seal a capsule --
+    never crash the process, and never silently proceed on unknown risk-
+    session state (ADR-021 section 8)."""
+
+    def test_a_lock_failure_trips_the_kill_switch_and_seals_a_blocked_capsule(self) -> None:
+        kill_switch = KillSwitch()
+        fixture = Fixture(risk_ledger_lock=RaisingRiskLedgerLock(), kill_switch=kill_switch)
+
+        # Must not raise -- the whole point of AG-024.
+        result, _ = fixture.evaluate(agent_intent())
+
+        assert kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in kill_switch.active_reasons
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.SYSTEM_HALTED in result.risk_decision.reason_codes
+        # Still evidence, per this module's own "every evaluated window is
+        # evidence, never dropped" rule -- not a `capsule=None` skip the
+        # way `LiveDecisionOutcome` supports, since this module's own
+        # `AgentDecisionPathResult.capsule` is never optional.
+        assert result.capsule.trade_intent is not None
+
+    def test_a_no_trade_evaluation_never_reaches_the_lock_at_all(self) -> None:
+        """NO_TRADE returns before any lock acquisition is attempted --
+        mirrors `TestAG012RiskLedgerLockAcquired`'s own no-trade case; a
+        raising lock must not be reached, let alone tripped over."""
+        fixture = Fixture(risk_ledger_lock=RaisingRiskLedgerLock())
+
+        result, _ = fixture.evaluate(None)  # must not raise
+
+        assert result.risk_decision is None
+
+
 class TestReplaySafety:
     def test_identical_outcome_id_and_content_reseals_the_identical_capsule(self) -> None:
         fixture = Fixture()
@@ -578,3 +788,391 @@ class TestStrategyNeutrality:
         assert result.risk_decision.verdict is RiskVerdict.PASS
         assert result.supervisor_decision is not None
         assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+
+class TestStrategyNeutralityThroughTheRealGateway:
+    """F-066 item 8, taken all the way through `AgentGateway` itself --
+    `TestStrategyNeutrality` above proves this module's own arguments are
+    not special-cased, but a `TradeIntent` built by hand does not prove
+    the *boundary* is strategy-neutral, only this one function. Two
+    independently-registered agents -- different identity, assignment,
+    `StrategyArtifact` hash, and a completely unrelated reason-code
+    vocabulary each -- are onboarded and submit a proposal through the
+    real, unmodified `AgentGateway.submit_trade_proposal`, and the
+    resulting real `TradeIntent`s (not hand-built ones) reach an
+    identical `RiskVerdict.PASS`/`SupervisorVerdict.APPROVE` through this
+    module. Zero code in either `AgentGateway` or `decision_path.py`
+    branches on which agent produced the intent -- the regression proof
+    `feedback.1.28.md` section 10 item 8 calls "a platform was built, not
+    another single-strategy integration.\""""
+
+    def _onboard_and_submit(
+        self,
+        gateway: AgentGateway,
+        snapshot: MarketSnapshot,
+        spec: InstrumentSpec,
+        *,
+        agent_suffix: str,
+        reason_codes: tuple[str, ...],
+        strategy_artifact_hash: str,
+    ) -> TradeIntent:
+        agent_id = uuid4()
+        assignment_id = uuid4()
+        credential_secret = f"secret-{agent_suffix}"
+        gateway.register_identity(
+            AgentIdentity(
+                agent_id=agent_id,
+                role=AgentRole.TRADER,
+                runtime_version=f"{agent_suffix}-v1",
+                service_identity=f"spiffe://crumblr/agents/{agent_suffix}",
+                status=AgentStatus.ACTIVE,
+                registered_at_utc=FIXED_NOW,
+            ),
+            credential_secret=credential_secret,
+        )
+        gateway.issue_assignment(
+            TradingAssignment(
+                assignment_id=assignment_id,
+                assignment_version="assignment-v1",
+                allowed_agent_id=agent_id,
+                canonical_symbol="EUR/USD",
+                timeframe="M5",
+                strategy_artifact_id=uuid4(),
+                strategy_artifact_hash=strategy_artifact_hash,
+                valid_from_utc=FIXED_NOW - timedelta(days=1),
+                valid_until_utc=FIXED_NOW + timedelta(days=30),
+                max_proposals_per_hour=10,
+                allowed_risk_fraction_min=Decimal("0.001"),
+                allowed_risk_fraction_max=Decimal("0.01"),
+                required_evidence_fields=(),
+                supervisor_policy_version="supervisor-policy-v1",
+                environment=Environment.PAPER,
+                champion_shadow_status=ChampionShadowStatus.SHADOW,
+            )
+        )
+        bundle = gateway.publish_context(
+            assignment_id=assignment_id,
+            symbol="EUR/USD",
+            market_snapshot_id=snapshot.snapshot_id,
+            instrument_spec_version=spec.spec_version,
+            portfolio_summary_hash=f"portfolio-{agent_suffix}",
+            session_state=SessionState.OPEN,
+            data_quality=DataQuality.GOOD,
+            now=FIXED_NOW,
+        )
+        proposal = TradeProposal(
+            proposal_id=uuid4(),
+            agent_id=agent_id,
+            assignment_id=assignment_id,
+            context_hash=bundle.content_hash,
+            strategy_artifact_hash=strategy_artifact_hash,
+            side=Side.BUY,
+            entry_type=EntryType.MARKET,
+            reference_price=Decimal("1.08500"),
+            stop_loss_price=Decimal("1.08000"),
+            take_profit_price=Decimal("1.09000"),
+            confidence=0.8,
+            requested_risk_fraction=Decimal("0.005"),
+            reason_codes=reason_codes,
+            evidence_refs=(),
+            submitted_at_utc=FIXED_NOW,
+            expires_at_utc=FIXED_NOW + timedelta(minutes=5),
+        )
+        result = gateway.submit_trade_proposal(
+            agent_id=agent_id,
+            credential_secret=credential_secret,
+            proposal=proposal,
+            now=FIXED_NOW,
+        )
+        assert result.accepted, f"{agent_suffix} proposal rejected: {result.reason}"
+        assert result.trade_intent is not None
+        return result.trade_intent
+
+    def test_two_unrelated_agents_reach_identical_approval_through_the_real_gateway(
+        self,
+    ) -> None:
+        gateway = AgentGateway(
+            identities=InMemoryAgentIdentityStore(),
+            credentials=InMemoryAgentCredentialStore(),
+            assignments=InMemoryTradingAssignmentStore(),
+            contexts=InMemoryDecisionContextBundleStore(),
+            outcomes=InMemoryAgentDecisionOutcomeStore(),
+            feature_evidence=InMemoryFeatureEvidenceStore(),
+        )
+        spec = make_instrument_spec()
+        snapshot = make_snapshot(symbol_spec_version=spec.spec_version)
+
+        alpha_intent = self._onboard_and_submit(
+            gateway,
+            snapshot,
+            spec,
+            agent_suffix="alpha-momentum",
+            reason_codes=("ALPHA_MOMENTUM_BREAK", "ALPHA_VOLUME_CONFIRM"),
+            strategy_artifact_hash="alpha-artifact-v1",
+        )
+        beta_intent = self._onboard_and_submit(
+            gateway,
+            snapshot,
+            spec,
+            agent_suffix="beta-meanrevert",
+            reason_codes=("BETA_MEAN_REVERT_SETUP", "BETA_RSI_DIVERGENCE"),
+            strategy_artifact_hash="beta-artifact-v9",
+        )
+
+        # The Gateway itself already produced genuinely different intents --
+        # not a test artifact, proof the two agents were never merged into
+        # one identity/assignment/artifact along the way.
+        assert alpha_intent.strategy_version != beta_intent.strategy_version
+        assert alpha_intent.reason_codes != beta_intent.reason_codes
+
+        alpha_result, _ = Fixture(spec=spec, snapshot=snapshot).evaluate(
+            alpha_intent, strategy_version=alpha_intent.strategy_version
+        )
+        beta_result, _ = Fixture(spec=spec, snapshot=snapshot).evaluate(
+            beta_intent, strategy_version=beta_intent.strategy_version
+        )
+
+        for label, result, intent in (
+            ("alpha", alpha_result, alpha_intent),
+            ("beta", beta_result, beta_intent),
+        ):
+            assert result.risk_decision is not None, label
+            assert result.risk_decision.verdict is RiskVerdict.PASS, label
+            assert result.supervisor_decision is not None, label
+            assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE, label
+            # The sealed capsule carries each agent's own real identity
+            # through unmodified -- not collapsed onto a shared/default one.
+            assert result.capsule.trade_intent is intent, label
+            assert result.capsule.strategy_version == intent.strategy_version, label
+
+
+class CountingSupervisor:
+    """Wraps a real `ExternalSupervisorProvider` and counts calls -- used
+    to prove the external Supervisor is never asked about a proposal the
+    Policy Gate already refused."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.call_count = 0
+
+    def review(self, **kwargs: Any) -> Any:
+        self.call_count += 1
+        return self._inner.review(**kwargs)
+
+
+class NeverReturnsSupervisor:
+    """Simulates a transport-backed Supervisor that never got a response
+    (a timeout) -- returns `None`, exactly like a real HTTP client would
+    on a failed call."""
+
+    def review(self, **kwargs: Any) -> None:
+        return None
+
+
+class TestExternalSupervisorWiring:
+    """AG-003 (`review/AGENT_FEEDBACK.md`), Phase C
+    (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`): the external
+    Supervisor is a second, distinct veto layer from the strategy-neutral
+    Policy Gate, wired in via an injected `ExternalSupervisorProvider` --
+    never called via HTTP from inside this module."""
+
+    def test_omitting_proposal_and_provider_skips_the_step_entirely(self) -> None:
+        """Backward compatibility: every existing caller (PAPER_LITE
+        included) that does not pass `proposal`/`external_supervisor`
+        must see zero behaviour change."""
+        fixture = Fixture()
+        result, recorder = fixture.evaluate(agent_intent())
+
+        assert result.external_supervisor_outcome is None
+        assert result.external_supervisor_record is None
+        assert not any(source == "external_supervisor" for _, _, _, source in recorder.events)
+
+    def test_a_provider_without_a_proposal_is_also_skipped(self) -> None:
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(agent_intent(), external_supervisor=supervisor)
+        assert result.external_supervisor_outcome is None
+
+    def test_an_approving_reference_supervisor_reaches_approve(self) -> None:
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, recorder = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(confidence=0.9), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.APPROVE
+        assert result.external_supervisor_record is not None
+        assert result.external_supervisor_record.verdict is ExternalSupervisorVerdict.APPROVE
+        # Not durably recorded by decision_path.py itself -- see the
+        # module docstring's "External Supervisor" section for why.
+        assert not any(
+            isinstance(payload, ExternalSupervisorReviewRecord) for payload, *_ in recorder.events
+        )
+
+    def test_a_vetoing_reference_supervisor_does_not_change_risk_or_policy(self) -> None:
+        """The external Supervisor's own VETO is recorded and exposed, but
+        never overwrites/relabels the Policy Gate's own APPROVE -- "two
+        different veto layers" (Phase C's own instruction), never merged
+        into one."""
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.99)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(confidence=0.1), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.VETO
+        assert LOW_CONFIDENCE in result.external_supervisor_outcome.reason_codes
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.PASS
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.APPROVE
+
+    def test_a_missing_supervisor_response_is_unknown_not_a_silent_approval(self) -> None:
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=NeverReturnsSupervisor()
+        )
+
+        assert result.external_supervisor_outcome is not None
+        assert result.external_supervisor_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert result.external_supervisor_record is not None
+        assert result.external_supervisor_record.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert result.external_supervisor_record.review_id is None
+
+    def test_two_different_outcomes_for_the_same_proposal_get_different_record_ids(self) -> None:
+        """Self-review regression: `record_id` must not collide when the
+        same proposal/intent pair produces two different outcomes over
+        time (e.g. a timeout on one attempt, a real APPROVE on a retry) --
+        keyed on outcome content, not only `trade_intent_decision_hash`."""
+        intent = agent_intent()
+        the_proposal = agent_proposal()
+        fixture = Fixture()
+
+        unknown_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=NeverReturnsSupervisor()
+        )
+        approve_result, _ = fixture.evaluate(
+            intent,
+            proposal=the_proposal,
+            external_supervisor=ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            ),
+        )
+
+        assert unknown_result.external_supervisor_record is not None
+        assert approve_result.external_supervisor_record is not None
+        assert (
+            unknown_result.external_supervisor_record.record_id
+            != approve_result.external_supervisor_record.record_id
+        )
+
+    def test_two_different_unknown_reasons_also_get_different_record_ids(self) -> None:
+        """Self-review regression, second pass: the first fix keyed
+        `record_id` on `verdict`/`review_id` alone, which still collides
+        for two different `UNKNOWN` outcomes -- both have `verdict=
+        "UNKNOWN"` and `review_id=None` regardless of *why* they are
+        `UNKNOWN`. `reason_codes` has to be part of the key too."""
+
+        class WrongProposalSupervisor:
+            def review(self, *, proposal: Any, intent: Any, **kwargs: Any) -> SupervisorReview:
+                return ReferenceSupervisor(
+                    ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+                ).review(proposal=agent_proposal(proposal_id=uuid4()), intent=intent, **kwargs)
+
+        intent = agent_intent()
+        the_proposal = agent_proposal()
+        fixture = Fixture()
+
+        no_response_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=NeverReturnsSupervisor()
+        )
+        mismatch_result, _ = fixture.evaluate(
+            intent, proposal=the_proposal, external_supervisor=WrongProposalSupervisor()
+        )
+
+        no_response_outcome = no_response_result.external_supervisor_outcome
+        mismatch_outcome = mismatch_result.external_supervisor_outcome
+        assert no_response_outcome is not None
+        assert mismatch_outcome is not None
+        assert no_response_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert mismatch_outcome.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert no_response_outcome.reason_codes != mismatch_outcome.reason_codes
+        assert no_response_result.external_supervisor_record is not None
+        assert mismatch_result.external_supervisor_record is not None
+        assert (
+            no_response_result.external_supervisor_record.record_id
+            != mismatch_result.external_supervisor_record.record_id
+        )
+
+    def test_the_supervisor_is_never_asked_when_the_policy_gate_does_not_approve(self) -> None:
+        supervisor = CountingSupervisor(
+            ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            )
+        )
+        fixture = Fixture(reconciliation_status=ReconciliationStatus.UNKNOWN)
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.supervisor_decision is not None
+        assert result.supervisor_decision.verdict is SupervisorVerdict.HALT
+        assert supervisor.call_count == 0
+        assert result.external_supervisor_outcome is None
+
+    def test_the_supervisor_is_never_asked_when_risk_blocks(self) -> None:
+        supervisor = CountingSupervisor(
+            ReferenceSupervisor(
+                ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+            )
+        )
+        fixture = Fixture()
+        intent = agent_intent(requested_risk_fraction=Decimal("0.05"))
+        result, _ = fixture.evaluate(
+            intent, proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.risk_decision is not None
+        assert result.risk_decision.verdict is RiskVerdict.BLOCK
+        assert supervisor.call_count == 0
+
+    def test_the_provider_is_passed_the_exact_risk_and_policy_decision_ids(self) -> None:
+        """Proves `evaluate_agent_trade_intent` threads the real
+        `risk_decision.decision_id`/`supervisor_decision.decision_id`
+        into the `ExternalSupervisorProvider.review()` call, and that
+        `ReferenceSupervisor` correctly echoes them into the
+        `SupervisorReview` it builds -- **not** that
+        `evaluate_supervisor_review()` would reject a review carrying the
+        wrong ones. It does not check `risk_decision_id`/
+        `policy_gate_decision_id` at all (self-review finding, tracked as
+        a known gap in `review/AGENT_FEEDBACK.md` AG-003 rather than
+        silently expanded here): those two fields are documented as
+        optional/audit-completing on `SupervisorReview`, not part of the
+        binding `evaluate_supervisor_review()` enforces today
+        (`proposal_id`/`trade_intent_id`/`trade_intent_decision_hash`/
+        expiry only)."""
+        supervisor = ReferenceSupervisor(
+            ReferenceSupervisorConfig(supervisor_agent_id=uuid4(), min_confidence=0.0)
+        )
+        fixture = Fixture()
+        result, _ = fixture.evaluate(
+            agent_intent(), proposal=agent_proposal(), external_supervisor=supervisor
+        )
+
+        assert result.external_supervisor_outcome is not None
+        review = result.external_supervisor_outcome.review
+        assert review is not None
+        assert result.risk_decision is not None
+        assert result.supervisor_decision is not None
+        assert result.capsule.trade_intent is not None
+        assert review.risk_decision_id == result.risk_decision.decision_id
+        assert review.policy_gate_decision_id == result.supervisor_decision.decision_id
+        assert review.trade_intent_id == result.capsule.trade_intent.intent_id

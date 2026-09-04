@@ -49,16 +49,45 @@ from a Core-adjacent process that holds the live MT5 connection --
 structurally a sibling of `application/live_decision.py`, not code that
 lives here (confirmed with Dev 1, `review/INTEGRATION_NOTICES.md`).
 
-**AG-012 (`review/AGENT_FEEDBACK.md`).** `risk.policies.evaluate()`'s
-`PortfolioState.ledger` is stateful per-process by design --
-`application/live_decision.py` holds and mutates one across cycles. This
-module deliberately does *not* do that: every call re-derives the ledger
-fresh via `risk.session.recover_session()` rather than caching one across
-calls -- the accepted shadow-only interim mitigation for two independent
-processes each capable of evaluating against the same shared risk budget.
-Not race-free without a single shared risk authority (still required
-before `feedback.2.0` could treat agent-driven submission as real) --
-this narrows the staleness window, it does not close it.
+**AG-012 (`review/AGENT_FEEDBACK.md`) -- CLOSED via ADR-021.** `risk.policies
+.evaluate()`'s `PortfolioState.ledger` is stateful per-process by design --
+`application/live_decision.py` used to hold and mutate one across cycles
+without ever observing a concurrent writer mid-lifetime. This module
+already re-derived the ledger fresh via `risk.session.recover_session()`
+on every call rather than caching one (the original interim mitigation),
+but a fresh read alone is not race-free against a concurrent writer's own
+read-modify-write cycle -- two independent processes could each read the
+same "current" state and one's write could silently clobber the other's.
+ADR-021 closes this against every call site it names: every call here now
+acquires `RiskLedgerLock.held(canonical_symbol)` around the `load_latest()`
+call below, serializing this read against `LiveDecisionOrchestrator`'s own
+locked recover-update-persist cycle (`application/live_decision.py`) and
+`ExecutionOrchestrator`'s FINAL Risk read (`application/execution.py`,
+included for completeness -- ADR-021 section 5, it was never itself
+racy). `application/paper_lite.py::PaperLiteOrchestrator` (AG-023, found
+while wiring this side) was a fourth party ADR-021 §1 originally missed --
+now also lock-protected, though its own recover and persist remain two
+separately-locked calls rather than one atomic cycle (see that class's
+own docstring for the honest, narrower remaining gap there). This module
+still never calls `.save()` -- its own critical section is `recover`
+only, not `recover-evaluate-persist`, since it has no realized P&L to
+write back until this path can reach `order_send` (confirmed while
+writing ADR-021's section 4). The lock is released before
+`policies.evaluate()` runs, mirroring `live_decision.py`'s own scope (the
+lock protects the durable read/write, not the CPU-bound evaluation
+against an already-recovered ledger).
+
+**AG-024 (ADR-021 section 8) -- lock-acquisition failure now fail-closed
+too.** Mirrors `application/live_decision.py`/`application/execution.py`'s
+own fix: a failure acquiring the lock or opening its transaction
+previously had no handler anywhere in this call chain and would have
+propagated as an uncaught exception, unlike an ordinary store-read
+failure (`load_latest()` already turns that into
+`SessionRecord(unreadable=...)`, which `recover_session()` already turns
+into `must_halt`). The `try`/`except` below synthesizes the same halted
+`SessionRecovery` shape `risk.session._halt()` returns for its own
+internal failures, so the existing `recovery.must_halt` handling runs
+unchanged rather than needing a second, parallel halt path.
 
 **Exact open risk, not a count-based approximation (Owner Policy v1,
 `review/OWNER_WORK_ORDERS_2026-09-02.md` D2.2, D1.4).** The owner's
@@ -81,6 +110,39 @@ re-implement that fail-closed check itself -- doing so once produced a
 weaker, diverging `HALT`-based version of a decision Core already owns
 correctly (D-052's original design, superseded here now that D1.4
 exists).
+
+**External Supervisor (AG-003, Phase C
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`).** A second,
+distinct veto layer from the strategy-neutral Policy Gate above -- "Do
+not overwrite or relabel the platform Policy decision as the external
+Supervisor approval" (Phase C's own instruction). Runs only after the
+Policy Gate itself `APPROVE`s (asking an already-refused proposal for a
+second opinion is pointless), and only when the caller supplies both a
+`proposal` and an `external_supervisor` provider -- both default to
+`None`, so a caller with nothing to ask (PAPER_LITE's explicit
+Supervisor-skip, or any not-yet-updated caller) is entirely unaffected,
+exactly as before this was added. `supervisor_review.py
+::evaluate_supervisor_review()` -- already built, previously unwired --
+does the actual binding/expiry/self-reported-`UNKNOWN` enforcement; this
+module only supplies it a `SupervisorReview | None` via the injected
+`ExternalSupervisorProvider` (the same "no HTTP client here, no MT5
+here" injection discipline `PortfolioStateProvider` already follows) and
+builds a normalized `ExternalSupervisorReviewRecord`, regardless of
+whether a genuine review arrived. Both are returned on
+`AgentDecisionPathResult` (`external_supervisor_outcome`/
+`external_supervisor_record`), deliberately **not** durably recorded by
+this module itself via `recorder.record()`: `ExternalSupervisorReviewRecord`
+is an agent_gateway-owned `Contract`, and Core's event journal
+(`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry of
+Core-owned payload types -- registering it there would require
+`domain/` to import from `agent_gateway/`, inverting this codebase's
+one-way dependency direction (`agent_gateway` depends on `domain`, never
+the reverse). Nor is it folded into `DecisionCapsule`, which has no
+field for it yet -- a Core-owned type this module does not modify
+unilaterally. A caller that needs this durably kept persists it through
+its own appropriate mechanism (e.g. `AgentDecisionOutcomeStore
+.append_event`) until either a proper cross-track extension to the
+event journal or a capsule field exists.
 """
 
 from __future__ import annotations
@@ -89,6 +151,15 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from crumblr.agent_gateway.contracts import (
+    ExternalSupervisorReviewRecord,
+    SupervisorReview,
+    TradeProposal,
+)
+from crumblr.agent_gateway.supervisor_review import (
+    SupervisorReviewOutcome,
+    evaluate_supervisor_review,
+)
 from crumblr.application.recording import RunRecorder
 from crumblr.config import PlatformConfig
 from crumblr.domain.enums import (
@@ -112,12 +183,20 @@ from crumblr.domain.models import (
     VersionTag,
 )
 from crumblr.domain.timeutils import UtcDatetime
+from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, trading_window
-from crumblr.risk.kill_switch import KillSwitch
+from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
-from crumblr.risk.session import RiskSessionStore, recover_session
+from crumblr.risk.session import (
+    RiskLedgerLock,
+    RiskSessionStore,
+    SessionRecovery,
+    recover_session,
+)
 from crumblr.trading_agent.base import FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
+
+_log = get_logger("agent_decision_path")
 
 POLICY_VERSION = "external-agent-policy-v1"
 """Names what a `SupervisorDecision` sealed by this module actually means
@@ -157,17 +236,50 @@ class PortfolioSnapshot:
     reconciliation_status: ReconciliationStatus
 
 
+class ExternalSupervisorProvider(Protocol):
+    """A source of external-Supervisor review for one proposal/intent
+    pair.
+
+    Deliberately injected, not called via HTTP from inside this module --
+    the same "no MT5, no HTTP client here" discipline `PortfolioStateProvider`
+    and `supervisor_review.py` already follow. `reference_supervisor.py
+    ::ReferenceSupervisor` is a real, deterministic, in-process
+    implementation; a future transport-backed implementation may return
+    `None` for a genuine timeout/transport failure -- `evaluate_supervisor_review()`
+    already treats that identically to any other missing response.
+    """
+
+    def review(
+        self,
+        *,
+        proposal: TradeProposal,
+        intent: TradeIntent,
+        risk_decision_id: UUID,
+        policy_gate_decision_id: UUID,
+        now: UtcDatetime,
+    ) -> SupervisorReview | None: ...
+
+
 @dataclass(frozen=True)
 class AgentDecisionPathResult:
     """What one Risk -> Policy -> capsule evaluation produced.
 
     `capsule` is always populated -- NO_TRADE, a Risk BLOCK/HALT and a
     Supervisor VETO/HALT are each still sealed as evidence, never dropped.
+    `external_supervisor_outcome`/`external_supervisor_record` are
+    populated only when the caller supplied both a `proposal` and an
+    `external_supervisor` provider and the Policy Gate `APPROVE`d -- see
+    the module docstring's "External Supervisor" section.
+    `external_supervisor_record` is not durably persisted by this module
+    itself (see the same section) -- a caller that needs it kept must
+    persist it through its own mechanism.
     """
 
     capsule: DecisionCapsule
     risk_decision: RiskDecision | None
     supervisor_decision: SupervisorDecision | None
+    external_supervisor_outcome: SupervisorReviewOutcome | None = None
+    external_supervisor_record: ExternalSupervisorReviewRecord | None = None
 
 
 def evaluate_agent_trade_intent(
@@ -181,6 +293,7 @@ def evaluate_agent_trade_intent(
     config: PlatformConfig,
     portfolio_state: PortfolioStateProvider,
     session_store: RiskSessionStore,
+    risk_ledger_lock: RiskLedgerLock,
     kill_switch: KillSwitch,
     recorder: RunRecorder,
     environment: Environment,
@@ -189,6 +302,8 @@ def evaluate_agent_trade_intent(
     seen_decision_hashes: frozenset[str] = frozenset(),
     orders_in_last_hour: int = 0,
     incident_status: IncidentStatus = IncidentStatus.UNKNOWN,
+    proposal: TradeProposal | None = None,
+    external_supervisor: ExternalSupervisorProvider | None = None,
 ) -> AgentDecisionPathResult:
     """Evaluate one Gateway-constructed `TradeIntent` (or NO_TRADE,
     `intent=None`) through intent-time Risk and the strategy-neutral
@@ -208,6 +323,11 @@ def evaluate_agent_trade_intent(
     `evaluator.pretrade.SupervisorContext` uses, so a caller that has not
     wired up a real incident read gets a refusal rather than an unearned
     approval (review finding F-002's rule, restated).
+
+    `proposal`/`external_supervisor` both default to `None` -- omitting
+    either (or both) skips the external Supervisor step entirely, with no
+    other change in behaviour; see the module docstring's "External
+    Supervisor" section.
     """
     portfolio = portfolio_state.current()
 
@@ -238,16 +358,44 @@ def evaluate_agent_trade_intent(
         source="agent_gateway",
     )
 
-    # AG-012: recovered fresh on every call, deliberately never cached
-    # across calls -- see the module docstring.
-    recovery = recover_session(
-        session_store.load_latest(),
-        live_equity=portfolio.account.equity,
-        live_open_positions=len(portfolio.open_positions),
-        market_day=trading_day(now),
-        max_daily_loss=config.risk.max_daily_loss,
-        max_drawdown=config.risk.max_drawdown,
-    )
+    # ADR-021 (AG-012/Phase C): recovered fresh on every call, inside the
+    # same symbol-keyed advisory lock LiveDecisionOrchestrator's own
+    # recover-update-persist cycle holds -- see the module docstring. No
+    # `.save()` call here, so the lock's scope is just this one read.
+    #
+    # AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`/
+    # `application/execution.py`): lock acquisition itself was never
+    # protected anywhere in the chain -- `load_latest()` already turns its
+    # own read failure into `SessionRecord(unreadable=...)`, which
+    # `recover_session()` already turns into `must_halt`, but a failure
+    # acquiring the lock (or opening its transaction) happens *before*
+    # `recover_session()` is ever called, so it previously had no handler
+    # and would have propagated as an uncaught exception. Not a
+    # data-integrity gap the way an unreadable record is -- "we could not
+    # safely determine this cycle's risk state at all" gets the same
+    # fail-closed answer: synthesize the same halted `SessionRecovery`
+    # shape `risk.session._halt()` itself returns for its own internal
+    # failures, so the existing `recovery.must_halt` handling below runs
+    # unchanged rather than needing a second, parallel halt path.
+    try:
+        with risk_ledger_lock.held(snapshot.symbol) as connection:
+            recovery = recover_session(
+                session_store.load_latest(connection=connection),
+                live_equity=portfolio.account.equity,
+                live_open_positions=len(portfolio.open_positions),
+                market_day=trading_day(now),
+                max_daily_loss=config.risk.max_daily_loss,
+                max_drawdown=config.risk.max_drawdown,
+            )
+    except Exception as error:
+        _log.error("agent_decision_path.risk_ledger_lock_failed", error=str(error))
+        recovery = SessionRecovery(
+            ledger=EquityLedger(starting_equity=portfolio.account.equity),
+            trading_day=trading_day(now),
+            resumed=False,
+            reason_codes=(ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,),
+            detail=f"risk-ledger lock/recover failed: {error}",
+        )
     if recovery.must_halt:
         _trip(
             kill_switch,
@@ -350,6 +498,54 @@ def evaluate_agent_trade_intent(
             correlation_id=snapshot.snapshot_id,
         )
 
+    external_supervisor_outcome: SupervisorReviewOutcome | None = None
+    external_supervisor_record: ExternalSupervisorReviewRecord | None = None
+    if (
+        supervisor_decision.verdict is SupervisorVerdict.APPROVE
+        and proposal is not None
+        and external_supervisor is not None
+    ):
+        # Deliberately not folded into the Policy Gate check above: asking
+        # the external Supervisor about a proposal the Policy Gate already
+        # refused would be pointless (a HALT/VETO already blocks it), and
+        # "Do not overwrite or relabel the platform Policy decision as the
+        # external Supervisor approval" (Phase C) means the two must stay
+        # visibly separate here too, never merged into one verdict.
+        raw_review = external_supervisor.review(
+            proposal=proposal,
+            intent=intent,
+            risk_decision_id=risk_decision.decision_id,
+            policy_gate_decision_id=supervisor_decision.decision_id,
+            now=now,
+        )
+        external_supervisor_outcome = evaluate_supervisor_review(
+            raw_review,
+            proposal_id=proposal.proposal_id,
+            trade_intent_id=intent.intent_id,
+            trade_intent_decision_hash=intent.decision_hash,
+            now=now,
+        )
+        # Not `recorder.record(...)`: `ExternalSupervisorReviewRecord` is
+        # an agent_gateway-owned Contract, and Core's event journal
+        # (`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry
+        # of Core-owned payload types that `domain/` cannot import
+        # agent_gateway types into without inverting this codebase's own
+        # one-way dependency direction (agent_gateway -> domain, never the
+        # reverse -- self-review finding: the original design would have
+        # raised `ValueError: ... is not a registered event payload`
+        # against the real `JournalRecorder` the moment any real caller
+        # supplied a provider). Returned on the result instead; a caller
+        # that wants this durably persisted does so through its own
+        # appropriate mechanism (e.g. `AgentDecisionOutcomeStore
+        # .append_event`, or a future capsule field once Dev 1 adds one).
+        external_supervisor_record = _external_supervisor_record(
+            external_supervisor_outcome,
+            proposal_id=proposal.proposal_id,
+            trade_intent_id=intent.intent_id,
+            trade_intent_decision_hash=intent.decision_hash,
+            now=now,
+        )
+
     capsule = _seal(
         outcome_id=outcome_id,
         snapshot=snapshot,
@@ -366,7 +562,11 @@ def evaluate_agent_trade_intent(
     )
     recorder.seal(capsule)
     return AgentDecisionPathResult(
-        capsule=capsule, risk_decision=risk_decision, supervisor_decision=supervisor_decision
+        capsule=capsule,
+        risk_decision=risk_decision,
+        supervisor_decision=supervisor_decision,
+        external_supervisor_outcome=external_supervisor_outcome,
+        external_supervisor_record=external_supervisor_record,
     )
 
 
@@ -413,6 +613,53 @@ def _trip(
     recorder.flush()
 
 
+def _external_supervisor_record(
+    outcome: SupervisorReviewOutcome,
+    *,
+    proposal_id: UUID,
+    trade_intent_id: UUID,
+    trade_intent_decision_hash: str,
+    now: UtcDatetime,
+) -> ExternalSupervisorReviewRecord:
+    """A normalized record of one external-Supervisor evaluation, ready
+    for a caller to persist -- built whether a genuine review arrived or
+    not, so `UNKNOWN` is exactly as representable as `APPROVE`/`VETO`.
+    This module does not persist it itself (see the module docstring's
+    "External Supervisor" section for why).
+
+    `record_id` is keyed on `proposal_id`, `trade_intent_decision_hash`
+    *and* the outcome's own full content (`verdict`, `reason_codes` and
+    the underlying review's id when one exists) -- not
+    `trade_intent_decision_hash` alone, and not `verdict`/`review_id`
+    alone either (self-review found a first fix that still collided: two
+    different `UNKNOWN` outcomes -- e.g. `NO_SUPERVISOR_RESPONSE` on a
+    timeout, `REVIEW_EXPIRED` on a later retry -- share `verdict="UNKNOWN"`
+    and `review_id=None`, so `reason_codes` has to be part of the key too,
+    not just the two fields that happen to distinguish `APPROVE`/`VETO`
+    from `UNKNOWN`). Two evaluations of the identical proposal/intent pair
+    can genuinely produce different outcomes over time; keying on full
+    content the same way `_platform_policy_decision` already folds
+    `verdict.value` into its own `decision_id` means each distinct outcome
+    gets its own durable identity rather than silently colliding on one
+    `record_id`.
+    """
+    review_id = outcome.review.review_id if outcome.review is not None else None
+    return ExternalSupervisorReviewRecord(
+        record_id=uuid5(
+            NAMESPACE_URL,
+            f"crumblr:external-supervisor-record:{proposal_id}:{trade_intent_decision_hash}:"
+            f"{outcome.verdict.value}:{review_id}:{','.join(outcome.reason_codes)}",
+        ),
+        proposal_id=proposal_id,
+        trade_intent_id=trade_intent_id,
+        trade_intent_decision_hash=trade_intent_decision_hash,
+        verdict=outcome.verdict,
+        reason_codes=outcome.reason_codes,
+        review_id=review_id,
+        evaluated_at_utc=now,
+    )
+
+
 def _risk_context(config: PlatformConfig) -> policies.RiskContext:
     return policies.RiskContext(
         risk=config.risk,
@@ -426,7 +673,13 @@ def _risk_context(config: PlatformConfig) -> policies.RiskContext:
         # `BrokerAccountSnapshot`, which never carries it, build.md section 21).
         # Account identity is verified by reconciliation instead, not by this
         # field, so it is always `None` here rather than risking a false
-        # `WRONG_ACCOUNT` BLOCK against a placeholder value.
+        # `WRONG_ACCOUNT` BLOCK against a placeholder value. `review/DEVIATIONS.md`
+        # D-046's own "Watch for" warns exactly against setting a real
+        # `AccountGuardConfig.expected_login` while callers reconstruct
+        # `AccountState` from a snapshot whose `.login` is a placeholder --
+        # confirmed by Dev 1 (grep across every `RiskContext(expected_login=...)`
+        # site, B7/ADR-017) that this module's own `None` is the identical
+        # case, not something to "fix" independently of that warning.
         expected_login=None,
         expected_currency=config.account_guard.expected_currency,
         expected_leverage=config.account_guard.expected_leverage,

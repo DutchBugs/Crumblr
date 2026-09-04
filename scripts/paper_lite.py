@@ -39,7 +39,7 @@ from crumblr.persistence.features import FeatureSnapshotStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.market_data import MarketDataStore
 from crumblr.persistence.paper_lite import DurablePaperBroker
-from crumblr.persistence.risk_session import PostgresRiskSessionStore
+from crumblr.persistence.risk_session import PostgresRiskLedgerLock, PostgresRiskSessionStore
 from crumblr.persistence.safety_state import CompositeSafetyStateStore, PostgresSafetyStateStore
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.safety_state import FileSafetyStateStore
@@ -182,6 +182,7 @@ def main() -> None:
         broker=broker,
         recorder=JournalRecorder(engine, environment=Environment.PAPER),
         session_store=PostgresRiskSessionStore(engine),
+        risk_ledger_lock=PostgresRiskLedgerLock(engine),
         kill_switch=kill_switch,
         code_commit=args.code_commit,
         incident_clear_assertion=incident_clear_assertion,

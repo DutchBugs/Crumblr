@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -53,7 +55,12 @@ from crumblr.persistence.paper_lite import (
     PaperJournalEventType,
 )
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionState
+from crumblr.risk.session import (
+    InMemoryRiskLedgerLock,
+    InMemoryRiskSessionStore,
+    RiskLedgerLock,
+    RiskSessionState,
+)
 from crumblr.trading_agent.sessions import trading_day
 from tests.conftest import FIXED_NOW, make_instrument_spec, make_snapshot, paper_config_payload
 
@@ -143,6 +150,7 @@ class Fixture:
     path: Path
     directional: bool = True
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
+    risk_ledger_lock: RiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
 
     def build(self) -> tuple[PaperLiteOrchestrator, DurablePaperBroker]:
         lite_settings = settings(self.path)
@@ -185,6 +193,7 @@ class Fixture:
             broker=broker,
             recorder=NullRecorder(),
             session_store=self.session_store,
+            risk_ledger_lock=self.risk_ledger_lock,
             kill_switch=KillSwitch(),
             code_commit="test-commit",
             incident_clear_assertion=PaperLiteIncidentClearAssertion(
@@ -208,6 +217,79 @@ def process_clear(
     spec: InstrumentSpec,
 ) -> Any:
     return orchestrator.process(snapshot, spec, incident_status=IncidentStatus.CLEAR)
+
+
+class SpyRiskLedgerLock:
+    """Records every `held()` call -- proves `_recover_risk_session()`/
+    `_persist_risk_session()` (AG-023) actually acquire the lock, not
+    merely that the parameter exists on the constructor."""
+
+    def __init__(self) -> None:
+        self.held_for: list[str] = []
+
+    @contextmanager
+    def held(self, canonical_symbol: str) -> Iterator[None]:
+        self.held_for.append(canonical_symbol)
+        yield None
+
+
+class TestAG023RiskLedgerLockAcquired:
+    """`_recover_risk_session()`/`_persist_risk_session()` used to read and
+    write `risk_session_states` with no lock at all -- a fourth,
+    unaccounted party against the same table `LiveDecisionOrchestrator`/
+    `decision_path.py` already lock-protect (ADR-021). Each method now
+    acquires `RiskLedgerLock.held(canonical_symbol)` around its own store
+    call -- proven here, not merely asserted in a docstring. This does
+    not make the two calls one atomic critical section (see
+    `_persist_risk_session()`'s own docstring for the honest remaining
+    gap) -- only that each individual read/write is itself lock-protected."""
+
+    def test_one_full_cycle_acquires_the_lock_for_both_recover_and_persist(
+        self, tmp_path: Path
+    ) -> None:
+        lock = SpyRiskLedgerLock()
+        orchestrator, _ = Fixture(
+            tmp_path / "paper.jsonl", directional=False, risk_ledger_lock=lock
+        ).build()
+        snapshot, spec = compatible_snapshot()
+
+        process_clear(orchestrator, snapshot, spec)
+
+        assert lock.held_for
+        assert set(lock.held_for) == {"EUR/USD"}
+        # At least one recover (before the decision) and one persist
+        # (after) -- proven by count, not just presence, so a future
+        # regression that drops one of the two calls is caught.
+        assert len(lock.held_for) >= 2
+
+
+class RaisingRiskLedgerLock:
+    """AG-024 (ADR-021 section 8, mirrors `application/live_decision.py`'s
+    own test): simulates the lock's own acquisition failing -- e.g. a
+    transient database outage. Before AG-024, this had no handling
+    anywhere in `_recover_risk_session()`/`_persist_risk_session()`'s own
+    call chain and would have propagated uncaught."""
+
+    def held(self, canonical_symbol: str) -> Any:
+        raise RuntimeError(f"simulated database outage acquiring the lock for {canonical_symbol}")
+
+
+class TestAG024RiskLedgerLockFailureFailsClosed:
+    """A lock/recover/persist failure must halt, never crash the process
+    or silently proceed on unknown risk-session state (ADR-021 section
+    8) -- mirrors `application/live_decision.py`'s own AG-024 test."""
+
+    def test_a_lock_failure_trips_the_kill_switch_instead_of_raising(self, tmp_path: Path) -> None:
+        orchestrator, _ = Fixture(
+            tmp_path / "paper.jsonl", directional=False, risk_ledger_lock=RaisingRiskLedgerLock()
+        ).build()
+        snapshot, spec = compatible_snapshot()
+
+        # Must not raise -- the whole point of AG-024.
+        process_clear(orchestrator, snapshot, spec)
+
+        assert orchestrator._kill_switch.is_halted
+        assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in orchestrator._kill_switch.active_reasons
 
 
 class TestTypedPaperOnlyBoundary:
@@ -235,6 +317,7 @@ class TestTypedPaperOnlyBoundary:
                 broker=broker,
                 recorder=NullRecorder(),
                 session_store=InMemoryRiskSessionStore(),
+                risk_ledger_lock=InMemoryRiskLedgerLock(),
                 kill_switch=KillSwitch(),
                 code_commit="test",
             )

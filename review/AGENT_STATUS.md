@@ -1406,9 +1406,478 @@ dedicated Dev-2 database as the work order specifies): **1358 passed**,
 3 skipped (pre-existing, unrelated), 0 failed. ruff/ruff format/mypy
 clean.
 
+**Update, same day:** the owner opened and merged PR #2
+(`3e87384`, "Merge pull request #2 from DutchBugs/agent/contracts") —
+Phase 0 is fully complete. `agent/contracts` fast-forwarded to match
+`main` exactly, re-pushed.
+
 ---
 
-## 1. Where this track actually stands (as of 2026-09-01, Phase 5 / `feedback.1.26.md`)
+## 0u. External Supervisor wired into the decision path (AG-003 closed), a deterministic reference implementation — done 2026-09-03
+
+Phase C (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`), the task
+the user asked to start after confirming Phase 0's PR merged: "Zijn er
+in de tussentijd voor jou nog openstaande punten?" — the answer was yes,
+and this was the one that did not depend on Dev 1 or the Static Agent
+developer.
+
+`agent_gateway/decision_path.py::evaluate_agent_trade_intent` gained two
+new optional parameters, `proposal: TradeProposal | None = None` and
+`external_supervisor: ExternalSupervisorProvider | None = None` (a new
+`Protocol`, injected the same "no HTTP client here, no MT5 here" way
+`PortfolioStateProvider` already is). Both default to `None`, so every
+existing caller — including PAPER_LITE's two call sites in
+`application/paper_lite.py`, confirmed unmodified — sees zero behaviour
+change; the full unit suite proves this (no existing test needed a
+single edit). When both are supplied, the external Supervisor is asked
+**only** after the strategy-neutral Policy Gate itself `APPROVE`s (never
+before — asking about an already-refused proposal is pointless, and
+"Do not overwrite or relabel the platform Policy decision as the
+external Supervisor approval," Phase C's own instruction, means the two
+must stay visibly separate always, never merged into one verdict).
+`supervisor_review.py::evaluate_supervisor_review()` — built earlier
+this session, never wired anywhere until now — does the actual
+binding/expiry/self-reported-`UNKNOWN` enforcement.
+
+**`agent_gateway/reference_supervisor.py` (new): a real, deterministic,
+in-process Supervisor implementation.** Phase C explicitly permits this
+for the first canary: "If no Supervisor service exists yet, a
+deterministic reference Supervisor in a separate process is acceptable...
+provided it has zero MT5/DB credentials and the exact same
+APPROVE/VETO/UNKNOWN authority limits." `ReferenceSupervisor` checks
+only what a mechanical stand-in can honestly check without domain
+judgment or strategy semantics: that the proposal carries non-empty
+`reason_codes` (auditable rationale) and clears an operator-configured
+`confidence` floor — both already-defined, strategy-neutral
+`TradeProposal` fields. Never reads Risk/Policy state, never sizes,
+mutates, waives Risk, resets HALT or executes. **In-process today, not
+yet a separate process** — the work order's "separate process" framing
+matters for the real DEMO canary trust boundary; an HTTP transport that
+lets this run out-of-process (mirroring `static_agent_client.py`) is
+deliberately deferred, since nothing yet requires it and writing one
+now would be exactly the speculative-code pattern this track avoids.
+
+**Self-review (`/code-review medium`) ran three times this slice and
+found four real issues, all fixed before commit:**
+
+1. `_external_supervisor_record()` tried to durably persist
+   `ExternalSupervisorReviewRecord` via `recorder.record()` — but that
+   type is agent_gateway-owned, and Core's event journal
+   (`domain/events.py::EVENT_PAYLOAD_TYPES`) is a closed registry that
+   cannot reference it without `domain/` importing from `agent_gateway/`,
+   inverting this codebase's one-way dependency direction. Against the
+   real `JournalRecorder`, this would have raised `ValueError: ... is
+   not a registered event payload` the first time any real caller
+   supplied a provider — caught before shipping, not after. Fixed by
+   **not** persisting it from this module at all: both
+   `external_supervisor_outcome` and the new
+   `external_supervisor_record` are returned on
+   `AgentDecisionPathResult` instead, for a caller to persist through
+   its own mechanism. Tracked as AG-022 (`review/AGENT_FEEDBACK.md`) —
+   a real cross-track design question (a generic Core "extension event"
+   mechanism, or routing through `AgentDecisionOutcomeStore`), not
+   decided unilaterally here.
+2. `record_id`'s first draft was keyed on `verdict`/`review_id` only —
+   still collided for two different `UNKNOWN` outcomes (e.g.
+   `NO_SUPERVISOR_RESPONSE` on a timeout, then `REVIEW_EXPIRED` on a
+   retry both share `verdict="UNKNOWN"`/`review_id=None`). Fixed by
+   folding `reason_codes` into the key too; regression-tested with two
+   deliberately different `UNKNOWN` causes for the identical
+   proposal/intent pair.
+3. A test named `test_the_review_binds_to_the_exact_risk_and_policy_
+   decision_ids` actually only proved this module correctly *passes*
+   `risk_decision_id`/`policy_gate_decision_id` to the provider and that
+   `ReferenceSupervisor` echoes them back — not that
+   `evaluate_supervisor_review()` would *reject* a mismatch (it doesn't
+   check those two fields at all). Renamed to
+   `test_the_provider_is_passed_the_exact_risk_and_policy_decision_ids`
+   and documented the real gap honestly in `supervisor_review.py`'s own
+   module docstring rather than silently expanding that module's
+   enforcement scope. Tracked as AG-021.
+4. (Earlier pass) confirmed no correctness bug in the `intent`
+   non-`None` narrowing at the external-Supervisor call site — NO_TRADE
+   returns early before any intent-dependent code runs.
+
+Evidence: `tests/unit/test_reference_supervisor.py` (12 tests — config
+validation, confidence-floor boundary behaviour, binding fields, never
+returns `None`). `tests/unit/test_agent_decision_path.py
+::TestExternalSupervisorWiring` (11 tests — skip-when-omitted,
+skip-without-a-proposal, approve, veto-does-not-change-Risk/Policy,
+missing-response-is-UNKNOWN-not-approval, never-asked-when-Policy-
+refuses and never-asked-when-Risk-blocks via a call-counting spy, exact
+decision-id binding, two `record_id`-collision regressions). Full
+`tests/unit` **1101 passed**, 1 skipped (pre-existing, unrelated), 0
+failed; ruff/ruff format/mypy clean (187 source files). Full gate after
+(unit + integration against `crumblr_test_dev2`): **1380 passed**, 3
+skipped (pre-existing, unrelated), 0 failed.
+
+`review/AGENT_FEEDBACK.md`: AG-003 closed. AG-021 (Supervisor-review
+binding gap) and AG-022 (no durable persistence path yet) opened,
+both LOW severity — order_send stays unreachable from this path
+regardless, so neither is exploitable today.
+
+---
+
+## 0v. Generic neutral-Agent wire envelope moved into Agent Gateway (Phase A item 1) — done 2026-09-04
+
+`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §2 Phase A names this
+track's first post-Phase-C item explicitly: "Move the reusable neutral
+external-Agent HTTP response envelope/adapter into the Agent Gateway
+layer. PAPER_LITE must not be the owner of the production wire contract."
+Confirmed by reading the actual code, not assumed from the work order's
+own description: `application/paper_lite_agent.py::HttpPaperLiteTradingAgent`
+(response-envelope parsing/binding-validation for a neutral-context Agent
+host) and `PAPER_LITE_AGENT_SCHEMA_VERSION` were defined inside the
+PAPER_LITE (Dev-3-owned) application module, not `agent_gateway/` — exactly
+the ownership inversion the work order names. `application/paper_lite.py`
+itself only depends on the `PaperLiteTradingAgent` `Protocol` (duck-typed:
+`agent_id`/`credential_secret`/`decide()`), not on the concrete class, so
+the move does not touch that file at all.
+
+New `agent_gateway/neutral_agent_client.py`: `HttpNeutralAgentClient`,
+`NeutralAgentResponseError`, `NEUTRAL_AGENT_RESPONSE_SCHEMA_VERSION` — the
+Gateway-owned counterpart of `market_context.py`'s outbound
+`AgentMarketContextV1` (that module builds the outbound neutral context;
+this one parses the inbound response into the same authoritative
+`TradeProposal`/`NoTradeDecision` contracts). Transport itself is not
+duplicated — reuses `static_agent_client.evaluate()` (timeout/redirect/
+size-bound stdlib HTTP client) unchanged.
+
+**Deliberately not a same-session rewrite of PAPER_LITE's file.** The work
+order itself splits this: Dev 2 "moves" (creates the canonical, Gateway-
+owned version); a separate line item explicitly assigns "Replace paper-only
+wire-envelope ownership with Dev 2's generic Agent adapter" to **Dev 3**.
+`application/paper_lite_agent.py` and its own test
+(`tests/unit/test_paper_lite_agent.py`) are untouched — rewriting a file and
+test suite this track does not own, unilaterally, risks exactly the kind of
+one-sided cross-track patch this repository's process has repeatedly
+avoided elsewhere (AG-012's own §0n is the clearest precedent). The new
+module's schema-version string (`"neutral-agent-response-1.0"`) is
+therefore deliberately distinct from PAPER_LITE's still-active
+`"paper-lite-agent-1.0"` — nothing in production speaks either value today
+(F-064: no HTTP transport is deployed anywhere), so there is no live wire
+compatibility being broken, and consolidating onto one name is exactly the
+substitution Dev 3's own pass makes next.
+
+Also folded in, since a fresh module was the chance to close a coverage gap
+the original never had: tests for a `TRADE_PROPOSAL` success parse, an
+unsupported `schema_version`, a missing `decision` object, an unsupported
+`decision_type`, and a decision payload that violates the Crumblr contract
+at the `pydantic.ValidationError` layer — none of these had a direct test
+against `HttpPaperLiteTradingAgent` originally (only the `NO_TRADE` success
+case, binding mismatches and a non-200 status were covered).
+
+Evidence: `tests/unit/test_neutral_agent_client.py` (11 tests, all new).
+`uv run ruff check .` / `ruff format --check .` — clean (213 files).
+`uv run mypy` — no issues in 196 source files. Full non-integration suite:
+**1202 passed**, 1 skipped (pre-existing, unrelated), 0 failed — no
+existing test needed a single edit, confirming the move is additive.
+Integration suite launched against the dedicated `crumblr_test_dev2` URL,
+as this track's own convention requires. First attempt reported honestly
+rather than glossed over: no PostgreSQL was reachable in this session's
+environment at that point (234 tests skipped). Docker was available but no
+container was running; started the repo's own documented `crumblr-pg`
+container (`tests/integration/conftest.py`'s own recipe — a stopped
+container from an earlier session already existed under that name, reused
+rather than recreated) against the same `crumblr_test_dev2` database this
+track already uses. Re-ran for real: **249 passed, 2 skipped** (pre-existing
+`test_halt_survives_restart.py` Windows-permission-bits skips, unrelated —
+matches every prior session's own note that Windows does not enforce POSIX
+permission bits), 0 failed, in 411s.
+
+Full gate now genuinely green (unit + integration + ruff + ruff format +
+mypy). Committed `c1f1544`.
+
+---
+
+## 0w. AG-012 closed for real — `RiskLedgerLock` wired into `decision_path.py` (ADR-021, Phase C) — done 2026-09-04
+
+Cross-session coordination with Dev 1 (`crumblr-59`), same day: Dev 1
+drafted ADR-021 (a Postgres advisory transaction lock, symbol-keyed,
+closing AG-012's original per-process-caching race for real), I reviewed
+the actual draft twice — not the summaries — catching one real interface
+gap before Dev 1 wrote code (`held()`'s first draft required an external
+`connection` neither `LiveDecisionOrchestrator` nor `decision_path.py`
+has a natural source for; fixed to open its own transaction and yield the
+connection out) and one imprecise supporting claim (its "no orchestrator
+code holds an Engine" grep missed `RunRecorder`, which does, privately —
+didn't change the design, but the ADR's stated justification is accurate
+now instead of overstated).
+
+**A genuine gap found while building my own side, not Dev 1's:** checked
+every real caller of `evaluate_agent_trade_intent`, not only this
+module's own tests, and found `application/paper_lite.py
+::PaperLiteOrchestrator._recover_risk_session()`/`_persist_risk_session()`
+is a fourth, unaccounted reader/writer of `risk_session_states` —
+unlocked, and real (`scripts/paper_lite.py` constructs
+`PostgresRiskSessionStore(engine)`, not an in-memory store). Reported to
+Dev 1 immediately rather than sitting on it; Dev 1 independently verified
+by reading the same two files and amended ADR-021 §1/§7 same day
+(`main` at `2275908`) rather than waiting to bundle it. Tracked here as
+AG-023 (`review/AGENT_FEEDBACK.md`) — not fixed in either track's pass,
+since `paper_lite.py`'s own recover/persist design is Dev-3-owned and
+whether/how it should acquire the lock is that track's call, not
+something to bundle into a mechanical Protocol-conformance pass. Not a
+live safety gap today by the same reasoning ADR-021 already applies:
+PAPER_LITE never reaches `order_send` either.
+
+**The actual wiring, `agent_gateway/decision_path.py`:**
+`evaluate_agent_trade_intent()` gained a required `risk_ledger_lock:
+RiskLedgerLock` parameter; the existing fresh-every-call
+`session_store.load_latest()` now runs inside
+`risk_ledger_lock.held(snapshot.symbol)`, with the yielded `connection`
+threaded into `load_latest(connection=...)`. The lock is released before
+`policies.evaluate()` runs — mirrors `live_decision.py`'s own choice to
+protect the durable read/write, not the CPU-bound evaluation against an
+already-recovered ledger. This module still never calls `.save()` (AG-012
+docstring section rewritten to say so plainly, matching ADR-021 §4) — its
+critical section is `recover` only.
+
+**Forced, mechanical downstream fixes** (the same category as Dev 1's own
+one-line fix to my test file for the widened `RiskSessionStore` Protocol):
+`application/paper_lite.py`'s two `evaluate_agent_trade_intent()` calls
+and `PaperLiteOrchestrator.__init__` gained a threaded-through
+`risk_ledger_lock` parameter (explicitly documented at the constructor as
+*not* covering `_recover_risk_session`/`_persist_risk_session` — AG-023);
+`scripts/paper_lite.py` now constructs `PostgresRiskLedgerLock(engine)`
+alongside its existing `PostgresRiskSessionStore(engine)`; both
+`PaperLiteOrchestrator` construction sites in `tests/unit/test_paper_lite.py`
+gained a matching `InMemoryRiskLedgerLock()`.
+
+**New tests**, `tests/unit/test_agent_decision_path.py::TestAG012RiskLedgerLockAcquired`
+(4 tests, a `SpyRiskLedgerLock`/`ConnectionCapturingSessionStore` pair):
+the lock is acquired for exactly the snapshot's canonical symbol; the
+store read runs with the exact connection the lock yielded, not merely
+*some* connection; a NO_TRADE evaluation never acquires the lock (mirrors
+the existing NO_TRADE/session-store test); the lock is released before
+Policy evaluation runs (proven with a non-reentrant fake that asserts if
+entered twice). `TestAG012FreshSessionRecoveryEveryCall`'s existing tests
+are unchanged and still pass — they proved "fresh every call" before this
+change and still do; the new class proves the lock is now the actual
+mechanism, not just a habit.
+
+`review/AGENT_FEEDBACK.md`: AG-012 closed (superseded by ADR-021, option
+1's real single-authority property achieved via the shared lock rather
+than merging the two processes). AG-023 opened (the PAPER_LITE gap
+above).
+
+Evidence: `tests/unit/test_agent_decision_path.py` 33→37 passed.
+`tests/unit/test_paper_lite.py` 20/20 unchanged. Full non-integration
+suite (merged onto `origin/main` at `2275908`, which brought in Dev 1's
+own ADR-021 core-side commits): **1217 passed**, 1 pre-existing unrelated
+skip, 0 failed. ruff/ruff format/mypy clean (197 source files). Full
+integration suite, against real PostgreSQL (`crumblr_test_dev2`, the
+same `crumblr-pg` container from §0v): **255 passed, 2 skipped**
+(pre-existing `test_halt_survives_restart.py` Windows-permission-bits
+skips, unrelated), 0 failed, in 1177s (~20 min — the full suite,
+including Dev 1's own new `test_risk_ledger_lock.py` concurrency proof).
+Committed `f0a18ed`, merged Dev 1's ADR-021 amendment on top, pushed.
+
+**Self-review, same day:** `/code-review medium` against the actual
+`agent/contracts` diff (not requested by anyone — the same "solid test
+coverage doesn't rule out a wrong claim in prose" discipline §0a used)
+found one real issue: this module's own docstring said ADR-021 "closes
+this for real" without qualifying that `PaperLiteOrchestrator` (AG-023)
+remains an unlocked party against the same table — a future reader could
+mistake this module's own lock participation for a system-wide guarantee.
+Fixed same day, `aabc2e4`: the claim is now scoped to the call sites
+ADR-021 actually names, with an explicit AG-023 cross-reference. Full
+`test_agent_decision_path.py` re-run (37/37) after the docstring-only
+change; ruff/mypy clean.
+
+---
+
+## 0x. F-066 item 8 proven through the real Gateway, not only decision_path.py's own arguments — done 2026-09-04
+
+With AG-012 closed and the docstring self-review fixed, checked the
+remaining Dev-2 priority list (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`
+Phase A) for the next fully-unblocked item, since Phase A items 3/4 (the
+neutral-context Static Agent proof, the real fork coordination) need the
+external Agent Developer's own runtime work — no session for that
+developer is available, and no code on this side can substitute for it.
+
+Re-read `feedback.1.28.md` §10's actual 9-condition list rather than
+relying on this document's own summary of it (found stale in the
+process — see below). `TestStrategyNeutrality`
+(`tests/unit/test_agent_decision_path.py`) already proved condition 8
+("a second toy/test agent with a deliberately different reason-code
+vocabulary can use the same Core path without Core code changes") — but
+only at `evaluate_agent_trade_intent`'s own argument level, with a
+hand-built `TradeIntent`. That does not prove the *Gateway boundary*
+itself is neutral, only this one function.
+
+New `TestStrategyNeutralityThroughTheRealGateway`: onboards two fully
+independent agents — distinct `AgentIdentity`, `TradingAssignment`,
+`StrategyArtifact` hash, and a completely unrelated reason-code
+vocabulary each (`ALPHA_MOMENTUM_BREAK`/`ALPHA_VOLUME_CONFIRM` vs.
+`BETA_MEAN_REVERT_SETUP`/`BETA_RSI_DIVERGENCE`) — through the real,
+unmodified `AgentGateway.submit_trade_proposal`, then feeds the two
+resulting *real* `TradeIntent`s (not hand-built ones) through
+`evaluate_agent_trade_intent` and asserts both reach an identical
+`RiskVerdict.PASS`/`SupervisorVerdict.APPROVE`, with the sealed capsule
+carrying each agent's own real intent through unmodified. Zero code in
+either `AgentGateway` or `decision_path.py` branches on which agent
+produced the intent.
+
+**Found while doing this: `review/AGENT_FEEDBACK.md`'s F-066 row was
+itself stale**, claiming items B/C (`AgentMarketContextV1`, opaque
+Gateway reason-code handling) "remain open" after both had actually
+shipped (§0l, §0o). Rewritten against the real 9-condition list instead
+of a paraphrase of it: 6 of 9 conditions are now confirmed closed from
+Crumblr's side (1, 3, 4, 5, 6, 9), condition 8 closes with this entry,
+and only conditions 2 and 7 remain — both genuinely fork-dependent (the
+external agent owning its own strategy computation; one HEALTHY Static
+Agent context reaching an honest decision), neither actionable from this
+side alone. This considerably narrows what F-066 was tracking as "several
+items open" down to "one external coordination item, nothing left to
+build on the Crumblr side."
+
+Evidence: `tests/unit/test_agent_decision_path.py` 37→38 passed. Full
+non-integration suite: 1218 passed, 1 pre-existing skip, 0 failed.
+ruff/ruff format/mypy clean. Self-reviewed (`/code-review medium`): no
+findings — the only clean pass this session that found nothing, recorded
+for completeness rather than only recording the passes that caught
+something.
+
+---
+
+## 0y. AG-023 closed: `PaperLiteOrchestrator`'s own risk-session read/write now lock-protected — done 2026-09-04
+
+With every genuinely-unblocked Dev-2 item done (§0v-§0x) and no Dev-3 or
+Static Agent Developer session available, checked with the user before
+crossing a line stated explicitly to Dev 1 ("not fixing this myself —
+`paper_lite.py`'s own recover/persist design is Dev-3-owned"). Confirmed:
+go ahead.
+
+`PaperLiteOrchestrator._recover_risk_session()`/`_persist_risk_session()`
+each now wrap their own `session_store` call in
+`self._risk_ledger_lock.held(self._assignment.canonical_symbol)` — the
+same constructor parameter §0v/§0w already threaded through for the
+Protocol-widening fix, now actually used for its real purpose.
+
+**Verified deadlock-safe before writing anything**, not assumed: re-read
+`process()`'s actual body end to end. `_recover_risk_session()` runs near
+the top (its lock acquired and released before anything else); a *first*
+`_persist_risk_session()` runs shortly after (before any Gateway/decision
+evaluation); `evaluate_agent_trade_intent()` — which independently
+acquires the same lock on its own connection — only runs after that,
+well clear of either PAPER_LITE-side hold; a *second*
+`_persist_risk_session()` call (inside `_outcome()`) runs after
+`evaluate_agent_trade_intent()` has already released its own lock. None
+of these holds ever overlaps another, so there is no nested-acquisition
+deadlock risk between PAPER_LITE's own two locks and `decision_path.py`'s
+internal one, even though all three ultimately contend for the same
+Postgres advisory lock key.
+
+**Deliberately not a full fix, and said so in the code, not just here**:
+this closes the "torn read of a concurrent writer's partial state" class
+of issue and serializes each individual read/write against the real
+Core pipelines' own lock-protected cycles — but `_recover_risk_session()`
+and `_persist_risk_session()` remain two separately-locked calls, not one
+atomic critical section the way `LiveDecisionOrchestrator`'s own ADR-021
+redesign is. A real, narrower lost-update window remains between this
+class's own recover and its own later persist. Closing that fully would
+mean moving the persist to run immediately after recovery — but unlike
+`LiveDecisionOrchestrator`, `PaperLiteOrchestrator`'s `SimulatedBroker`
+can fill an order *within the same `process()` call*, so moving the
+persist earlier would silently stop capturing a same-cycle fill's P&L
+until the next cycle. That is a real behavioral tradeoff for whoever
+owns PAPER_LITE's fill-timing design next, not something to decide
+unilaterally while closing a locking gap — documented plainly in
+`_persist_risk_session()`'s own docstring, not just in this entry.
+
+**Self-review (`/code-review medium`) found one real thing, correctly
+scoped**: `RiskLedgerLock.held(...)` acquisition has no exception
+handling anywhere in the chain — a transient DB/lock failure propagates
+uncaught rather than degrading gracefully the way
+`RiskSessionStore.load_latest()`'s own failure mode was designed to.
+Checked before accepting this as a finding worth recording: is this new,
+or inherited? Grepped `application/live_decision.py` — identical
+property, already reviewed and shipped as part of ADR-021 itself; checked
+`scripts/live_decision.py`'s main loop — only catches `KeyboardInterrupt`,
+so a lock failure there crashes the process exactly the same way. Not a
+regression this fix introduced, and not fixed here — recorded as AG-024,
+a cross-cutting ADR-021 design question for whoever owns that decision
+(most likely Dev 1), not something to patch asymmetrically in only one
+of three-plus call sites.
+
+Evidence: `tests/unit/test_paper_lite.py::TestAG023RiskLedgerLockAcquired`
+(new — one full cycle acquires the lock at least twice, for exactly the
+assignment's canonical symbol). Full `test_paper_lite.py`: 21/21. Full
+non-integration suite: 1219 passed, 1 pre-existing skip, 0 failed.
+ruff/ruff format/mypy clean. Full integration suite, against real
+PostgreSQL (`crumblr_test_dev2`): **255 passed, 2 skipped** (pre-existing
+`test_halt_survives_restart.py` Windows-permission-bits skips,
+unrelated), 0 failed, in 414s. Committed `dda707c`, pushed.
+
+`review/AGENT_FEEDBACK.md`: AG-023 moved to Closed with full resolution;
+AG-024 opened (Open).
+
+---
+
+## 0z. AG-024 mirrored: risk-ledger lock failures fail closed on this side too — done 2026-09-04
+
+Dev 1 decided AG-024's cross-cutting design question (raised in §0y) and
+shipped the fix on their side (`live_decision.py`/`execution.py`,
+`6d51281`, new ADR-021 §8), then handed the exact shape to mirror: wrap
+the entire `with risk_ledger_lock.held(...) as connection: ...` block
+(not the lock primitive — a primitive-level fix would also wrongly catch
+the caller's own post-yield failures) in a plain `try`/`except
+Exception`, log, trip the kill switch with the new
+`ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, then refuse/skip through
+whatever fail-closed mechanism that call site already has.
+
+**`agent_gateway/decision_path.py::evaluate_agent_trade_intent()`**: on
+failure, synthesizes the same halted `SessionRecovery` shape
+`risk.session._halt()` itself returns for its own internal failures
+(`EquityLedger(starting_equity=portfolio.account.equity)`,
+`reason_codes=(ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE,)`) — the existing
+`if recovery.must_halt: _trip(...)` handling below runs completely
+unchanged, so this needed no second, parallel halt path. Kept the
+module's "always seal a capsule" contract intact (`AgentDecisionPathResult
+.capsule` is never optional, unlike `LiveDecisionOutcome`'s own
+`capsule=None` skip state) rather than inventing a new result shape.
+
+**`application/paper_lite.py`'s two AG-023 methods**: `_recover_risk_session()`
+mirrors the same synthesize-and-fall-through-to-`_trip_risk_session()`
+pattern. `_persist_risk_session()` has no `MarketSnapshot` on hand (only
+`self._risk_recorded_at`), so `_trip_risk_session()` was factored into a
+new `_trip_risk_session_at(reason_codes, *, occurred_at_utc,
+correlation_id, detail)` — the original method becomes a one-line
+wrapper over it — so both call sites trip through one mechanism instead
+of `_persist_risk_session()` needing its own copy.
+
+**Self-review caught a real gap before this shipped**: the first pass
+left `paper_lite.py` without the `_log.error(...)` call ADR-021 §8
+explicitly prescribes for every site. Reasoned (wrongly) that since
+`paper_lite.py` has no logger anywhere else, adding one just for this
+would be inconsistent with "local convention" — checked the actual ADR
+text before accepting that reasoning, and it explicitly says "wrap ...
+in a plain try/except Exception, log, trip the kill switch" as the
+shape for all four sites including this one, not a suggestion. Fixed:
+`_log = get_logger("paper_lite")` (new for this module), both except
+blocks now log `"paper_lite.risk_ledger_lock_failed"` before tripping,
+matching `live_decision.py`'s own naming exactly.
+
+New tests: `tests/unit/test_agent_decision_path.py
+::TestAG024RiskLedgerLockFailureFailsClosed` (2 — a lock failure trips
+the switch and still seals a `BLOCK`/`SYSTEM_HALTED` capsule rather than
+raising; NO_TRADE never reaches the lock at all, mirroring
+`TestAG012`'s own no-trade case), `tests/unit/test_paper_lite.py
+::TestAG024RiskLedgerLockFailureFailsClosed` (1 — a lock failure trips
+the switch instead of raising).
+
+Evidence: full non-integration suite **1224 passed**, 1 pre-existing
+skip, 0 failed. ruff/ruff format/mypy clean. Full integration suite,
+against real PostgreSQL (`crumblr_test_dev2`): **256 passed, 2 skipped**
+(pre-existing `test_halt_survives_restart.py` Windows-permission-bits
+skips, unrelated), 0 failed, in 478s.
+
+`review/AGENT_FEEDBACK.md`: AG-024 moved to Closed with full resolution.
+
+---
+
+## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
 |---|---|---|
@@ -1420,9 +1889,11 @@ clean.
 | — shared no-MT5 integration path | `TradeIntent` → intent-time Risk → strategy-neutral Policy → capsule boundary | **DONE, merged, pushed** (`475331f`, strategy-neutral Policy Gate `c50312c` — §0f). |
 | — Static Agent bridge, unhealthy-market smoke | honest transport/schema/identity/HTTP proof against the real fork | **Core wiring + real HTTP client done, merged, pushed** (`34ddbe6`, HTTP client pending push — §0g/§0h/§0j). Response→`NoTradeDecision`→Gateway submission not yet built. |
 | — Agent Gateway event-conflict hardening | `append_event` fail-closed on same-key-different-content | **DONE, merged, pushed** (§0i, this entry). |
-| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Not started** (AG-003), next per the user's current priority order. |
+| — Phase 0 convergence with `main` | rebase/merge, exact-open-risk, PL-006 fixes, PR review | **DONE — corrected 2026-09-04**: PR #2 merged 2026-09-03 (§0t). Table row below was stale. |
+| C — Supervisor boundary | external Supervisor wired in, fail-closed on timeout/error | **Corrected 2026-09-04 — DONE, not committed to `main` yet** (AG-003 closed 2026-09-03, §0u): in-process `ReferenceSupervisor` reference implementation, real transport/AG-012 closure still open. |
+| — Phase A item 1: generic neutral-Agent wire envelope | move the response-envelope/adapter out of PAPER_LITE into Agent Gateway | **DONE 2026-09-04** (§0v) — `agent_gateway/neutral_agent_client.py`. PAPER_LITE's own switch-over is a separate, Dev-3-owned step. |
 | D — research/training plane | artifact registry, Backtest Requests, Training | **Deliberately not started** — out of scope before MVP. |
-| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on C + a HEALTHY genuine Static Agent decision (blocked on fork-side strategy-runtime work, F-066). |
+| E — first agent-driven canary | full Step B/C bundle + Milestone A requirements | **Not started**, blocked on a HEALTHY genuine Static Agent decision (fork-side strategy-runtime work, F-066) and AG-012 closure. |
 
 **Nothing in `src/crumblr/agent_gateway/` or `src/crumblr/persistence/agent_gateway.py`
 is imported by anything outside itself and its own tests** — verified by
@@ -1465,14 +1936,17 @@ this track's own six tables.
 
 ### What's still open
 
-- **The shared no-MT5 integration path** — review 1.26 §7 item 3: wire
-  the constructed `TradeIntent` through intent-time Risk, the
-  deterministic Policy Gate, and `DecisionCapsule` sealing. Next up.
-- **`ProposalWithdrawal` enforcement** — needs the integration path above
-  first (its `SUBMISSION_STARTED`-cutoff rule needs a real execution
-  timeline to check against).
-- **External Supervisor boundary** (AG-003) — review 1.26 §7 item 5,
-  after the integration path.
+- **This list is stale as of 2026-09-04 — see §0f/§0u/§0v.** The shared
+  no-MT5 integration path (review 1.26 §7 item 3) and the External
+  Supervisor boundary (AG-003) are both **done** (§0f, §0u), not "next up."
+  Kept here unedited below as the historical record of what was true at
+  the time this section was written; do not read it as current.
+- **`ProposalWithdrawal` enforcement** — still genuinely open: needs a real
+  execution timeline to check its `SUBMISSION_STARTED`-cutoff rule against,
+  which does not exist while `order_send` is unreachable.
+- AG-012 (single final-Risk authority across the internal and Gateway
+  decision paths) remains open — §0n's design analysis, not yet taken to
+  Dev 1/the reviewer for sign-off.
 - **F-064** — HTTP transport not authorized for remote/public exposure
   yet (not blocking current work).
 

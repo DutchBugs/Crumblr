@@ -476,3 +476,44 @@ class SupervisorReview(Contract):
         if self.expires_at_utc <= self.reviewed_at_utc:
             raise ValueError("expires_at_utc must be after reviewed_at_utc")
         return self
+
+
+class ExternalSupervisorReviewRecord(Contract):
+    """Durable record of one external-Supervisor evaluation outcome
+    (Phase C, `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`:
+    "Bind and persist at least proposal ID, TradeIntent ID + decision
+    hash... review expiry and verdict/reasons").
+
+    Built whether a genuine `SupervisorReview` arrived or not, so a
+    missing/mismatched/expired/self-reported-`UNKNOWN` response is
+    exactly as representable as a real `APPROVE`/`VETO` (guide §9's
+    "every proposal, NO_TRADE, rejection and timeout is auditable" rule,
+    held to for this veto layer too). Deliberately separate from
+    `SupervisorReview` itself: this always exists once a Supervisor was
+    asked; `SupervisorReview` only exists when a genuinely bound response
+    actually arrived.
+
+    Not itself durably persisted by `decision_path.py`
+    (`agent_gateway/decision_path.py::_external_supervisor_record`'s own
+    docstring): Core's event journal is a closed registry of Core-owned
+    payload types that cannot reference this agent_gateway-owned type
+    without inverting the codebase's one-way dependency direction. A
+    caller receiving one via `AgentDecisionPathResult
+    .external_supervisor_record` is responsible for persisting it through
+    its own appropriate mechanism.
+    """
+
+    record_id: UUID
+    proposal_id: UUID
+    trade_intent_id: UUID
+    trade_intent_decision_hash: str
+    verdict: ExternalSupervisorVerdict
+    reason_codes: ReasonCodes
+    review_id: UUID | None = None
+    """The underlying `SupervisorReview.review_id`, when a genuinely bound
+
+    review actually arrived (`verdict` came from `review.verdict` itself,
+    not a fallback `UNKNOWN`). `None` for every `UNKNOWN` produced by a
+    missing/mismatched/expired/self-reported-unknown response -- there is
+    no real review object to reference."""
+    evaluated_at_utc: UtcDatetime
