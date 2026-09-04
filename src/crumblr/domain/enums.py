@@ -256,6 +256,22 @@ class ReasonCode(StrEnum):
     flatten machinery must still be able to attempt a commitment despite
     this specific halt, or it could never recover once tripped."""
 
+    FLATTEN_CLOSE_FAILED = "FLATTEN_CLOSE_FAILED"
+    """Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`): a real
+
+    per-ticket close was genuinely attempted for a committed flatten
+    occurrence, and at least one target position was still open on the
+    fresh broker re-observation taken immediately afterward. Never
+    conflated with `FLATTEN_STATE_UNKNOWN` above (an *unreadable* book) or
+    `OVERNIGHT_EXPOSURE` (no close was ever attempted) — this specifically
+    means an attempt was made and did not fully succeed. Tolerated in
+    `flatten_gate.py::_TOLERATED_HALT_REASONS` for the identical reason
+    those two are: becoming flat is the safe resolution of this halt, not
+    a further risk, so the flatten machinery must be able to retry past a
+    halt it caused itself — resolved by `application/execution.py`'s own
+    idempotent-trip helper, `_trip_flatten_close_failed`, which never
+    auto-clears; only an operator's `reset_halt` does."""
+
     PROTECTIVE_STOP_MISSING = "PROTECTIVE_STOP_MISSING"
     """Core critical path item 9 (`review/feedback.1.26.md`: *"Verify
 
@@ -721,11 +737,17 @@ class FlattenEventType(StrEnum):
     `mt5_magic_number`), this reads the target tickets recorded in the
     commitment event's own payload and checks which are still open — a
     simpler, more direct determination, since the targets were already
-    named. Because `close_all_positions` stays unreachable, this will
-    provably always conclude every target is still open today — the same
-    honest inertness ADR-008 documents for its own positive branch.
-    Idempotent by construction: once appended, `events[-1]` is no longer
-    `FLATTEN_SUBMISSION_STARTED`, so recovery never re-runs."""
+    named. Before Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`),
+    `close_all_positions` was completely unreachable, so this provably
+    always concluded every target was still open — the same honest
+    inertness ADR-008 documents for its own positive branch. Since B5, a
+    real close can genuinely resolve `flattened=True` — but only ever
+    appended once a terminal outcome is actually known (fully closed, or
+    no real attempt was currently possible); a residual after a genuine
+    attempt appends nothing and retries next pass instead
+    (`ReasonCode.FLATTEN_CLOSE_FAILED`). Idempotent by construction: once
+    appended, `events[-1]` is no longer `FLATTEN_SUBMISSION_STARTED`, so
+    recovery never re-runs."""
 
 
 class SnapshotCompleteness(StrEnum):

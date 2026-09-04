@@ -242,16 +242,21 @@ check returns immediately, with no broker read.
 
 ## 3. What this does not do — and scope against ADR-004 §5, explicitly
 
-**`close_all_positions` and `order_send` remain completely unbuilt and
-unreachable.** `OrderCheckMt5Gateway.close_all_positions`/`.order_send`
-are still the same unconditional raises. Nothing in `flatten_once()` or
-anything it calls approaches either. Because no code path in this
-platform can today produce a real close, `_resolve_flatten_outcome()`
-will — provably, in every real case this platform can currently produce
-— always conclude every target is still open (`flattened=False`). That is
-not a weakness of this item; it is the same "real mechanism, structurally
-inert until its caller exists" discipline every prior item on this list
-(2, 3, 5, 6) has used.
+**Historical note, true as of this ADR's original writing, no longer true
+today — see `review/adr/ADR-020-real-flatten-close.md` (Phase B item B5).**
+At the time this ADR was written, `close_all_positions`/`order_send` were
+completely unbuilt and unreachable, and `_resolve_flatten_outcome()`
+provably always concluded every target was still open
+(`flattened=False`) — the same "real mechanism, structurally inert until
+its caller exists" discipline every prior item on this list (2, 3, 5, 6)
+used. B5 built the real per-ticket close: `OrderCheckMt5Gateway`'s two
+methods are still the same unconditional raises, but `DemoOrderSendMt5Gateway`
+(a separate, real, still-unwired-for-entries adapter) now has a real
+`close_position`/`close_all_positions`, and `_resolve_flatten_outcome()`'s
+successor (`_attempt_and_resolve_flatten()`) can genuinely reach
+`flattened=True` — only when a real `FlattenCloseSink` is explicitly
+constructed and injected and `flatten_submission_enabled` reads `True`,
+still false in every shipped config today.
 
 **Nothing here clears, downgrades, or shortens a halt.** A halt this item
 causes stays in force exactly as any other halt does — until an operator
@@ -259,10 +264,10 @@ resets it.
 
 | ADR-004 §5 item | This slice | Why |
 |---|---|---|
-| 1. Automatic flatten, distinct from the manual control | **In scope**, up to the commitment point | Structurally distinct: separate module, tables, event enum, config flag; §2.6 |
-| 2. Retry-then-HALT on a failed flatten | **Deferred — D-050** | There is no way to make a flatten fail while there is no way to make one succeed; real retry logic exercisable only against a fake broker is not real. `FLATTEN_OUTCOME_RESOLVED` gives a future retry mechanism a durable state machine to attach to instead of starting from nothing |
+| 1. Automatic flatten, distinct from the manual control | **In scope**, up to the commitment point. **The close itself: done — Phase B item B5, `review/adr/ADR-020-real-flatten-close.md`** | Structurally distinct: separate module, tables, event enum, config flag; §2.6. B5 adds the real per-ticket close behind the same `flatten_submission_enabled` flag |
+| 2. Retry-then-HALT on a failed flatten | **Done — Phase B item B5** | Real closes now exist, so real retry logic has something genuine to retry against. `FLATTEN_OUTCOME_RESOLVED`'s durable state machine (this ADR) is exactly what B5's retry-then-HALT attaches to — no redesign needed |
 | 3a. Reconcile before flattening | **In scope** | Gate legs — §2.3 |
-| 3b. HALT before the deadline if the broker is unavailable | **Deferred — D-050** | Needs a periodic pre-deadline connectivity watch, a different kind of mechanism belonging near `LiveReader`'s cadence, not a gate evaluated at the deadline. What ships: unavailable-at-the-deadline still closes the gate (`POSITION_BOOK_INCOMPLETE`) and halts — the "after it" half |
+| 3b. HALT before the deadline if the broker is unavailable | **Deferred — D-050** | Needs a periodic pre-deadline connectivity watch, a different kind of mechanism belonging near `LiveReader`'s cadence, not a gate evaluated at the deadline. What ships: unavailable-at-the-deadline still closes the gate (`POSITION_BOOK_INCOMPLETE`) and halts — the "after it" half. Still not built as of B5 |
 | 4. Startup reconciliation of overnight state | **In scope** | `has_crossed_rollover` fires on the very first pass of a fresh process regardless of history; `KillSwitch` already guarantees no auto-clear |
 
 ADR-004 §7's two open owner questions (per-position vs per-book deadline,

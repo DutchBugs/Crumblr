@@ -39,6 +39,16 @@ here either: if the call raises, this function is simply never reached,
 ambiguous-recovery mechanism already resolves that case via broker-state
 recovery — exactly as it does today, no differently (B2's own "no
 automatic retry... uncertainty goes to broker-state recovery" rule).
+
+`close_result_fully_closed()` below (Phase B item B5,
+`review/adr/ADR-020-real-flatten-close.md`) is the one exception to this
+module's "not called yet" framing: `application/execution.py`'s flatten
+driver does construct a real `ExecutionResult` (via
+`mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway.close_position()`)
+and does consult this classification — closes are wired ahead of entries,
+since a policy-driven close needs no `TradeIntent`/Phase-C shared Risk
+authority the way a new entry does. `normalize_execution_result()` above
+stays entry-only and stays unreached, unchanged.
 """
 
 from __future__ import annotations
@@ -81,3 +91,20 @@ def normalize_execution_result(
         "executed_price": str(result.executed_price) if result.executed_price else None,
     }
     return event_type, payload
+
+
+def close_result_fully_closed(result: ExecutionResult) -> bool:
+    """Whether one `close_position()` response means this exact ticket is
+
+    now flat (Phase B item B5, `review/adr/ADR-020-real-flatten-close.md`).
+    **Deliberately conservative**: `OrderState.PARTIALLY_FILLED` returns
+    `False`, not `True` — a partial close leaves real volume still open on
+    the same ticket, and the caller's own fresh broker re-observation (never
+    this classification alone) is what makes the final call on whether a
+    flatten occurrence is resolved (mirrors `normalize_execution_result`'s
+    own "this module durably records what the broker said; it is not an
+    exposure determination" boundary). Full-volume-only close handling is a
+    named, deliberate scope limit — see `review/DEVIATIONS.md` D-050 and
+    `review/adr/ADR-020-real-flatten-close.md` §3.
+    """
+    return result.state is OrderState.FILLED

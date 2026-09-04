@@ -661,3 +661,40 @@ reason_codes, per the adr001_7 convention. Full detail in
 review/adr/ADR-013-restart-recovery-loss-drawdown-check.md SS2.5.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-04 — DEV1
+Changed: Phase B item B5 (review/adr/ADR-020-real-flatten-close.md), the
+last unshipped Phase-B slice. Two shared-contract changes: (1)
+domain/enums.py gains one new ReasonCode member, FLATTEN_CLOSE_FAILED.
+(2) domain/models.py::ExecutionResult.intent_id widens from UUID
+(required) to UUID | None (default None) - a real close attempt
+(mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway.close_position())
+has no TradeIntent behind it, the same reasoning FlattenInstruction's own
+docstring already gives for why it is not ApprovedOrder.
+Impact: both are shared-contract territory per DEV1/DEV2 instructions
+section 4. (1) is additive-only - confirmed via grep, nothing in
+src/crumblr/agent_gateway/ references the new name. (2) is a
+nullable-widening, not a narrowing - confirmed via grep before making the
+change that nothing anywhere reads ExecutionResult.intent_id back out
+(every existing reference is a construction-site intent_id=intent
+.intent_id on unrelated models, not a read of this field), so no existing
+caller/consumer could observe a behaviour change. Also new (not shared,
+Dev-1-owned): application.execution.FlattenCloseSink, a narrow structural
+Protocol application/execution.py uses to reach the real close without
+ever naming the concrete mt5_gateway/demo_execution.py adapter class by
+name - confirmed unchanged by
+tests/unit/test_demo_order_send_gateway.py::TestNotWiredIntoTheOrchestrator's
+mechanical inspect.getsource proof, which still passes. Full suite:
+1426 passed / 3 known skips before this slice's own new tests were added,
+extended and re-confirmed green after.
+Action required: none expected. If Agent Gateway code ever constructs or
+reads an ExecutionResult directly (grep-confirmed: it does not today),
+intent_id may now be None - handle accordingly rather than assuming it is
+always set. If external-agent code ever surfaces BLOCK/HALT reason codes,
+FLATTEN_CLOSE_FAILED is now a live code that can appear on flatten
+(not execution) event history.
+Relevant commit: (this commit)
+```

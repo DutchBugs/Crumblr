@@ -15,7 +15,7 @@ from typing import Any
 
 from sqlalchemy import Engine
 
-from crumblr.application.execution import ExecutionOrchestrator
+from crumblr.application.execution import ExecutionOrchestrator, FlattenCloseSink
 from crumblr.config import (
     AccountGuardConfig,
     ExecutionConfig,
@@ -26,9 +26,9 @@ from crumblr.config import (
     SupervisorConfig,
     TradingAgentConfig,
 )
-from crumblr.domain.enums import Environment
+from crumblr.domain.enums import Environment, OrderState
 from crumblr.domain.hashing import fingerprint
-from crumblr.domain.models import InstrumentSpec
+from crumblr.domain.models import ExecutionResult, FlattenInstruction, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.persistence.broker_state import BrokerStateStore
@@ -267,6 +267,55 @@ class FakeMt5:
         raise AssertionError("close_all_positions must never be called")
 
 
+class FakeFlattenCloseSink:
+    """A fake `FlattenCloseSink` (Phase B item B5) — proves the orchestrator's
+
+    real-close wiring end to end without a real MT5 terminal. A ticket in
+    `succeed_tickets` "closes" — genuinely removed from `terminal.open_positions`
+    so the orchestrator's own post-attempt re-observation (a real, separate
+    `positions_get` call against the same fake terminal) independently
+    confirms it, exactly as a real broker round-trip would. A ticket in
+    `raise_for_tickets` raises instead of returning, to exercise the
+    transport-exception path. Every other ticket "rejects" (stays open).
+    """
+
+    def __init__(
+        self,
+        terminal: FakeMt5,
+        *,
+        succeed_tickets: frozenset[int] = frozenset(),
+        raise_for_tickets: frozenset[int] = frozenset(),
+    ) -> None:
+        self._terminal = terminal
+        self.succeed_tickets = succeed_tickets
+        self.raise_for_tickets = raise_for_tickets
+        self.close_calls: list[int] = []
+
+    def close_position(self, instruction: FlattenInstruction) -> ExecutionResult:
+        self.close_calls.append(instruction.ticket)
+        if instruction.ticket in self.raise_for_tickets:
+            raise RuntimeError(f"simulated transport failure for ticket {instruction.ticket}")
+        state = (
+            OrderState.FILLED if instruction.ticket in self.succeed_tickets else OrderState.REJECTED
+        )
+        if state is OrderState.FILLED:
+            self._terminal.open_positions = tuple(
+                position
+                for position in self._terminal.open_positions
+                if position.ticket != instruction.ticket
+            )
+        from uuid import uuid4
+
+        return ExecutionResult(
+            execution_id=uuid4(),
+            order_request_id=instruction.flatten_request_id,
+            intent_id=None,
+            state=state,
+            requested_volume=instruction.volume,
+            executed_volume=instruction.volume if state is OrderState.FILLED else None,
+        )
+
+
 def guard() -> AccountGuardConfig:
     return AccountGuardConfig.model_validate(
         {
@@ -368,6 +417,7 @@ def orchestrator(
     activation_watermark: datetime | None,
     clock: Any = None,
     kill_switch: KillSwitch | None = None,
+    flatten_close_adapter: FlattenCloseSink | None = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=LOGIN, password="x", server=SERVER))
@@ -391,4 +441,5 @@ def orchestrator(
         activation_watermark=activation_watermark,
         worker_id="test-worker",
         clock=clock or (lambda: FIXED_NOW + timedelta(seconds=1)),
+        flatten_close_adapter=flatten_close_adapter,
     )

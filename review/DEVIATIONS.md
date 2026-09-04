@@ -11,6 +11,15 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-04 — Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`)
+closes two of D-050's three original pieces: the flatten close itself,
+and retry-then-HALT on a failed close. D-050 narrows to just the
+remaining pre-deadline connectivity watch and the untouched ADR-004 §7
+owner questions; D-033 updated to reflect the close mechanism now being
+real (still inert in every shipped config); D-054 gap 1 gets an accuracy
+note (a real close mechanism now exists in code but is not yet
+live-wired, so the BLOCK-not-HALT rationale still holds in practice).
+
 Last updated 2026-09-03 — D-051 gap 3 amended: core critical path item 9
 (broker-side SL verification, ADR-014) narrows the gap to cover
 protective-stop absence/mismatch specifically via its own dedicated halt
@@ -429,32 +438,45 @@ mean anything should start here.
 ### D-033 — The intraday flatten is detected, not performed
 - **Status:** PARTIALLY RESOLVED 2026-09-02 — the commitment/record half is
   built (core critical path item 7, `review/adr/ADR-009-automatic-flatten-
-  submission.md`). **Still open:** the close itself, and two of ADR-004
-  §5's four sub-items — see D-050
+  submission.md`). **The close itself: RESOLVED 2026-09-04** — Phase B
+  item B5, `review/adr/ADR-020-real-flatten-close.md`. **Still open:**
+  the two ADR-004 §5 sub-items D-050 still names (a pre-deadline
+  connectivity watch; the per-position-vs-per-book/longer-Friday-cutoff
+  owner questions) — unrelated to the close mechanism itself
 - **Spec:** owner decision O-003; review 1.6 F-025; `ADR-004`
 - **Original gap:** the system refuses new entries outside the trading window
   and halts when exposure survives the flatten deadline, but it does not
   *close* the position. Closing needs the execution path, which is M5.
 - **Current state:** `application/execution.py::ExecutionOrchestrator
-  .flatten_once()` now durably commits to a flatten (real gate,
+  .flatten_once()` durably commits to a flatten (real gate,
   `risk/flatten_gate.py`; real durable request/event log,
   `persistence/flatten.py`; a real `FlattenPlan` naming exactly which
   positions and volumes would be closed) whenever a position survives the
-  deadline or crosses a rollover — and stops there. `close_all_positions`/
-  `order_send` remain unconditionally disabled, same as before this item;
-  nothing here closes a position for real.
-- **Why it is shaped this way:** refusing to open is safe and can ship now;
-  promising to close is a promise this system cannot yet keep. A policy that
-  claimed otherwise would read as though positions were being managed out when
-  nothing was managing them. Recording the commitment (this item) is a real,
-  separate improvement over the halt alone — an auditor can now see exactly
-  what a future close would have done — without pretending the close itself
-  exists.
-- **Watch for:** `FLATTEN_SUBMISSION_STARTED` in the event log records a
-  *commitment*, not an outcome. Reading it as "the position was closed" is
-  reading something that is not there — see D-050 for the remaining gap.
-- **Gate affected:** M5 for the close itself; this item's own scope is
-  closed.
+  deadline or crosses a rollover. **Since Phase B item B5**, the next pass
+  can genuinely attempt the close for real
+  (`DemoOrderSendMt5Gateway.close_position()`/`.close_all_positions()`,
+  `ExecutionOrchestrator._attempt_and_resolve_flatten()`) — still gated
+  by `flatten_submission_enabled` (false in every shipped config) and by
+  no real close adapter being constructed anywhere in `src/`/`scripts/`
+  today, so this remains inert in every actual deployment, but the
+  mechanism is no longer a promise this system cannot keep — it is a real
+  capability waiting on activation, the same status every other Phase-B
+  slice already has.
+- **Why it was originally shaped this way:** refusing to open is safe and
+  could ship immediately; promising to close before a real close existed
+  would have been a promise this system could not yet keep. Recording the
+  commitment first (item 7) was a real, separate improvement over the
+  halt alone — an auditor could see exactly what a future close would
+  have done — without pretending the close itself existed until B5 built
+  it for real.
+- **Watch for:** `FLATTEN_SUBMISSION_STARTED` in the event log still only
+  records a *commitment*, not an outcome by itself — but
+  `FLATTEN_OUTCOME_RESOLVED` can now genuinely mean `flattened=True`, not
+  only ever `False`. Check that event's own `flattened` field, not the
+  commitment event alone.
+- **Gate affected:** none directly — inert in every shipped config
+  regardless; this item's own scope (commitment + real close mechanism)
+  is closed.
 
 ### D-035 — The MT5 gateway is written but has never met a terminal
 - **Status:** PARTIALLY RESOLVED 2026-08-24 — one real connection made (account
@@ -1067,38 +1089,62 @@ mean anything should start here.
   honest zero.
 
 ### D-050 — The automatic flatten is committed and recorded, not performed
-- **Status:** deliberate, with three named remaining gaps
+- **Status:** deliberate; two of three original gaps closed by Phase B
+  item B5 (2026-09-04), one remains
 - **Spec:** `review/adr/ADR-004-intraday-session-boundary.md` §5
 - **Code:** `application/execution.py::ExecutionOrchestrator
   .flatten_once()`, `risk/flatten_gate.py`, `review/adr/ADR-009
-  -automatic-flatten-submission.md`
-- **Original gap / current state:** core critical path item 7 closes the
+  -automatic-flatten-submission.md`, `review/adr
+  /ADR-020-real-flatten-close.md`
+- **Original gap / current state:** core critical path item 7 closed the
   commitment/record half of ADR-004 §5 — a position past its deadline or
-  a rollover now reaches a durable `FLATTEN_SUBMISSION_STARTED` event
-  naming exactly what would be closed (see D-033, now partially
-  resolved). `close_all_positions`/`order_send` remain unconditionally
-  disabled; nothing built by this item closes a position for real.
-- **Remaining gap, three pieces, all ADR-004 §5's own language:**
-  1. **§5.2 — retry-then-HALT on a failed flatten.** There is no way to
-     make a flatten fail while there is no way to make one succeed; a
-     retry mechanism exercisable only against a fake broker would not be
-     real. Deferred until `close_all_positions` exists.
-  2. **§5.3b — HALT *before* the deadline if the broker is unavailable.**
-     Needs a periodic pre-deadline connectivity watch — a different kind
-     of mechanism than a gate evaluated at the deadline, closer to
-     `LiveReader`'s read cadence. What this item ships instead: broker
+  a rollover reaches a durable `FLATTEN_SUBMISSION_STARTED` event naming
+  exactly what would be closed (see D-033, now partially resolved).
+  Originally, `close_all_positions`/`order_send` remained unconditionally
+  disabled and nothing closed a position for real. **Phase B item B5
+  changed this**: `DemoOrderSendMt5Gateway.close_position()`/
+  `.close_all_positions()` are now real (still separate from
+  `OrderCheckMt5Gateway`, which stays the same unconditional raises), and
+  `ExecutionOrchestrator._attempt_and_resolve_flatten()` can genuinely
+  reach `flattened=True` — gated the whole time by
+  `flatten_submission_enabled` (false in every shipped config) and by
+  whether a real `FlattenCloseSink` was explicitly constructed and
+  injected (nothing in `src/`/`scripts/` does, same "real but
+  unconnected" discipline every prior Phase-B slice used).
+- **Remaining gap, two of the original three pieces now closed:**
+  1. ~~§5.2 — retry-then-HALT on a failed flatten.~~ **Done, Phase B item
+     B5.** A residual after a genuine close attempt trips
+     `ReasonCode.FLATTEN_CLOSE_FAILED` (tolerated by
+     `risk/flatten_gate.py::_TOLERATED_HALT_REASONS`, so the mechanism
+     retries past its own halt) and appends nothing durable-terminal,
+     so the next pass retries automatically with a fresh observation —
+     no artificial retry counter.
+  2. **§5.3b — HALT *before* the deadline if the broker is unavailable —
+     still open.** Needs a periodic pre-deadline connectivity watch — a
+     different kind of mechanism than a gate evaluated at the deadline,
+     closer to `LiveReader`'s read cadence. What ships instead: broker
      unavailability *at* the deadline still closes the gate
      (`POSITION_BOOK_INCOMPLETE`) and halts — the "after it" half of
-     §5.3, not the "before it" half.
-  3. Per-position vs per-book deadline, and a longer Friday cutoff
-     (ADR-004 §7's own two open owner questions) — untouched, not
-     answered by this item either way.
+     §5.3, not the "before it" half. Not attempted by B5 either.
+  3. ~~Per-position vs per-book deadline, and a longer Friday cutoff
+     (ADR-004 §7's own two open owner questions)~~ — still untouched,
+     unrelated to B5's scope (the close mechanism, not the deadline
+     policy).
+- **Also named by B5, not previously tracked here:** partial-volume
+  close handling. `application/execution_outcome.py::close_result_fully_closed()`
+  classifies `OrderState.PARTIALLY_FILLED` as *not* fully closed,
+  deliberately conservative — the remaining volume stays open on the same
+  ticket. Full-volume-only close is what the current single-ticket canary
+  shape needs; a genuine partial-close scenario is unhandled beyond "this
+  ticket is still open, retry."
 - **Watch for:** `FLATTEN_SUBMISSION_STARTED` in the event log records a
-  commitment, not an outcome. A reader treating it as "the position was
-  closed" is reading something that is not there.
-- **Gate affected:** none directly today; a prerequisite for a real
-  automatic flatten once `close_all_positions` exists, not itself
-  claiming to be one.
+  commitment, not an outcome by itself — but `FLATTEN_OUTCOME_RESOLVED`
+  can now genuinely mean `flattened=True` for real, not only ever
+  `False`. A reader must check the resolution event's own `flattened`
+  field, not assume the commitment event alone settles it.
+- **Gate affected:** none directly — `flatten_submission_enabled` stays
+  false in every shipped config, so this remains inert in every real
+  deployment regardless of the mechanism now being real.
 - **Cross-reference:** core critical path item 8 (D-051,
   `review/adr/ADR-010-post-fill-reconciliation.md` §2.5) reads this
   item's own durable history — `FLATTEN_SUBMISSION_STARTED`'s targets
@@ -1243,14 +1289,21 @@ mean anything should start here.
   `agent_gateway/market_context.py::AgentPlatformState.open_risk_fraction`
 - **Gap 1 — BLOCK, not HALT.** An unestablished open-risk assessment
   (an open position with untrustworthy stop geometry) refuses the new
-  trade via `OPEN_RISK_UNKNOWN`, a BLOCK. The platform cannot currently
-  *close* the offending position either way (`close_all_positions` stays
-  unbuilt, D-050), so escalating to HALT would be a permanent brick with
-  no in-system remediation, not a safer outcome. Item 9 (broker-side
-  stop-loss verification) is the correctly-scoped future owner for the
-  system-level judgement this implies. **Trigger:** revisit only once
-  item 9 exists and the platform has a real remediation path for a
-  stopless position — not before, and not as a side effect of an
+  trade via `OPEN_RISK_UNKNOWN`, a BLOCK. At the time this gap was
+  recorded, the platform could not currently *close* the offending
+  position either way (`close_all_positions` stayed unbuilt, D-050), so
+  escalating to HALT would have been a permanent brick with no in-system
+  remediation, not a safer outcome. **Still true in practice as of Phase
+  B item B5** (`review/adr/ADR-020-real-flatten-close.md`): the real
+  close mechanism now exists in code, but remains completely unwired —
+  gated by `flatten_submission_enabled` (false in every shipped config)
+  and by no real `FlattenCloseSink` being constructed anywhere in
+  `src/`/`scripts/` — so there is still no *live-reachable* remediation
+  path today, only a real one waiting to be wired in. Item 9 (broker-side
+  stop-loss verification, done) is the correctly-scoped future owner for
+  the system-level judgement this implies. **Trigger:** revisit only once
+  a real close is actually wired into a live process — not merely built —
+  and not as a side effect of an
   unrelated change (pinned by
   `tests/unit/test_risk_engine.py
   ::test_an_unestablished_open_risk_is_a_block_not_a_halt`).

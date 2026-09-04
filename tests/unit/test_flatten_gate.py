@@ -124,6 +124,19 @@ class TestFlattenGate:
         assert decision.open is True
         assert ReasonCode.SYSTEM_HALTED not in decision.reason_codes
 
+    def test_a_flatten_close_failed_halt_does_not_close_the_gate(self) -> None:
+        """Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`): the
+
+        halt a failed close attempt itself causes must not brick the
+        mechanism that would otherwise retry it — same reasoning as
+        `OVERNIGHT_EXPOSURE`/`FLATTEN_STATE_UNKNOWN` above, becoming flat
+        is the safe resolution, not a further risk."""
+        decision = evaluate_flatten_gate(
+            flatten_context(kill_switch=_halted_switch(ReasonCode.FLATTEN_CLOSE_FAILED))
+        )
+        assert decision.open is True
+        assert ReasonCode.SYSTEM_HALTED not in decision.reason_codes
+
     def test_a_halt_for_any_other_reason_closes_the_gate(self) -> None:
         decision = evaluate_flatten_gate(
             flatten_context(kill_switch=_halted_switch(ReasonCode.MAX_DRAWDOWN))
