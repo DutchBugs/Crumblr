@@ -698,3 +698,57 @@ FLATTEN_CLOSE_FAILED is now a live code that can appear on flatten
 (not execution) event history.
 Relevant commit: (this commit)
 ```
+
+---
+
+```text
+2026-09-04 - DEV1
+Changed: ADR-021 (AG-012/Phase C), cross-session-coordinated with Dev 2
+before implementation (two rounds - design proposed, one course
+correction found and fixed before code, both acked). Real single-Risk-
+authority lock: risk/session.py gains RiskLedgerLock (new Protocol) and
+InMemoryRiskLedgerLock (no-op, pairs InMemoryRiskSessionStore);
+persistence/risk_session.py gains PostgresRiskLedgerLock (real
+pg_advisory_xact_lock, reuses persistence/agent_gateway.py
+::lock_assignment()'s exact primitive, key hashtext('risk-ledger:' ||
+canonical_symbol)). RiskSessionStore.load_latest()/.save() both gain an
+optional connection: Connection | None = None param (source-compatible).
+application/bootstrap.py::DurableRuntime gains risk_ledger_lock,
+constructed alongside session_store in build_durable_runtime().
+application/live_decision.py::LiveDecisionOrchestrator.decide_once() is
+redesigned (real behavioural change, not just a signature widening): no
+longer caches self._ledger across calls - recovers, updates and persists
+fresh every cycle, inside one locked transaction, closing a second,
+separate staleness gap found while doing this (previously
+_persist_session() only ran on a risk-PASS cycle; a run of NO_TRADE
+decisions never updated the durable checkpoint). application/execution.py
+::ExecutionOrchestrator's FINAL Risk read joins the same lock too
+(lock-for-read-consistency only - it was already fresh every pass, no
+caching, confirmed by grep: no .save() call anywhere in that class).
+Impact: risk/session.py is shared-contract territory per DEV1/DEV2
+instructions section 4 (not explicitly named there, but RiskSessionStore
+crosses both tracks the same way domain/models.py does - Dev 2's
+agent_gateway/decision_path.py is RiskSessionStore's other real caller).
+The load_latest()/save() widening is source-compatible - every existing
+caller that omits connection= keeps today's exact behaviour, confirmed by
+the full suite passing unchanged. LiveDecisionOrchestrator's and
+ExecutionOrchestrator's own constructors both gain a new required
+risk_ledger_lock parameter - NOT source-compatible, the same kind of
+break PL-006's recover_session() signature change was; every real
+construction site (DurableRuntime/build_durable_runtime,
+scripts/live_decision.py, scripts/run_execution_preflight_evidence.py,
+tests/integration/_execution_fixtures.py, every test builder in
+tests/unit/test_live_decision.py and tests/integration/test_live_decision.py)
+updated in this same change. Found and fixed one Dev-2-owned test-file
+ripple while wiring this: tests/unit/test_agent_decision_path.py
+::ExplodingSessionStore (a local, in-test-method-only InMemoryRiskSessionStore
+subclass) needed the same connection parameter added to satisfy the
+widened Protocol - a one-line, purely mechanical fix, not touching any
+agent_gateway/ production code.
+Action required: Dev 2 - decision_path.py's own side of ADR-021 (acquire
+the same RiskLedgerLock around evaluate_agent_trade_intent()'s existing
+load_latest() call, lock-for-read-consistency only, no .save()) can now
+be built against the real thing on main. Full design/reasoning:
+review/adr/ADR-021-single-risk-authority-lock.md.
+Relevant commit: (this commit)
+```

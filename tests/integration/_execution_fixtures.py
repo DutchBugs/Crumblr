@@ -36,7 +36,7 @@ from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestS
 from crumblr.persistence.flatten import FlattenEventStore, FlattenRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
-from crumblr.persistence.risk_session import PostgresRiskSessionStore
+from crumblr.persistence.risk_session import PostgresRiskLedgerLock, PostgresRiskSessionStore
 from crumblr.risk.kill_switch import KillSwitch
 from tests.conftest import FIXED_NOW
 
@@ -435,6 +435,7 @@ def orchestrator(
         broker_state=BrokerStateStore(engine),
         instrument_specs=InstrumentSpecStore(engine),
         session_store=PostgresRiskSessionStore(engine),
+        risk_ledger_lock=PostgresRiskLedgerLock(engine),
         kill_switch=kill_switch or KillSwitch(),
         adapter=adapter,
         canonical_symbol="EUR/USD",

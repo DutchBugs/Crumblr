@@ -117,7 +117,7 @@ from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.flatten_gate import FlattenGateContext, evaluate_flatten_gate
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
-from crumblr.risk.session import RiskSessionStore, recover_session
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
 from crumblr.trading_agent.sessions import trading_day, weekly_close
 
@@ -232,6 +232,7 @@ class ExecutionOrchestrator:
         broker_state: BrokerStateSink,
         instrument_specs: InstrumentSpecSource,
         session_store: RiskSessionStore,
+        risk_ledger_lock: RiskLedgerLock,
         kill_switch: KillSwitch,
         adapter: OrderCheckMt5Gateway,
         canonical_symbol: str = "EUR/USD",
@@ -249,6 +250,11 @@ class ExecutionOrchestrator:
         self._broker_state = broker_state
         self._instrument_specs = instrument_specs
         self._session_store = session_store
+        self._risk_ledger_lock = risk_ledger_lock
+        """ADR-021 (AG-012/Phase C): lock-for-read-consistency only on this
+
+        side — `self._session_store` has no `.save()` call anywhere in
+        this class, confirmed by grep before this change."""
         self._kill_switch = kill_switch
         self._adapter = adapter
         self._canonical_symbol = canonical_symbol
@@ -450,14 +456,23 @@ class ExecutionOrchestrator:
         # left stale enough to straddle a session/expiry boundary.
         final_now = self._clock()
 
-        session_recovery = recover_session(
-            self._session_store.load_latest(),
-            live_equity=observation.account_state.equity,
-            live_open_positions=len(observation.position_states),
-            market_day=trading_day(final_now),
-            max_daily_loss=self._config.risk.max_daily_loss,
-            max_drawdown=self._config.risk.max_drawdown,
-        )
+        # ADR-021 (AG-012/Phase C): this read was already fresh every pass
+        # (no in-memory caching) before ADR-021 — it was never part of the
+        # race that ADR fixes. Included under the same lock anyway: it is
+        # the literal closest thing to the owner work order's own
+        # "final-Risk-to-broker-side-effect critical section" wording, and
+        # the marginal cost is small — this call site has no write-back
+        # either, so it is lock-for-read-consistency only, the same as
+        # `agent_gateway/decision_path.py`'s side (ADR-021 §5).
+        with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
+            session_recovery = recover_session(
+                self._session_store.load_latest(connection=connection),
+                live_equity=observation.account_state.equity,
+                live_open_positions=len(observation.position_states),
+                market_day=trading_day(final_now),
+                max_daily_loss=self._config.risk.max_daily_loss,
+                max_drawdown=self._config.risk.max_drawdown,
+            )
         if session_recovery.must_halt:
             if not self._kill_switch.is_halted:
                 self._kill_switch.trip(

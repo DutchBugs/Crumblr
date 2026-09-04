@@ -26,14 +26,14 @@ from crumblr.domain.enums import Environment
 from crumblr.observability.logging import get_logger
 from crumblr.persistence.engine import create_db_engine, database_url
 from crumblr.persistence.migrations import upgrade_to_head
-from crumblr.persistence.risk_session import PostgresRiskSessionStore
+from crumblr.persistence.risk_session import PostgresRiskLedgerLock, PostgresRiskSessionStore
 from crumblr.persistence.safety_state import (
     CompositeSafetyStateStore,
     PostgresSafetyStateStore,
 )
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.safety_state import FileSafetyStateStore
-from crumblr.risk.session import RiskSessionStore
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
 
 _log = get_logger("bootstrap")
 
@@ -50,6 +50,11 @@ class DurableRuntime:
     kill_switch: KillSwitch
     safety_state: CompositeSafetyStateStore
     session_store: RiskSessionStore
+    risk_ledger_lock: RiskLedgerLock
+    """ADR-021 (AG-012/Phase C) — the single-authority lock every real
+
+    `LiveDecisionOrchestrator`/`ExecutionOrchestrator` process must be
+    constructed with, alongside `session_store`."""
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -96,4 +101,5 @@ def build_durable_runtime(
         kill_switch=kill_switch,
         safety_state=safety_state,
         session_store=PostgresRiskSessionStore(engine),
+        risk_ledger_lock=PostgresRiskLedgerLock(engine),
     )

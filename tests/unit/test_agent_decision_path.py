@@ -197,7 +197,7 @@ class TestNoTrade:
         breach a loss gate, so recovering one would be a pointless read."""
 
         class ExplodingSessionStore(InMemoryRiskSessionStore):
-            def load_latest(self) -> Any:
+            def load_latest(self, *, connection: Any = None) -> Any:
                 raise AssertionError("must not be called for a NO_TRADE evaluation")
 
         fixture = Fixture(session_store=ExplodingSessionStore())

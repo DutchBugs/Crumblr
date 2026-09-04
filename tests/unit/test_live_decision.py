@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from crumblr.application.decision_window import InMemoryDecisionWindowStore
@@ -30,7 +31,7 @@ from crumblr.domain.models import (
 from crumblr.market_data.synthetic import SyntheticMarketConfig, as_market_bar, generate_ticks
 from crumblr.persistence.market_data import tick_identity
 from crumblr.risk.kill_switch import KillSwitch
-from crumblr.risk.session import InMemoryRiskSessionStore
+from crumblr.risk.session import InMemoryRiskLedgerLock, InMemoryRiskSessionStore
 from crumblr.trading_agent.base import FeatureEvidence
 from tests.conftest import make_broker_account_snapshot, paper_config_payload
 
@@ -163,6 +164,7 @@ def orchestrator(
     recorder: RecordingRunRecorder,
     *,
     kill_switch: KillSwitch | None = None,
+    session_store: InMemoryRiskSessionStore | None = None,
     decision_window_store: InMemoryDecisionWindowStore | None = None,
 ) -> LiveDecisionOrchestrator:
     return LiveDecisionOrchestrator(
@@ -172,7 +174,8 @@ def orchestrator(
         instrument_specs=instrument_specs,
         recorder=recorder,
         kill_switch=kill_switch or KillSwitch(),
-        session_store=InMemoryRiskSessionStore(),
+        session_store=session_store or InMemoryRiskSessionStore(),
+        risk_ledger_lock=InMemoryRiskLedgerLock(),
         decision_window_store=decision_window_store or InMemoryDecisionWindowStore(),
         clock=lambda: NOW,
     )
@@ -268,6 +271,115 @@ class TestNoTradeWindow:
             if type(payload).__name__ == "SignalGenerated"
         ]
         assert len(signal_events) == 1
+
+
+class SpyRiskLedgerLock:
+    """Counts `held()` calls, otherwise delegates to a real in-memory lock
+
+    (ADR-021) — proves the lock is genuinely acquired every cycle, not
+    merely that the redesigned control flow happens to still work without
+    it."""
+
+    def __init__(self) -> None:
+        self._inner = InMemoryRiskLedgerLock()
+        self.held_calls: list[str] = []
+
+    def held(self, canonical_symbol: str) -> Any:
+        self.held_calls.append(canonical_symbol)
+        return self._inner.held(canonical_symbol)
+
+
+class TestADR021RiskLedgerPersistsEveryCycle:
+    """AG-012/Phase C: before this ADR, `_persist_session()` only ran on a
+
+    cycle that reached a risk-`PASS` decision — a NO_TRADE run of any
+    length left the durable checkpoint stale, independent of the AG-012
+    race itself (a real, separate gap named and closed by the same
+    redesign, `review/adr/ADR-021-single-risk-authority-lock.md` §3).
+    """
+
+    def test_a_no_trade_cycle_still_persists_and_acquires_the_lock(self) -> None:
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)  # biased toward NO_TRADE, as above
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        session_store = InMemoryRiskSessionStore()
+        lock = SpyRiskLedgerLock()
+
+        live = LiveDecisionOrchestrator(
+            config(),
+            market_data=market,
+            broker_state=broker,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=KillSwitch(),
+            session_store=session_store,
+            risk_ledger_lock=lock,
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+        outcome = live.decide_once()
+
+        assert not outcome.skipped
+        assert lock.held_calls == ["EUR/USD"]
+        assert session_store.saves == 1
+
+    def test_the_ledger_is_recovered_fresh_every_cycle_not_cached(self) -> None:
+        """A second `decide_once()` call must observe whatever the first
+
+        one persisted — proves `self._ledger` is no longer retained
+        in-process across calls, the actual behavioural change ADR-021
+        makes (§3)."""
+        market = FakeMarketDataSource()
+        market.bars = synthetic_bars(66)
+        market.tick = synthetic_tick_for(market.bars[-1])
+        broker = FakeBrokerStateSource()
+        broker.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        session_store = InMemoryRiskSessionStore()
+        lock = SpyRiskLedgerLock()
+
+        live = LiveDecisionOrchestrator(
+            config(),
+            market_data=market,
+            broker_state=broker,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=KillSwitch(),
+            session_store=session_store,
+            risk_ledger_lock=lock,
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+        live.decide_once()
+        assert session_store.saves == 1
+
+        # A second orchestrator instance, sharing only the durable store
+        # and the lock — the same shape two genuinely separate processes
+        # would have, not a second call reusing the first's in-memory
+        # state.
+        market_two = FakeMarketDataSource()
+        market_two.bars = synthetic_bars(67)
+        market_two.tick = synthetic_tick_for(market_two.bars[-1])
+        broker_two = FakeBrokerStateSource()
+        broker_two.account = make_broker_account_snapshot(observed_at_utc=NOW)
+        second_process = LiveDecisionOrchestrator(
+            config(),
+            market_data=market_two,
+            broker_state=broker_two,
+            instrument_specs=FakeInstrumentSpecSource(),
+            recorder=RecordingRunRecorder(),
+            kill_switch=KillSwitch(),
+            session_store=session_store,
+            risk_ledger_lock=lock,
+            decision_window_store=InMemoryDecisionWindowStore(),
+            clock=lambda: NOW,
+        )
+        second_outcome = second_process.decide_once()
+
+        assert not second_outcome.skipped
+        assert session_store.saves == 2
+        assert lock.held_calls == ["EUR/USD", "EUR/USD"]
 
 
 class TestD031FeatureValuesArePersisted:
@@ -420,6 +532,7 @@ class TestF054DurableDecisionWindowIdempotence:
             recorder=RecordingRunRecorder(),
             kill_switch=KillSwitch(),
             session_store=InMemoryRiskSessionStore(),
+            risk_ledger_lock=InMemoryRiskLedgerLock(),
             decision_window_store=store,
             clock=lambda: NOW,
         )
@@ -439,6 +552,7 @@ class TestF054DurableDecisionWindowIdempotence:
             recorder=RecordingRunRecorder(),
             kill_switch=KillSwitch(),
             session_store=InMemoryRiskSessionStore(),
+            risk_ledger_lock=InMemoryRiskLedgerLock(),
             decision_window_store=store,
             clock=lambda: NOW,
         )
