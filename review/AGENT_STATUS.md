@@ -1687,6 +1687,60 @@ change; ruff/mypy clean.
 
 ---
 
+## 0x. F-066 item 8 proven through the real Gateway, not only decision_path.py's own arguments — done 2026-09-04
+
+With AG-012 closed and the docstring self-review fixed, checked the
+remaining Dev-2 priority list (`review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md`
+Phase A) for the next fully-unblocked item, since Phase A items 3/4 (the
+neutral-context Static Agent proof, the real fork coordination) need the
+external Agent Developer's own runtime work — no session for that
+developer is available, and no code on this side can substitute for it.
+
+Re-read `feedback.1.28.md` §10's actual 9-condition list rather than
+relying on this document's own summary of it (found stale in the
+process — see below). `TestStrategyNeutrality`
+(`tests/unit/test_agent_decision_path.py`) already proved condition 8
+("a second toy/test agent with a deliberately different reason-code
+vocabulary can use the same Core path without Core code changes") — but
+only at `evaluate_agent_trade_intent`'s own argument level, with a
+hand-built `TradeIntent`. That does not prove the *Gateway boundary*
+itself is neutral, only this one function.
+
+New `TestStrategyNeutralityThroughTheRealGateway`: onboards two fully
+independent agents — distinct `AgentIdentity`, `TradingAssignment`,
+`StrategyArtifact` hash, and a completely unrelated reason-code
+vocabulary each (`ALPHA_MOMENTUM_BREAK`/`ALPHA_VOLUME_CONFIRM` vs.
+`BETA_MEAN_REVERT_SETUP`/`BETA_RSI_DIVERGENCE`) — through the real,
+unmodified `AgentGateway.submit_trade_proposal`, then feeds the two
+resulting *real* `TradeIntent`s (not hand-built ones) through
+`evaluate_agent_trade_intent` and asserts both reach an identical
+`RiskVerdict.PASS`/`SupervisorVerdict.APPROVE`, with the sealed capsule
+carrying each agent's own real intent through unmodified. Zero code in
+either `AgentGateway` or `decision_path.py` branches on which agent
+produced the intent.
+
+**Found while doing this: `review/AGENT_FEEDBACK.md`'s F-066 row was
+itself stale**, claiming items B/C (`AgentMarketContextV1`, opaque
+Gateway reason-code handling) "remain open" after both had actually
+shipped (§0l, §0o). Rewritten against the real 9-condition list instead
+of a paraphrase of it: 6 of 9 conditions are now confirmed closed from
+Crumblr's side (1, 3, 4, 5, 6, 9), condition 8 closes with this entry,
+and only conditions 2 and 7 remain — both genuinely fork-dependent (the
+external agent owning its own strategy computation; one HEALTHY Static
+Agent context reaching an honest decision), neither actionable from this
+side alone. This considerably narrows what F-066 was tracking as "several
+items open" down to "one external coordination item, nothing left to
+build on the Crumblr side."
+
+Evidence: `tests/unit/test_agent_decision_path.py` 37→38 passed. Full
+non-integration suite: 1218 passed, 1 pre-existing skip, 0 failed.
+ruff/ruff format/mypy clean. Self-reviewed (`/code-review medium`): no
+findings — the only clean pass this session that found nothing, recorded
+for completeness rather than only recording the passes that caught
+something.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
