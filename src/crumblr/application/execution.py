@@ -61,6 +61,7 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
+from crumblr.application.execution_outcome import close_result_fully_closed
 from crumblr.application.expected_state import derive_expected_exposure
 from crumblr.application.flatten_plan import build_flatten_plan
 from crumblr.application.reconciliation import (
@@ -87,6 +88,8 @@ from crumblr.domain.hashing import fingerprint, mt5_magic_number
 from crumblr.domain.models import (
     ApprovedOrder,
     DecisionCapsule,
+    ExecutionResult,
+    FlattenInstruction,
     MarketSnapshot,
     MarketTick,
     PositionState,
@@ -114,7 +117,7 @@ from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.flatten_gate import FlattenGateContext, evaluate_flatten_gate
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
-from crumblr.risk.session import RiskSessionStore, recover_session
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
 from crumblr.trading_agent.sessions import trading_day, weekly_close
 
@@ -146,6 +149,22 @@ class BrokerStateSink(BrokerStateSource, Protocol):
     def record(self, observation: BrokerStateObservation) -> None: ...
 
 
+class FlattenCloseSink(Protocol):
+    """The one real capability the flatten driver needs (Phase B item B5,
+
+    `review/adr/ADR-020-real-flatten-close.md`) — deliberately a narrow
+    structural Protocol, not the concrete real demo-execution gateway class
+    in `mt5_gateway/demo_execution.py`. This module never names that class
+    by name (`tests/unit/test_demo_order_send_gateway.py
+    ::TestNotWiredIntoTheOrchestrator` mechanically asserts as much) —
+    entries remain genuinely unwired pending Phase C/AG-012's shared
+    execution/Risk authority; only this one close capability is real, and
+    only reachable via this Protocol.
+    """
+
+    def close_position(self, instruction: FlattenInstruction) -> ExecutionResult: ...
+
+
 @dataclass(frozen=True)
 class ExecutionAttemptOutcome:
     """What happened to one capsule during one `run_once()` pass."""
@@ -169,6 +188,12 @@ class FlattenAttemptOutcome:
     event_type: FlattenEventType
     reason_codes: tuple[ReasonCode, ...] = ()
     target_count: int = 0
+    closed_count: int = 0
+    """How many of `target_count` positions were confirmed closed on the
+
+    freshest broker observation this pass took (Phase B item B5) — `0` for
+    every outcome that never attempted a real close (unchanged pre-B5
+    behaviour)."""
 
 
 @dataclass(frozen=True)
@@ -207,12 +232,14 @@ class ExecutionOrchestrator:
         broker_state: BrokerStateSink,
         instrument_specs: InstrumentSpecSource,
         session_store: RiskSessionStore,
+        risk_ledger_lock: RiskLedgerLock,
         kill_switch: KillSwitch,
         adapter: OrderCheckMt5Gateway,
         canonical_symbol: str = "EUR/USD",
         activation_watermark: UtcDatetime | None = None,
         worker_id: str = "execution-orchestrator",
         clock: Callable[[], UtcDatetime] = utc_now,
+        flatten_close_adapter: FlattenCloseSink | None = None,
     ) -> None:
         self._config = config
         self._capsules = capsules
@@ -223,12 +250,24 @@ class ExecutionOrchestrator:
         self._broker_state = broker_state
         self._instrument_specs = instrument_specs
         self._session_store = session_store
+        self._risk_ledger_lock = risk_ledger_lock
+        """ADR-021 (AG-012/Phase C): lock-for-read-consistency only on this
+
+        side — `self._session_store` has no `.save()` call anywhere in
+        this class, confirmed by grep before this change."""
         self._kill_switch = kill_switch
         self._adapter = adapter
         self._canonical_symbol = canonical_symbol
         self._activation_watermark = activation_watermark
         self._worker_id = worker_id
         self._clock = clock
+        self._flatten_close_adapter = flatten_close_adapter
+        """Phase B item B5. `None` in every existing caller/test — the exact
+
+        pre-B5 behaviour (no close is ever attempted) is preserved by
+        this default alone, independent of `flatten_submission_enabled`.
+        A real caller must construct a `FlattenCloseSink` and pass it
+        explicitly; nothing here ever constructs one itself."""
 
     def run_once(self) -> tuple[ExecutionAttemptOutcome, ...]:
         # Core critical path item 7: a flatten is policy-driven (a
@@ -417,14 +456,23 @@ class ExecutionOrchestrator:
         # left stale enough to straddle a session/expiry boundary.
         final_now = self._clock()
 
-        session_recovery = recover_session(
-            self._session_store.load_latest(),
-            live_equity=observation.account_state.equity,
-            live_open_positions=len(observation.position_states),
-            market_day=trading_day(final_now),
-            max_daily_loss=self._config.risk.max_daily_loss,
-            max_drawdown=self._config.risk.max_drawdown,
-        )
+        # ADR-021 (AG-012/Phase C): this read was already fresh every pass
+        # (no in-memory caching) before ADR-021 — it was never part of the
+        # race that ADR fixes. Included under the same lock anyway: it is
+        # the literal closest thing to the owner work order's own
+        # "final-Risk-to-broker-side-effect critical section" wording, and
+        # the marginal cost is small — this call site has no write-back
+        # either, so it is lock-for-read-consistency only, the same as
+        # `agent_gateway/decision_path.py`'s side (ADR-021 §5).
+        with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
+            session_recovery = recover_session(
+                self._session_store.load_latest(connection=connection),
+                live_equity=observation.account_state.equity,
+                live_open_positions=len(observation.position_states),
+                market_day=trading_day(final_now),
+                max_daily_loss=self._config.risk.max_daily_loss,
+                max_drawdown=self._config.risk.max_drawdown,
+            )
         if session_recovery.must_halt:
             if not self._kill_switch.is_halted:
                 self._kill_switch.trip(
@@ -727,8 +775,18 @@ class ExecutionOrchestrator:
         overstated this — corrected in `review/adr
         /ADR-012-owner-session-policy-v1.md`).
 
-        Never calls `close_all_positions` or `order_send` — the gate
-        opening only appends `FLATTEN_SUBMISSION_STARTED` and stops. The
+        Never calls `order_send` or `OrderCheckMt5Gateway.close_all_positions`
+        — those stay unconditionally disabled. The gate opening still only
+        appends `FLATTEN_SUBMISSION_STARTED` and stops, unchanged — Phase B
+        item B5's real per-ticket close attempt
+        (`review/adr/ADR-020-real-flatten-close.md`,
+        `_attempt_and_resolve_flatten`) happens on the *next* pass instead,
+        through the recovery branch below, and only when a real
+        `FlattenCloseSink` was explicitly constructed and injected
+        (`self._flatten_close_adapter`, `None` in every existing
+        caller/test) *and* `flatten_submission_enabled` reads `True` right
+        now — false in every shipped config today, so this remains inert
+        in practice for the same reason every other Phase-B slice is. The
         `OVERNIGHT_EXPOSURE`/`FLATTEN_STATE_UNKNOWN` halt trips happen
         *after* the gate decision on every path they can reach from (the
         one exception is `FLATTEN_STATE_UNKNOWN`'s own trip immediately
@@ -778,11 +836,16 @@ class ExecutionOrchestrator:
             )
             self._broker_state.record(observation)
             positions = observation.position_states
-            outcome = self._resolve_flatten_outcome(
-                flatten_request_id, positions, prior_events, now
-            )
+            # Tripped from *this* pass's own fresh-before-any-attempt read,
+            # not after: Phase B item B5's real close (inside
+            # `_resolve_flatten_outcome`) may itself close every remaining
+            # position this same pass, and re-tripping OVERNIGHT_EXPOSURE
+            # from a now-stale `positions` afterward would misreport
+            # exposure that a successful close just resolved. `KillSwitch
+            # .trip` is idempotent, so ordering this first changes nothing
+            # for the pre-B5 case where nothing ever closes.
             self._trip_overnight_exposure(positions, now)
-            return outcome
+            return self._resolve_flatten_outcome(flatten_request_id, positions, prior_events, now)
 
         # No occurrence claimed yet today — observe the broker and decide
         # whether one is needed. Same coherent-observation reasoning as
@@ -850,31 +913,33 @@ class ExecutionOrchestrator:
             _log.error("flatten.claim_conflict", flatten_request_id=str(flatten_request_id))
             raise
 
+        # Tripped from this pass's own fresh-before-any-attempt read, not
+        # after — see the recovery branch above's identical comment for why
+        # (Phase B item B5's real close can resolve every remaining
+        # position in the same call this trip would otherwise follow).
+        self._trip_overnight_exposure(positions, now)
+
         if not claim.claimed:
             # Lost a race against another worker between the events_for()
             # read above and this claim — recover from whatever it
             # committed, exactly like the fresh-read path above.
-            outcome = self._resolve_flatten_outcome(
+            return self._resolve_flatten_outcome(
                 flatten_request_id,
                 positions,
                 self._flatten_events.events_for(flatten_request_id),
                 now,
             )
-        else:
-            outcome = self._commit_flatten(
-                flatten_request_id,
-                positions=positions,
-                observation=observation,
-                day=day,
-                session_close_utc=session_close_utc,
-                flatten_deadline_utc=flatten_deadline_utc,
-                past_deadline=past_deadline,
-                crossed_weekly_close=crossed_weekly_close,
-                now=now,
-            )
-
-        self._trip_overnight_exposure(positions, now)
-        return outcome
+        return self._commit_flatten(
+            flatten_request_id,
+            positions=positions,
+            observation=observation,
+            day=day,
+            session_close_utc=session_close_utc,
+            flatten_deadline_utc=flatten_deadline_utc,
+            past_deadline=past_deadline,
+            crossed_weekly_close=crossed_weekly_close,
+            now=now,
+        )
 
     def _commit_flatten(
         self,
@@ -971,6 +1036,17 @@ class ExecutionOrchestrator:
             now,
             payload=plan.model_dump(mode="json"),
         )
+        # Phase B item B5: the real close attempt is deliberately *not*
+        # made inline here — it happens on the next `flatten_once()` pass,
+        # via the same `_attempt_and_resolve_flatten` this method's own
+        # commitment feeds (through the recovery branch's read of this
+        # exact event's payload). One pass commits, the next pass acts —
+        # the same two-step shape `_recover_ambiguous_submission` already
+        # established for entries (item 6), kept here rather than
+        # collapsed into one call: it keeps "durable commitment" and "the
+        # one place a real broker write can happen" on two sides of a
+        # full pass boundary, never sharing a call stack with the gate
+        # decision that just authorized this commitment.
         return FlattenAttemptOutcome(
             flatten_request_id=flatten_request_id,
             event_type=FlattenEventType.FLATTEN_SUBMISSION_STARTED,
@@ -984,50 +1060,191 @@ class ExecutionOrchestrator:
         events: tuple[FlattenEventRecord, ...],
         now: UtcDatetime,
     ) -> FlattenAttemptOutcome | None:
-        """The item-6-shaped idempotent recovery for a flatten (ADR-009 §2).
+        """The item-6-shaped idempotent recovery for a flatten (ADR-009 §2,
 
-        `events` is passed in rather than re-read here: both call sites in
-        `flatten_once()` already have it (one from the durable-state-first
-        check, one from the post-claim-loss re-read), and re-fetching a
-        third time would be a redundant query with no new information.
+        extended by Phase B item B5). `events` is passed in rather than
+        re-read here: both call sites in `flatten_once()` already have it
+        (one from the durable-state-first check, one from the
+        post-claim-loss re-read), and re-fetching a third time would be a
+        redundant query with no new information.
 
         Runs only when the occurrence's last durable event is
-        `FLATTEN_SUBMISSION_STARTED` with nothing after it. Unlike
-        `_recover_ambiguous_submission` (which searches broker positions
-        by `mt5_magic_number`), this reads the target tickets recorded in
-        the commitment event's own payload and checks which are still
-        open — a simpler, more direct determination, since the targets
-        were already named. Because `close_all_positions` stays
-        unreachable, this will provably always conclude every target is
-        still open today — the same honest inertness ADR-008 documents
-        for its own positive branch.
+        `FLATTEN_SUBMISSION_STARTED` with nothing after it — the one state
+        a crash between commitment and a real close attempt (or between
+        attempts, across passes, once B5's real close exists) could leave
+        behind. Reconstructs the committed `FlattenInstruction`s from that
+        event's own persisted payload — the targets were already named at
+        commit time — and delegates to `_attempt_and_resolve_flatten` for
+        the actual (possibly real, possibly still inert) resolution,
+        exactly as `_commit_flatten` does on the pass that first commits.
         """
         if not events or events[-1].event_type is not FlattenEventType.FLATTEN_SUBMISSION_STARTED:
             return None
 
         commitment_payload = events[-1].payload or {}
-        target_tickets = [
-            instruction["ticket"] for instruction in commitment_payload.get("instructions", [])
-        ]
-        open_tickets = {position.ticket for position in positions}
-        still_open = [ticket for ticket in target_tickets if ticket in open_tickets]
-        closed = [ticket for ticket in target_tickets if ticket not in open_tickets]
+        instructions = tuple(
+            FlattenInstruction.model_validate(instruction)
+            for instruction in commitment_payload.get("instructions", [])
+        )
+        return self._attempt_and_resolve_flatten(flatten_request_id, positions, instructions, now)
 
+    def _attempt_and_resolve_flatten(
+        self,
+        flatten_request_id: UUID,
+        positions: tuple[PositionState, ...],
+        instructions: tuple[FlattenInstruction, ...],
+        now: UtcDatetime,
+    ) -> FlattenAttemptOutcome:
+        """Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`): the
+
+        one place a real close is attempted, and the one place a flatten
+        occurrence's outcome is durably resolved. Called only from
+        `_resolve_flatten_outcome`, itself only reached on a pass *after*
+        the one that committed (`_commit_flatten` appends
+        `FLATTEN_SUBMISSION_STARTED` and stops, deliberately — see that
+        method's own comment) — a full `run_once()` pass boundary always
+        separates "durably commit to a flatten" from "the one place a
+        real broker write can happen," the same two-step shape
+        `_recover_ambiguous_submission` already established for entries
+        (item 6).
+
+        `FlattenEventType` events are append-once per `(flatten_request_id,
+        event_type)` (`persistence/flatten.py`) — a second, differently-
+        content append of the same type raises. This is why a still-open
+        residual after a genuine attempt does **not** append anything here:
+        `FLATTEN_OUTCOME_RESOLVED` is appended only once the outcome is
+        actually known (fully closed, or no attempt was currently
+        possible), so a failed attempt simply leaves `FLATTEN_SUBMISSION_STARTED`
+        as the last event and lets the *next* `run_once()` pass retry with
+        a fresh observation — no artificial retry counter, no blind
+        resubmission of an already-closed ticket (only currently-still-open
+        targets are ever attempted).
+        """
+        open_tickets = {position.ticket for position in positions}
+        still_open = [
+            instruction for instruction in instructions if instruction.ticket in open_tickets
+        ]
+
+        attempted = False
+        if (
+            still_open
+            and self._flatten_close_adapter is not None
+            and self._config.execution.flatten_submission_enabled
+        ):
+            attempted = True
+            for instruction in still_open:
+                try:
+                    result = self._flatten_close_adapter.close_position(instruction)
+                except Exception:
+                    _log.error(
+                        "flatten.close_attempt_failed",
+                        flatten_request_id=str(flatten_request_id),
+                        ticket=instruction.ticket,
+                    )
+                    continue
+                if not close_result_fully_closed(result):
+                    _log.error(
+                        "flatten.close_attempt_not_filled",
+                        flatten_request_id=str(flatten_request_id),
+                        ticket=instruction.ticket,
+                        state=result.state.value,
+                    )
+
+            # Never trust the raw close response alone — confirm from a
+            # fresh broker observation, the same discipline `_process()`'s
+            # own FINAL Risk read already uses (review 1.22 F-058).
+            observation = capture_broker_state(
+                self._adapter.reader,
+                environment=self._config.environment,
+                canonical_symbol=self._canonical_symbol,
+                clock=self._clock,
+            )
+            self._broker_state.record(observation)
+            open_tickets = {position.ticket for position in observation.position_states}
+            still_open = [
+                instruction for instruction in instructions if instruction.ticket in open_tickets
+            ]
+            now = self._clock()
+
+        target_tickets = [instruction.ticket for instruction in instructions]
+        still_open_tickets = [instruction.ticket for instruction in still_open]
+        closed_tickets = [ticket for ticket in target_tickets if ticket not in still_open_tickets]
+
+        if not still_open:
+            self._append_flatten(
+                flatten_request_id,
+                FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
+                now,
+                payload={
+                    "target_tickets": target_tickets,
+                    "still_open_tickets": [],
+                    "closed_tickets": closed_tickets,
+                    "flattened": True,
+                },
+            )
+            return FlattenAttemptOutcome(
+                flatten_request_id=flatten_request_id,
+                event_type=FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
+                target_count=len(target_tickets),
+                closed_count=len(closed_tickets),
+            )
+
+        if attempted:
+            # A genuine attempt was made and a residual remains — retry
+            # next pass, never blind-resubmit now. No terminal event is
+            # appended (see this method's own docstring): FLATTEN_SUBMISSION_STARTED
+            # stays the last durable event on purpose.
+            self._trip_flatten_close_failed(flatten_request_id, still_open_tickets, now)
+            return FlattenAttemptOutcome(
+                flatten_request_id=flatten_request_id,
+                event_type=FlattenEventType.FLATTEN_SUBMISSION_STARTED,
+                reason_codes=(ReasonCode.FLATTEN_CLOSE_FAILED,),
+                target_count=len(target_tickets),
+                closed_count=len(closed_tickets),
+            )
+
+        # No attempt was currently possible (no adapter, or the flag reads
+        # false right now) — the same terminal call this method's pre-B5
+        # predecessor always made, unchanged.
         self._append_flatten(
             flatten_request_id,
             FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
             now,
             payload={
                 "target_tickets": target_tickets,
-                "still_open_tickets": still_open,
-                "closed_tickets": closed,
-                "flattened": len(still_open) == 0,
+                "still_open_tickets": still_open_tickets,
+                "closed_tickets": closed_tickets,
+                "flattened": False,
             },
         )
         return FlattenAttemptOutcome(
             flatten_request_id=flatten_request_id,
             event_type=FlattenEventType.FLATTEN_OUTCOME_RESOLVED,
+            target_count=len(target_tickets),
+            closed_count=len(closed_tickets),
         )
+
+    def _trip_flatten_close_failed(
+        self, flatten_request_id: UUID, still_open_tickets: list[int], now: UtcDatetime
+    ) -> None:
+        """Phase B item B5: a real close attempt did not fully resolve this
+
+        occurrence. Same idempotent-trip shape as `_trip_overnight_exposure`/
+        `_trip_flatten_state_unknown`/`_trip_protective_stop_issue` — a
+        no-op once already halted, and tolerated in
+        `risk/flatten_gate.py::_TOLERATED_HALT_REASONS` so the flatten
+        mechanism can keep retrying past a halt it caused itself."""
+        if not self._kill_switch.is_halted:
+            self._kill_switch.trip(
+                reason_codes=(ReasonCode.FLATTEN_CLOSE_FAILED,),
+                tripped_by="flatten_driver",
+                occurred_at_utc=now,
+                detail=(
+                    f"flatten_request_id {flatten_request_id}: a real close attempt left "
+                    f"{len(still_open_tickets)} position(s) still open (tickets="
+                    f"{still_open_tickets})"
+                ),
+            )
 
     def _trip_overnight_exposure(
         self, positions: tuple[PositionState, ...], now: UtcDatetime

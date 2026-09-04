@@ -569,7 +569,18 @@ class ExecutionResult(Contract):
 
     execution_id: UUID
     order_request_id: UUID
-    intent_id: UUID
+    """For an entry, the `ExecutionOrchestrator` request identity. For a
+
+    close (Phase B item B5, `mt5_gateway/demo_execution.py::close_position`),
+    there is no order request behind it — this instead carries the
+    `FlattenInstruction.flatten_request_id` it closed on behalf of, the only
+    identity a close attempt is genuinely scoped to."""
+    intent_id: UUID | None = None
+    """`None` for a close (Phase B item B5): a policy-driven close has no
+
+    `TradeIntent` behind it — see `domain/models.py::FlattenInstruction`'s
+    own docstring for the identical reasoning. Required (non-`None`) for
+    every entry `ExecutionResult`."""
     state: OrderState
 
     mt5_order_ticket: int | None = None

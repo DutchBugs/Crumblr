@@ -66,6 +66,8 @@ from datetime import date, datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sqlalchemy import Connection
+
 from crumblr.application.decision_window import (
     DecisionWindowState,
     DecisionWindowStore,
@@ -110,7 +112,7 @@ from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, session, trading_window
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import OpenRiskAssessment, assess_open_risk
-from crumblr.risk.session import RiskSessionStore
+from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
 from crumblr.trading_agent import registry
 from crumblr.trading_agent.base import AgentContext, FeatureEvidence
 from crumblr.trading_agent.sessions import trading_day
@@ -244,6 +246,7 @@ class LiveDecisionOrchestrator:
         recorder: RunRecorder,
         kill_switch: KillSwitch,
         session_store: RiskSessionStore,
+        risk_ledger_lock: RiskLedgerLock,
         decision_window_store: DecisionWindowStore,
         canonical_symbol: str = "EUR/USD",
         timeframe: str = "M5",
@@ -256,6 +259,14 @@ class LiveDecisionOrchestrator:
         self._recorder = recorder
         self._kill_switch = kill_switch
         self._session_store = session_store
+        self._risk_ledger_lock = risk_ledger_lock
+        """ADR-021 (AG-012/Phase C): serializes recover→update→persist on
+
+        `risk_session_states` against every other process reading/writing
+        it for the same symbol — `agent_gateway/decision_path.py`'s own
+        intent-time Risk check, and (for read-consistency completeness)
+        `ExecutionOrchestrator`'s FINAL Risk. Required, not optional: this
+        is a correctness fix, not an inert-until-wired feature."""
         self._decision_window_store = decision_window_store
         self._canonical_symbol = canonical_symbol
         self._timeframe = timeframe
@@ -350,19 +361,35 @@ class LiveDecisionOrchestrator:
 
         now = self._clock()
         market_day = trading_day(tick.event_time_utc)
-        if self._current_trading_day is None or self._ledger is None:
-            self._recover_session(account_snapshot, market_day)
-        elif market_day != self._current_trading_day:
-            self._current_trading_day = market_day
-            assert self._ledger is not None
-            self._ledger.start_new_session()
-        assert self._ledger is not None
-        self._ledger.update(account_snapshot.equity)
-
         positions = tuple(
             _position_state_from_snapshot(position)
             for position in self._broker_state.positions_for(account_snapshot.snapshot_id)
         )
+        account = _account_state_from_snapshot(
+            account_snapshot, is_demo=self._config.account_guard.require_demo_account
+        )
+        # Owner risk policy v1 (D1.4): real portfolio risk, never a
+        # count-based approximation. Computed unconditionally, every cycle
+        # (not only once an intent exists), since ADR-021's unified
+        # persist below needs it regardless of what the strategy decides.
+        open_risk = assess_open_risk(
+            positions, specs={spec.broker_symbol: spec}, equity=account.equity
+        )
+
+        # ADR-021 (AG-012/Phase C): recover→update→persist, every cycle,
+        # inside one locked transaction — replaces the old "recover once,
+        # cache in memory, persist only on a risk-PASS cycle" design.
+        # `session.recover_session()` already derives same-day-vs-new-day
+        # session semantics from `(recorded.trading_day, market_day)`
+        # itself, so recovering fresh every cycle needs no separate manual
+        # day-rollover branch — `EquityLedger.start_new_session()` is no
+        # longer called directly here, `recover_session()` is now the only
+        # place that decision is made.
+        with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
+            self._recover_session(account_snapshot, market_day, connection=connection)
+            assert self._ledger is not None
+            self._ledger.update(account_snapshot.equity)
+            self._persist_session(positions, open_risk, now, connection=connection)
 
         self._check_loss_gates(now)
         self._check_session_boundary(tick.event_time_utc, positions, now)
@@ -436,15 +463,9 @@ class LiveDecisionOrchestrator:
             instrument_specs=self._instrument_specs,
             now=now,
         )
-        # Owner risk policy v1 (D1.4): real portfolio risk, never a
-        # count-based approximation. One account read, shared between the
-        # portfolio carrier and the assessment.
-        account = _account_state_from_snapshot(
-            account_snapshot, is_demo=self._config.account_guard.require_demo_account
-        )
-        open_risk = assess_open_risk(
-            positions, specs={spec.broker_symbol: spec}, equity=account.equity
-        )
+        # `account`/`open_risk` already computed above (ADR-021) — reused
+        # here unchanged, not recomputed, so the figure Risk judges against
+        # is provably the same one just persisted.
         portfolio = policies.PortfolioState(
             account=account,
             open_positions=positions,
@@ -493,7 +514,9 @@ class LiveDecisionOrchestrator:
         capsule = self._seal(
             snapshot, spec, features, intent, risk_decision, supervisor_decision, positions
         )
-        self._persist_session(positions, open_risk, now)
+        # No `_persist_session()` call here (unlike before ADR-021): the
+        # ledger is already durably persisted for this cycle, under lock,
+        # above — nothing between there and here mutates it further.
         return LiveDecisionOutcome(capsule=capsule)
 
     # ------------------------------------------------------------------ #
@@ -559,9 +582,24 @@ class LiveDecisionOrchestrator:
         _log.info("live_decision.skipped", reason=reason)
         return LiveDecisionOutcome(capsule=None, skipped_reason=reason)
 
-    def _recover_session(self, account_snapshot: BrokerAccountSnapshot, market_day: date) -> None:
+    def _recover_session(
+        self,
+        account_snapshot: BrokerAccountSnapshot,
+        market_day: date,
+        *,
+        connection: Connection | None,
+    ) -> None:
+        """Called every `decide_once()` cycle since ADR-021 (AG-012/Phase
+
+        C), always inside `self._risk_ledger_lock.held(...)`'s block —
+        `connection` threads through to `load_latest()` so this read
+        participates in that same locked transaction, never a second one.
+        `session.recover_session()` itself already derives same-day-vs-
+        new-day semantics from `(recorded.trading_day, market_day)`, so
+        calling this every cycle needs no separate manual day-rollover
+        branch at the call site."""
         recovery = session.recover_session(
-            self._session_store.load_latest(),
+            self._session_store.load_latest(connection=connection),
             live_equity=account_snapshot.equity,
             live_open_positions=len(self._broker_state.positions_for(account_snapshot.snapshot_id)),
             market_day=market_day,
@@ -662,16 +700,23 @@ class LiveDecisionOrchestrator:
         positions: tuple[PositionState, ...],
         open_risk: OpenRiskAssessment,
         now: UtcDatetime,
+        *,
+        connection: Connection | None,
     ) -> None:
-        """`open_risk` is threaded in from `decide_once()`'s own assessment
+        """Called every `decide_once()` cycle since ADR-021 (AG-012/Phase
 
-        (owner risk policy v1, D1.4) rather than recomputed here: this
-        method has no `InstrumentSpec` in scope on its own (unlike
-        `ReplayOrchestrator`, which holds one fixed spec for the whole
-        run), and its one caller already computed the real figure — so
-        the persisted number is provably the same one Risk judged
-        against, not a second, independently-derived value that could
-        differ if the account snapshot moved between them."""
+        C), always inside `self._risk_ledger_lock.held(...)`'s block,
+        immediately after `_recover_session()`/`self._ledger.update()` —
+        `connection` threads through to `save()` so this write
+        participates in that same locked transaction. `open_risk` is
+        threaded in from `decide_once()`'s own assessment (owner risk
+        policy v1, D1.4) rather than recomputed here: this method has no
+        `InstrumentSpec` in scope on its own (unlike `ReplayOrchestrator`,
+        which holds one fixed spec for the whole run), and its one caller
+        already computed the real figure — so the persisted number is
+        provably the same one Risk judges against, not a second,
+        independently-derived value that could differ if the account
+        snapshot moved between them."""
         if self._ledger is None or self._current_trading_day is None:
             return
         state = session.snapshot(
@@ -682,7 +727,7 @@ class LiveDecisionOrchestrator:
             open_position_count=len(positions),
             recorded_at_utc=now,
         )
-        self._session_store.save(state)
+        self._session_store.save(state, connection=connection)
 
     def _seal(
         self,

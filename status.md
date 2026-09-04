@@ -1,8 +1,8 @@
 # status.md — Autonomous MT5 Trading Platform
 
 **Project:** Autonomous EUR/USD Trading Platform  
-**Status document version:** 1.10  
-**Last updated:** 2026-09-03  
+**Status document version:** 1.12  
+**Last updated:** 2026-09-04  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -14,9 +14,9 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `416c739` |
+| **`main` HEAD** | `19e3f07` |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
-| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, 5 of 6 slices shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload; deliberately did not widen B4's freshly-hardened `_recover_ambiguous_submission()` — no real caller to justify it yet). All five deliberately **not wired into `ExecutionOrchestrator`** — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet. Full suite 1418 passed/3 skips/0 failed. Only **B5 (real per-ticket close/flatten)** remains (B6 explicitly deferred by the work order until continuous-DEMO promotion) — then Phase C/AG-012 (joint with Dev 2) is the only thing left before the real submission chain can actually be wired together. NEXT: plan and implement B5. BLOCKED: none currently |
+| **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, all 6 slices now shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload) · **B5, done 2026-09-04** (`ADR-020`, real per-ticket close: `DemoOrderSendMt5Gateway.close_position()`/`.close_all_positions()`, `ExecutionOrchestrator._attempt_and_resolve_flatten()`, `FlattenCloseSink` Protocol, new `ReasonCode.FLATTEN_CLOSE_FAILED` tolerated by the flatten gate so retry survives its own halt; `_commit_flatten` deliberately unchanged — the real close only ever runs one pass later, via the same recovery branch ADR-009 already built — every existing flatten integration test passes unchanged as a result). All six deliberately **not wired into `ExecutionOrchestrator`'s entry path** (B5's close is real but its own adapter is unconstructed everywhere) — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet for entries; a flatten close needed no such authority, so B5 built and left it genuinely ready rather than also unwired-by-necessity. Full suite 1431 passed/3 skips/0 failed, 330.20s, real PostgreSQL against the isolated `crumblr_test_dev1` database (§13 seventy-ninth entry has the full breakdown). B6 (removing the flat-book reconciliation assumption) stays explicitly deferred by the work order until continuous-DEMO promotion — not part of the first canary. **Phase B is complete.** **Phase C (AG-012, single Risk authority) — Dev-1 side done same day, 2026-09-04** (`ADR-021`, cross-session-coordinated with Dev 2 before implementation, two rounds — a required-vs-lock-owns-the-transaction design correction found and fixed *before* code, both rounds acked): `risk/session.py::RiskLedgerLock` (new Protocol) + `InMemoryRiskLedgerLock`; `persistence/risk_session.py::PostgresRiskLedgerLock` (real `pg_advisory_xact_lock`, reuses `lock_assignment()`'s exact primitive, symbol-keyed); `RiskSessionStore.load_latest()`/`.save()` gain an optional `connection` param (source-compatible). `LiveDecisionOrchestrator.decide_once()` redesigned — no longer caches the ledger across calls, recovers/updates/persists fresh every cycle under the lock; closed a second, separately-found staleness gap in the same change (persistence previously only ran on a risk-`PASS` cycle, so a run of `NO_TRADE` decisions never updated the durable checkpoint). `ExecutionOrchestrator`'s FINAL Risk read joins the same lock for completeness (was already race-free, lock-for-read-consistency only). Both orchestrators' constructors gain a new *required* `risk_ledger_lock` param — every real construction site updated (`bootstrap.py::DurableRuntime`, both scripts, all test builders), plus one Dev-2-owned test file's one-line Protocol-conformance ripple found and fixed (`test_agent_decision_path.py::ExplodingSessionStore`, flagged in `review/INTEGRATION_NOTICES.md`). New tests: 2 unit (`TestADR021RiskLedgerPersistsEveryCycle`) + 2 integration against real PostgreSQL proving genuine mutual exclusion under real concurrent threads (`test_risk_ledger_lock.py`). Full suite green (exact count in §13 eightieth entry). NEXT: Dev 2 builds `decision_path.py`'s side against this on `main` — once done, AG-012 closes for real and Phase C is complete. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, **D2.2 wired to Dev 1's `assess_open_risk`** (`agent/contracts` `2312908`: `decision_path.py` now calls it directly, interim HALT pre-check deleted as redundant with `evaluate()`'s own `OPEN_RISK_UNKNOWN`, D-054 gap 2 fixed via a new `OpenRiskFraction` type distinguishing a flat book from unestablished — not yet on `main`). Found AG-015 and escalated it — **review 1.28 resolved it as an architectural correction (F-066): Core must be strategy-neutral**. NEXT: revised work order (review 1.28 §11) — unhealthy-market smoke proof, strategy-neutral `AgentMarketContextV1`, structural/opaque Gateway reason-code handling, split the external-agent Policy path away from `Regime`/strategy-id/confidence assumptions (AG-013). BLOCKED: none currently |
 | **F-051 state** | **Both parts CLOSED** (2026-08-26 / 2026-09-01) — see `review/FEEDBACK.md` F-051 for full evidence. Reader left running, read-only, toward `ict_v1`'s 120-bar threshold |
 | **PAPER_LITE** | Merged to `main` 2026-09-03 (`f645e75`, PR #1, `lite/paper-orchestrator`) — a separate, self-contained track (`application/paper_lite*.py`, `persistence/paper_lite.py`, own tests, `review/PAPER_LITE_DEV3_WORKLOG.md`, `config/paper_lite.yaml`). Not Dev 1's track; zero file overlap confirmed with the D1.2-D1.5 slices (clean rebase). Not narrated further here — see its own worklog |
@@ -10324,6 +10324,345 @@ Next:
   Dev 2) stands between all of Phase B and actually wiring the real
   submission chain together. B6 stays explicitly deferred by the work
   order until continuous-DEMO promotion.
+
+---
+
+## Update 2026-09-04 (seventy-ninth entry) — Phase B slice 6: real per-ticket close/flatten (B5) — Phase B complete
+
+```text
+Component: mt5_gateway/execution.py, mt5_gateway/demo_execution.py, application/execution_outcome.py, application/execution.py, risk/flatten_gate.py, domain/enums.py, domain/models.py
+Milestone: DEMO canary work order, Phase B, item B5 — the last unshipped Phase-B slice
+Status before: B1/B2/B3/B4/B7/B8 shipped; B5 not started; B6 explicitly deferred
+Status after:  Phase B complete (B6 stays deferred by the work order until continuous-DEMO promotion) — Phase C/AG-012 is the only remaining gate before the real submission chain (entries) can be wired together
+```
+
+**The one design revision worth recording: the real close does not happen
+inline with the commit.** The first draft had `_commit_flatten()` attempt
+the real close immediately after appending `FLATTEN_SUBMISSION_STARTED`,
+in the same call. That broke every existing
+`test_execution_flatten.py` assertion that a fully-approved config's
+*first* `flatten_once()` pass stops at `FLATTEN_SUBMISSION_STARTED`
+(`fake.close_all_positions_calls == 0` / `fake.order_send_calls == 0`
+immediately after) — and, more importantly, put a real broker write in
+the same call stack as the gate decision that had just authorized it.
+Reverted: `_commit_flatten()` is **unmodified**. The real close is
+attempted only through `_resolve_flatten_outcome()`, reached on the
+*next* pass — the same two-step "commit now, act next pass" shape item
+6's ambiguous-recovery already established for entries. Every existing
+flatten integration test (15, was 11) now passes **unchanged**.
+
+**Completed**
+
+- `mt5_gateway/execution.py::build_close_order_request()` (new) — the
+  MT5 request dict for closing one exact ticket, mirroring
+  `build_market_order_request()` but always setting `"position":
+  instruction.ticket` — the field that tells a hedging-account broker
+  which specific position to act on, never symbol/side alone.
+- `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway.close_position()`
+  (new, real) — one per-ticket close, same demo-only guard as
+  `order_send`. `.close_all_positions()` (real, was an unconditional
+  raise) — reads `positions()` fresh, closes each independently (one
+  ticket's failure never blocks the rest), returns the tickets that
+  actually closed. This one change makes
+  `risk/operator_controls.py::OperatorControls.flatten_positions()` real
+  end to end with **zero edits to `operator_controls.py` itself** — it
+  already called `broker.close_all_positions(reason=...)`.
+  `_decode_order_send_result()` factored out of the old `order_send`
+  body so both real mutating calls share one decode, not two.
+- `application/execution_outcome.py::close_result_fully_closed()` (new,
+  pure) — `OrderState.FILLED` only; `PARTIALLY_FILLED` is deliberately
+  **not** treated as closed (a named scope limit, not a silent gap — see
+  ADR-020 §8).
+- `application/execution.py`: new `FlattenCloseSink` Protocol (narrow —
+  one method, `close_position`) and an optional
+  `flatten_close_adapter: FlattenCloseSink | None = None` constructor
+  param, `None` in every existing caller/test — the exact pre-B5
+  behaviour is the default, not a flag someone has to remember to set.
+  `_attempt_and_resolve_flatten()` (new, replaces the old pure-observe
+  body of `_resolve_flatten_outcome()`, which now only reconstructs
+  typed `FlattenInstruction`s from the commitment payload and delegates)
+  — attempts a real close only when a real adapter is present *and*
+  `flatten_submission_enabled` reads `True` right now (re-checked fresh,
+  never trusted from commit time), always re-observes fresh broker state
+  before deciding, and — because `FlattenEventType` events are
+  append-once per `(flatten_request_id, event_type)`
+  (`persistence/flatten.py`) — appends `FLATTEN_OUTCOME_RESOLVED` only
+  once a terminal outcome is actually known. A residual after a genuine
+  attempt trips `ReasonCode.FLATTEN_CLOSE_FAILED`
+  (`_trip_flatten_close_failed`, the same idempotent-trip shape as the
+  three existing `_trip_*` helpers) and appends **nothing** — the next
+  pass retries automatically, no artificial counter, never a blind
+  resubmission of an already-closed ticket.
+- `flatten_once()`'s two call sites now trip `OVERNIGHT_EXPOSURE` from
+  their own fresh-before-any-attempt `positions` read, **before**
+  resolving/committing rather than after — a real close inside that call
+  can now change what's actually open, and the old ordering would have
+  re-tripped from a stale snapshot moments after a clean resolution.
+  `KillSwitch.trip()`'s idempotence means this is a no-op reordering for
+  every pre-B5 case.
+- `risk/flatten_gate.py::_TOLERATED_HALT_REASONS` gains
+  `FLATTEN_CLOSE_FAILED` — the halt a failed close causes must not brick
+  the mechanism that would otherwise retry it, same reasoning as the
+  four reasons already there.
+- New `ReasonCode.FLATTEN_CLOSE_FAILED` (`domain/enums.py`, additive).
+  `ExecutionResult.intent_id` widened `UUID` → `UUID | None`
+  (`domain/models.py`) — a close has no `TradeIntent`; confirmed via
+  grep before widening that nothing anywhere reads this field back out.
+  Both logged in `review/INTEGRATION_NOTICES.md` (shared-contract
+  territory).
+- `review/adr/ADR-020-real-flatten-close.md` written — full reasoning,
+  including the reverted same-pass design and why (§5), and an explicit
+  observed-but-correct effect: in practice `OVERNIGHT_EXPOSURE` almost
+  always wins the kill switch's global `active_reasons` slot before
+  `FLATTEN_CLOSE_FAILED` can (§6) — the specific reason stays visible on
+  the durable outcome/event regardless, which is where a flatten-specific
+  reader should look.
+- `review/DEVIATIONS.md`: D-050 narrows to just the still-open
+  pre-deadline connectivity watch and the untouched ADR-004 §7 owner
+  questions (two of three original pieces closed); D-033 updated to
+  reflect the close mechanism now being real though still fully inert;
+  D-054 gap 1 gets an accuracy note (a real mechanism exists in code but
+  is not yet live-wired, so the BLOCK-not-HALT rationale is unchanged in
+  practice). `review/adr/ADR-009-automatic-flatten-submission.md` §3's
+  scope table and "what this does not do" prose updated to point at
+  ADR-020 rather than restate the now-stale "unbuilt and unreachable"
+  claim.
+
+**Evidence**
+
+- New/extended tests: `tests/unit/test_demo_order_send_gateway.py` — 9
+  new (`close_position` request shape/decode/demo-guard, `close_all_positions`
+  multi-ticket/partial-failure/transport-failure/empty-book), 1 test
+  replaced (`test_close_all_positions_still_refuses` → real behaviour),
+  `TestNotWiredIntoTheOrchestrator`'s docstring updated, mechanical
+  assertion unchanged and still passes. `tests/integration
+  /test_execution_flatten.py` — 4 new (`TestRealFlattenClose`: a
+  successful close resolves `flattened=True` next pass and stays
+  idempotent on a third; a rejected close trips the halt, does not
+  brick the gate, and succeeds on retry; a transport failure on one
+  ticket does not block a second; an already-externally-closed ticket
+  is never re-attempted), all 11 pre-existing tests in the file
+  unchanged and still green. `tests/unit/test_flatten_gate.py` — 1 new
+  (`FLATTEN_CLOSE_FAILED` joins the tolerated set).
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (192 source files) after every edit in this slice.
+- Full suite (unit + integration, real PostgreSQL, `crumblr_test_dev1`):
+  **1431 passed / 3 pre-existing skips / 0 failed, 330.20s** — up from
+  the seventy-eighth entry's 1418 baseline, net +13 collected after this
+  slice's new tests (9 in `test_demo_order_send_gateway.py`: 5
+  `TestClosePosition` + 4 `TestCloseAllPositions`; 4 new
+  `TestRealFlattenClose` in `test_execution_flatten.py`; 1 new in
+  `test_flatten_gate.py`) and one existing test rewritten in place
+  (`test_close_all_positions_still_refuses` → real behaviour, same slot,
+  not an addition). An intermediate full run mid-slice (before the
+  integration-level `TestRealFlattenClose`/flatten-gate tests existed)
+  also came back clean at 1426/3/0 — confirms the shared-contract
+  widenings (`ExecutionResult.intent_id`, the new `ReasonCode`) broke
+  nothing elsewhere in the tree before this slice's own new coverage was
+  even added.
+- Determinism: not re-run this slice — no replay-path code touched.
+
+**Problems found**
+
+- The same-pass design (§ above) — caught by the *existing* test suite
+  immediately, not discovered later. Exactly what that suite is for.
+- `_trip_overnight_exposure` ordering: a genuine, if narrow, correctness
+  gap the same-pass revision surfaced (a stale `positions` snapshot
+  could have re-tripped a halt a clean close had just resolved) — fixed
+  by reordering both call sites, not worked around.
+
+**Risk impact**
+
+- None in any shipped config: `flatten_submission_enabled` stays `false`
+  everywhere, and no adapter is constructed by any real caller — the
+  same "real, tested, structurally inert" status every Phase-B slice
+  before this one shipped with.
+- The operator control path (`OperatorControls.flatten_positions()`) is
+  now genuinely consequential the moment a real `BrokerPort` is handed
+  to it — but `OperatorControls` itself is constructed nowhere in
+  `src/`/`scripts/` today (confirmed by grep before this slice began),
+  so this is not a live capability change.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing, per standing session pattern.
+
+Next:
+- Ask for commit approval; push after re-confirming `origin/main`
+  hasn't moved; notify Dev 2 once pushed (informational — no
+  cross-track surface change expected).
+- **Phase B is complete.** Phase C/AG-012 (one serialized shared
+  execution/Risk authority, joint with Dev 2) is the only remaining gate
+  before entries can be wired into a real submission chain at all.
+
+---
+
+## Update 2026-09-04 (eightieth entry) — Phase C: single Risk-authority lock (AG-012, ADR-021), Dev-1 side
+
+```text
+Component: risk/session.py, persistence/risk_session.py, application/live_decision.py, application/execution.py, application/bootstrap.py
+Milestone: Owner/reviewer coordination order Phase C — "Dev 1 + Dev 2 — close AG-012 at the execution convergence point"
+Status before: AG-012 open, interim option-2 mitigation only (decision_path.py re-recovers fresh every call, no shared lock, no fix on the LiveDecisionOrchestrator side)
+Status after:  Dev-1 side implemented and tested; Dev 2's decision_path.py side is the only remaining piece before AG-012 closes for real
+```
+
+**Cross-session-coordinated with Dev 2 before writing any code, two full
+
+rounds — the process working as designed, not just documentation
+theatre.** Round 1: drafted ADR-021 adopting Dev 2's own AG-012 design
+analysis (`review/AGENT_STATUS.md` §0n, `pg_advisory_xact_lock`,
+symbol-keyed); Dev 2 acked, with one precision correction to a
+supporting claim. Round 2: while starting implementation, found a real
+gap in the acked design before writing a single line — `held()`'s
+required-external-`connection` shape had no natural source in either
+orchestrator (neither owns a raw `Engine`). Revised to lock-owns-the-
+transaction-and-yields-it-out, sent back to Dev 2 explicitly flagged as
+a course correction (not silently changed after ack), re-verified
+independently on their side (re-grepped `live_decision.py` themselves)
+and re-acked, with a second precision correction (`RunRecorder` does
+hold an `Engine` privately — the accurate claim is "no orchestrator
+*class* owns one directly," not "nothing in reach of one does"). Both
+corrections fixed in the ADR in place before implementation began.
+
+**Completed**
+
+- `risk/session.py`: new `RiskLedgerLock` Protocol (`held(canonical_symbol)
+  -> AbstractContextManager[Connection | None]`) and
+  `InMemoryRiskLedgerLock` (no-op, pairs `InMemoryRiskSessionStore` —
+  both are legitimate production code per that class's own docstring,
+  "for tests and for replays that should not outlive their process," not
+  merely test doubles). `RiskSessionStore.load_latest()`/`.save()` both
+  gain an optional `connection: Connection | None = None` param
+  (source-compatible — every existing caller that omits it is
+  unaffected).
+- `persistence/risk_session.py`: new `PostgresRiskLedgerLock` — one
+  `pg_advisory_xact_lock(hashtext('risk-ledger:' || canonical_symbol))`
+  per symbol, opens its own transaction and yields the connection out.
+  Reuses `persistence/agent_gateway.py::lock_assignment()`'s exact
+  primitive, not a new mechanism. `PostgresRiskSessionStore.load_latest()`/
+  `.save()` updated to route through the given `connection` when present.
+- `application/live_decision.py::LiveDecisionOrchestrator.decide_once()`
+  — the real behavioural change. No longer recovers the ledger once
+  (first call/trading-day rollover) and caches it across calls; now
+  recovers, updates and persists fresh **every cycle**, inside one
+  `with self._risk_ledger_lock.held(...) as connection:` block, right
+  after `positions`/`open_risk` are computed and before the loss-gate/
+  session-boundary checks. `session.recover_session()` already derives
+  same-day-vs-new-day semantics from `(recorded.trading_day,
+  market_day)` itself, so the old manual day-rollover branch
+  (`EquityLedger.start_new_session()` called directly from `decide_once()`)
+  is gone — one fewer piece of state to keep in sync by hand. **Closed a
+  second, separately-found gap in the same change**: persistence
+  previously only ran on a cycle that reached a risk-`PASS` decision, so
+  a run of `NO_TRADE` decisions of any length left the durable checkpoint
+  stale — independent of the AG-012 race itself, named explicitly in
+  `review/adr/ADR-021-single-risk-authority-lock.md` §3 rather than
+  folded silently into "the AG-012 fix."
+- `application/execution.py::ExecutionOrchestrator._process()`'s own
+  FINAL Risk `load_latest()` read joins the same lock too — it was
+  already fresh every pass (no caching, review 1.23 F-058), so this was
+  never part of the race, but it is the literal closest thing to the
+  owner work order's own "final-Risk-to-broker-side-effect critical
+  section" wording, and the marginal cost is small (no write-back on
+  this call site either — lock-for-read-consistency only, same as
+  Dev 2's side).
+- `application/bootstrap.py::DurableRuntime` gains `risk_ledger_lock`,
+  constructed alongside `session_store` in `build_durable_runtime()` —
+  every real script (`scripts/live_decision.py`,
+  `scripts/run_execution_preflight_evidence.py`) picks it up through
+  that one composition root, no manual wiring needed at each call site
+  beyond threading the new field through.
+- Both orchestrators' constructors gain a new **required**
+  `risk_ledger_lock` parameter — not source-compatible, the same kind of
+  break PL-006's `recover_session()` signature change was (2026-09-03).
+  Every real construction site updated in this same change:
+  `DurableRuntime`/`build_durable_runtime`, both scripts,
+  `tests/integration/_execution_fixtures.py`, every builder in
+  `tests/unit/test_live_decision.py`/`tests/integration/test_live_decision.py`.
+- Found and fixed one Dev-2-owned test-file ripple while wiring this:
+  `tests/unit/test_agent_decision_path.py::ExplodingSessionStore` (a
+  local, in-test-method `InMemoryRiskSessionStore` subclass) needed the
+  same `connection` parameter added to satisfy the widened Protocol — a
+  one-line, purely mechanical fix, not touching any `agent_gateway/`
+  production code. Flagged explicitly in
+  `review/INTEGRATION_NOTICES.md`, not silently absorbed.
+
+**Evidence**
+
+- New tests: `tests/unit/test_live_decision.py::TestADR021RiskLedgerPersistsEveryCycle`
+  (2 — a `NO_TRADE` cycle now persists and acquires the lock exactly
+  once; a second, independent orchestrator instance sharing only the
+  durable store observes the first's persisted state, proving the ledger
+  is no longer retained in-process across calls).
+  `tests/integration/test_risk_ledger_lock.py` (2, real PostgreSQL, real
+  threads — a second lock holder never starts before the first releases;
+  two different symbols' locks do not block each other, proving the key
+  is genuinely per-symbol, mirroring
+  `test_agent_gateway_store.py::TestRateLimitIsAtomicUnderRealConcurrency`'s
+  own "real concurrent connections, real Postgres lock manager"
+  discipline for `lock_assignment()`).
+- quality gate: `ruff check .` / `ruff format --check .` / `mypy` all
+  clean (193 source files).
+- Full existing suite re-run unchanged and green throughout — the
+  redesign changes ledger recovery/persistence *cadence*, not any
+  externally-observable decision/outcome:
+  `tests/integration/test_live_decision.py`,
+  `test_execution_orchestrator.py`, `test_execution_flatten.py`,
+  `tests/unit/test_risk_session.py` (62 together, isolated run), the
+  full non-integration suite (1178 passed/1 pre-existing skip), and the
+  full suite including integration, real PostgreSQL against the
+  isolated `crumblr_test_dev1` database: **1435 passed / 3 pre-existing
+  skips / 0 failed, 380.54s** — exactly 1431 (B5's own final count) + 4
+  new (2 unit, 2 integration).
+
+**Problems found**
+
+- The required-`connection` design (round 1's acked shape) had no
+  natural caller in either orchestrator — caught by re-reading the
+  actual target files before writing code, not discovered mid-implementation.
+- The second, separate `NO_TRADE`-cycles-never-persist staleness gap —
+  found while redesigning `decide_once()` for the AG-012 fix, closed in
+  the same change rather than deferred.
+- One transient, non-reproducing failure during this work: a full-suite
+  run taken *while* other `pytest` processes were still touching the
+  same `crumblr_test_dev1` database concurrently (this session's own
+  earlier targeted runs, not yet finished) showed 1 failed + 2 errored
+  in `test_market_data_store.py::TestTheReplayRecordsWhatItSaw` —
+  nothing this change touches. Re-run in isolation (that file alone,
+  then the full suite alone, nothing else hitting the database) came
+  back clean both times, confirming environment contention from
+  concurrent DB access, not a real regression — the same "random
+  `relation already exists`" class of failure `CRUMBLR_DEV1_CORE_EXECUTION_INSTRUCTIONS.md`
+  §2 already names and instructs to treat this way. Recorded here rather
+  than silently reruns-until-green, per this session's own "report
+  failures plainly" standard.
+
+**Risk impact**
+
+- None in any shipped config: `order_send` remains unreachable from
+  every pipeline regardless of this fix — AG-012 was never a live safety
+  gap (FINAL Risk already re-derives everything from real broker state,
+  independent of either pipeline's intent-time ledger view), only a
+  Phase-C precondition for agent-driven submission to ever be treated as
+  real.
+- Real behavioural change to a Phase-4-approved, already-reviewed
+  component (`LiveDecisionOrchestrator`) — exactly the kind of change
+  this session's own standing practice is to write up as its own ADR
+  before merging, not slip in quietly. Done here.
+
+**Decision**
+
+- Not yet committed — will ask for explicit per-turn approval before
+  committing, per standing session pattern.
+
+Next:
+- Confirm the full suite's final result, then ask for commit approval;
+  push after re-confirming `origin/main` hasn't moved; notify Dev 2 once
+  pushed so they can build `decision_path.py`'s side against the real
+  thing.
+- Once Dev 2's side lands: `review/AGENT_FEEDBACK.md` AG-012 closes for
+  real. Phase C is otherwise Dev-1-complete.
 
 ---
 

@@ -139,6 +139,7 @@ def orchestrator_for(
         recorder=runtime.recorder,
         kill_switch=runtime.kill_switch,
         session_store=runtime.session_store,
+        risk_ledger_lock=runtime.risk_ledger_lock,
         decision_window_store=PostgresDecisionWindowStore(engine),
         clock=lambda: ticks[-1].received_time_utc,
     )

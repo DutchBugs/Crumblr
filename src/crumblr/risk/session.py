@@ -26,10 +26,14 @@ reconciliation. See D-032.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
+
+from sqlalchemy import Connection
 
 from crumblr.domain.enums import ReasonCode
 from crumblr.domain.money import ZERO
@@ -108,26 +112,87 @@ class RiskSessionStore(Protocol):
     `load_latest` must never raise. An implementation that cannot read its
     own record returns `SessionRecord(unreadable=...)`, so the caller cannot
     mistake a failed read for an absent one.
+
+    `connection` (ADR-021, AG-012/Phase C): optional, so every existing
+    caller that omits it keeps today's exact behaviour (its own
+    transaction). A caller that *does* pass one — `LiveDecisionOrchestrator`
+    inside `RiskLedgerLock.held()`'s block, below — makes this call
+    participate in that caller's already-open transaction instead of
+    opening a second one, so the read/write and the advisory lock share
+    one atomic scope.
     """
 
-    def load_latest(self) -> SessionRecord: ...
+    def load_latest(self, *, connection: Connection | None = None) -> SessionRecord: ...
 
-    def save(self, state: RiskSessionState) -> None: ...
+    def save(self, state: RiskSessionState, *, connection: Connection | None = None) -> None: ...
 
 
 class InMemoryRiskSessionStore:
-    """For tests and for replays that should not outlive their process."""
+    """For tests and for replays that should not outlive their process.
+
+    `connection` is accepted (Protocol conformance, ADR-021) and always
+    ignored — there is no real transaction for an in-memory store to
+    participate in.
+    """
 
     def __init__(self, initial: RiskSessionState | None = None) -> None:
         self._state = initial
         self.saves = 0
 
-    def load_latest(self) -> SessionRecord:
+    def load_latest(self, *, connection: Connection | None = None) -> SessionRecord:
         return SessionRecord(state=self._state)
 
-    def save(self, state: RiskSessionState) -> None:
+    def save(self, state: RiskSessionState, *, connection: Connection | None = None) -> None:
         self._state = state
         self.saves += 1
+
+
+class RiskLedgerLock(Protocol):
+    """Serializes the recover→evaluate(→persist) critical section around
+
+    `risk_session_states` for one canonical symbol, across every process
+    that reads or writes it (ADR-021, AG-012/Phase C) —
+    `LiveDecisionOrchestrator` (intent-time Risk, internal strategies),
+    `agent_gateway/decision_path.py::evaluate_agent_trade_intent`
+    (intent-time Risk, external-agent proposals) and
+    `ExecutionOrchestrator._process()` (FINAL Risk, already race-free on
+    its own but included for completeness — see ADR-021 §5).
+
+    Opens its own transaction and yields the connection out, rather than
+    requiring one in: none of the three call sites above owns a raw
+    `Engine` directly (ADR-021 §2.1's "note on the first draft" records
+    why a required-`connection` shape was tried first and reverted).
+    `RiskSessionStore.load_latest()`/`.save()` calls made with the
+    yielded `connection` run inside the same lock/transaction scope.
+    """
+
+    def held(self, canonical_symbol: str) -> AbstractContextManager[Connection | None]: ...
+
+    """`with lock.held(canonical_symbol) as connection: ...` — every real
+
+    implementation applies `@contextmanager` to its own `held()`, which
+    satisfies this signature (a generator decorated with `@contextmanager`
+    returns an `AbstractContextManager` when called). Yields `Connection | None`,
+    not a bare `Connection`: `InMemoryRiskLedgerLock` (below) genuinely
+    has no real connection to yield, and `RiskSessionStore.load_latest()`/
+    `.save()`'s own `connection: Connection | None = None` parameter
+    already accepts either."""
+
+
+class InMemoryRiskLedgerLock:
+    """For tests and for replays that should not outlive their process —
+
+    `InMemoryRiskSessionStore`'s own pairing. A no-op: a single in-process
+    caller needs no real mutual exclusion, and `InMemoryRiskSessionStore`
+    ignores `connection` regardless, so the `None` this yields is never
+    dereferenced by anything that matters. Real cross-process
+    serialization is `persistence/risk_session.py::PostgresRiskLedgerLock`
+    (ADR-021).
+    """
+
+    @contextmanager
+    def held(self, canonical_symbol: str) -> Iterator[Connection | None]:
+        yield None
 
 
 @dataclass(frozen=True)

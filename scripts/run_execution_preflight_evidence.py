@@ -282,6 +282,7 @@ def main() -> int:
         broker_state=broker_state,
         instrument_specs=instrument_specs,
         session_store=runtime.session_store,
+        risk_ledger_lock=runtime.risk_ledger_lock,
         kill_switch=runtime.kill_switch,
         adapter=adapter,
         canonical_symbol=args.canonical_symbol,

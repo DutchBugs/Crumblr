@@ -1,15 +1,16 @@
 """The real gate on a flatten submission (core critical path item 7, ADR-009).
 
 `risk/submission_gate.py`'s own reasoning, applied to the different later
-question of whether an automatic *close* may be committed to. `close_all_
-positions`/`order_send` stay technically impossible regardless of what
-this module returns: `mt5_gateway/execution.py::OrderCheckMt5Gateway
-.close_all_positions` always raises, unconditionally, and nothing in this
-codebase calls `evaluate_flatten_gate` yet — there is no caller that acts
-on a `True` result. This module makes the gate itself real and tested,
-ahead of the engine that will one day call it, the same "build the
-approved shape before the schedule pressure" reasoning `submission_gate.py`
-was built under.
+question of whether an automatic *close* may be committed to.
+`application/execution.py::ExecutionOrchestrator._commit_flatten` calls this
+for real on every `flatten_once()` pass — a closed gate (`flatten_submission_enabled=False`
+in every shipped config today, condition 10) means `FLATTEN_SUBMISSION_STARTED`
+is never even reached, so `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway
+.close_position()` (Phase B item B5, real since `review/adr/ADR-020-real-flatten-close.md`)
+stays unreachable in practice for exactly that reason, not because this gate
+is unconsulted. `OrderCheckMt5Gateway.close_all_positions`/`.order_send`
+remain the unconditional raises they always were — this gate governs the
+*separate*, real `DemoOrderSendMt5Gateway` path, never that one.
 
 Eleven required conditions, **all** required simultaneously — any one
 false or unknown closes the gate. Eight are `submission_gate.py`'s own
@@ -122,6 +123,7 @@ _TOLERATED_HALT_REASONS: frozenset[ReasonCode] = frozenset(
         ReasonCode.PROTECTIVE_STOP_MISSING,
         ReasonCode.PROTECTIVE_STOP_MISMATCH,
         ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS,
+        ReasonCode.FLATTEN_CLOSE_FAILED,
     }
 )
 """Halt reasons that do not, by themselves, close this gate. See the
@@ -139,7 +141,14 @@ own BLOCK-not-HALT choice was designed to avoid. `SUBMISSION_INTEGRITY_AMBIGUOUS
 (Phase B item B4) joins them for the same reason: flattening closes
 whatever the broker actually reports, regardless of which request a
 position is or isn't attributable to, so becoming flat is still the
-safe resolution even when that attribution itself is in doubt."""
+safe resolution even when that attribution itself is in doubt.
+`FLATTEN_CLOSE_FAILED` (Phase B item B5,
+`review/adr/ADR-020-real-flatten-close.md`) joins them for the most direct
+version of this reasoning yet: it is the halt a failed close attempt
+itself causes, so excluding it here is what lets the mechanism retry on
+the very next pass instead of being permanently bricked by its own
+safety trip — condition 8 (a flatten is still required) keeps this from
+looping forever once the position genuinely closes."""
 
 
 @dataclass(frozen=True)

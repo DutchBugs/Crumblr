@@ -34,7 +34,13 @@ from typing import Any, NoReturn
 from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import Side
 from crumblr.domain.events import OrderCheckCompleted
-from crumblr.domain.models import AccountState, ApprovedOrder, InstrumentSpec, PositionState
+from crumblr.domain.models import (
+    AccountState,
+    ApprovedOrder,
+    FlattenInstruction,
+    InstrumentSpec,
+    PositionState,
+)
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Module
 from crumblr.mt5_gateway.port import ExecutionDisabledError
@@ -117,6 +123,37 @@ def build_market_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[
     if order.take_profit_price is not None:
         request["tp"] = float(order.take_profit_price)
     return request
+
+
+def build_close_order_request(module: Mt5Module, instruction: FlattenInstruction) -> dict[str, Any]:
+    """The MT5 request dict for closing exactly one open position (Phase B
+
+    item B5, `review/adr/ADR-020-real-flatten-close.md`). A close *is* an
+    opposite-side `order_send`, with one field `build_market_order_request`
+    never needs: `"position": instruction.ticket`. On a hedging account this
+    is what tells the broker which specific ticket to act on — closing by
+    symbol/side alone would let a close ambiguously net against, or open a
+    new position alongside, any other position already open on the same
+    symbol (exactly what the B5 work order names as forbidden: "must not
+    accidentally open an opposite hedge/new position"). `volume` is always
+    `instruction.volume`, the broker's own last-reported size for this exact
+    ticket, never re-derived. No `sl`/`tp`: a close does not set new
+    protective levels.
+    """
+    order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(instruction.close_side)
+    if order_type_constant is None:
+        raise ValueError(f"no MT5 market order type for close_side {instruction.close_side}")
+
+    return {
+        "action": module.TRADE_ACTION_DEAL,
+        "symbol": instruction.broker_symbol,
+        "volume": float(instruction.volume),
+        "type": getattr(module, order_type_constant),
+        "position": instruction.ticket,
+        "magic": instruction.magic or 0,
+        "type_time": module.ORDER_TIME_GTC,
+        "type_filling": module.ORDER_FILLING_IOC,
+    }
 
 
 class OrderCheckMt5Gateway:

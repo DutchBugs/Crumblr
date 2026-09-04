@@ -95,6 +95,7 @@ def main() -> int:
         recorder=runtime.recorder,
         kill_switch=runtime.kill_switch,
         session_store=runtime.session_store,
+        risk_ledger_lock=runtime.risk_ledger_lock,
         decision_window_store=PostgresDecisionWindowStore(runtime.engine),
         canonical_symbol=args.canonical_symbol,
         timeframe=args.timeframe,

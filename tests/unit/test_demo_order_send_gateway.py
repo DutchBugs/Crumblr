@@ -1,15 +1,18 @@
-"""`DemoOrderSendMt5Gateway` (Phase B item B1), against a fake terminal.
+"""`DemoOrderSendMt5Gateway` (Phase B items B1 and B5), against a fake terminal.
 
 **What these tests prove and what they do not.** They exercise the adapter:
 a real `order_send` call reaches the fake module and its result decodes
 correctly, reads/`order_check` delegate to the wrapped `OrderCheckMt5Gateway`
 unchanged, a non-demo/mismatched account is refused before any broker write
-is attempted, and `cancel_pending_orders`/`close_all_positions` stay
-unconditionally refused (Phase B item B5's scope, not this one's). They
-prove nothing about how Pepperstone's real `order_send` actually behaves —
-that stays unproven until this adapter runs against the real demo account.
-**This class is not constructed or referenced anywhere in
-`application/execution.py` — see `TestNotWiredIntoTheOrchestrator` below.**
+is attempted, `close_position`/`close_all_positions` are real (Phase B item
+B5, `review/adr/ADR-020-real-flatten-close.md`), and `cancel_pending_orders`
+stays unconditionally refused (no pending-order support exists anywhere in
+this platform). They prove nothing about how Pepperstone's real
+`order_send`/close actually behaves — that stays unproven until this adapter
+runs against the real demo account. **This class is not constructed or
+referenced anywhere in `application/execution.py` by name — see
+`TestNotWiredIntoTheOrchestrator` below; a narrow `FlattenCloseSink` Protocol
+is how B5's real close reaches the orchestrator instead.**
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import pytest
 
 from crumblr.config import AccountGuardConfig
 from crumblr.domain.enums import EntryType, Environment, OrderState, Side
-from crumblr.domain.models import ApprovedOrder
+from crumblr.domain.models import ApprovedOrder, FlattenInstruction
 from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.demo_execution import DemoOrderSendMt5Gateway
 from crumblr.mt5_gateway.execution import MissingFinalRiskDecisionError, OrderCheckMt5Gateway
@@ -101,6 +104,27 @@ def order_send_result(**overrides: Any) -> Any:
     return SimpleNamespace(**fields)
 
 
+def position_row(**overrides: Any) -> Any:
+    from types import SimpleNamespace
+
+    fields: dict[str, Any] = {
+        "ticket": 900001,
+        "symbol": "EURUSD",
+        "type": 0,  # POSITION_TYPE_BUY
+        "volume": 0.10,
+        "price_open": 1.08000,
+        "price_current": 1.08200,
+        "sl": 1.07500,
+        "tp": 0.0,
+        "time": int(FAKE_NOW.timestamp()),
+        "profit": 20.0,
+        "swap": 0.0,
+        "magic": 123456,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 class FakeMt5:
     """A stand-in terminal exposing exactly the surface both
 
@@ -129,11 +153,15 @@ class FakeMt5:
         account: Any | None = None,
         order_check_response: Any | None = None,
         order_send_response: Any | None = None,
+        order_send_responses: list[Any] | None = None,
+        positions: tuple[Any, ...] = (),
         error: tuple[int, str] = (1, "Success"),
     ) -> None:
         self._account = account if account is not None else account_info()
         self._order_check_response = order_check_response
         self._order_send_response = order_send_response
+        self._order_send_responses = list(order_send_responses) if order_send_responses else None
+        self._positions = positions
         self._error = error
         self.order_check_requests: list[dict[str, Any]] = []
         self.order_send_requests: list[dict[str, Any]] = []
@@ -202,7 +230,7 @@ class FakeMt5:
         return ()
 
     def positions_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...] | None:
-        return ()
+        return self._positions
 
     def orders_get(self, *_args: Any, **_kwargs: Any) -> tuple[Any, ...] | None:
         return ()
@@ -216,6 +244,9 @@ class FakeMt5:
     def order_send(self, request: dict[str, Any]) -> Any:
         self.order_send_calls += 1
         self.order_send_requests.append(request)
+        if self._order_send_responses is not None:
+            response = self._order_send_responses[self.order_send_calls - 1]
+            return None if response is _MISSING else response
         if self._order_send_response is _MISSING:
             return None
         return self._order_send_response if self._order_send_response else order_send_result()
@@ -245,10 +276,33 @@ def approved_order(**overrides: Any) -> ApprovedOrder:
     return ApprovedOrder.model_validate(fields)
 
 
+def flatten_instruction(**overrides: Any) -> FlattenInstruction:
+    fields: dict[str, Any] = {
+        "flatten_request_id": uuid4(),
+        "ticket": 900001,
+        "broker_symbol": "EURUSD",
+        "position_side": Side.BUY,
+        "close_side": Side.SELL,
+        "volume": "0.10",
+        "open_price": "1.08000",
+        "opened_at_utc": FAKE_NOW - timedelta(hours=2),
+        "magic": 123456,
+        "crossed_weekly_close": False,
+        "observed_at_utc": FAKE_NOW,
+    }
+    fields.update(overrides)
+    return FlattenInstruction.model_validate(fields)
+
+
 def gateway(fake: FakeMt5) -> DemoOrderSendMt5Gateway:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=5_000_123, password="x", server="PepperstoneUK-Demo"))
-    order_check_gateway = OrderCheckMt5Gateway(client, GUARD)
+    # A fixed clock matching FAKE_NOW: `positions()` (Phase B item B5's
+    # close_all_positions reads it) derives a broker-clock offset from
+    # `symbol_info_tick`'s fixed `time` versus "now" — a real wall clock
+    # here would drift from that fixed fixture value over real time and
+    # eventually trip `ClockOffsetUnavailableError`'s plausibility check.
+    order_check_gateway = OrderCheckMt5Gateway(client, GUARD, clock=lambda: FAKE_NOW)
     return DemoOrderSendMt5Gateway(order_check_gateway, client)
 
 
@@ -415,7 +469,131 @@ class TestReadsAndOrderCheckDelegate:
 
 
 # --------------------------------------------------------------------------- #
-# Everything else — still structurally disabled (Phase B item B5)
+# close_position — the real, new per-ticket close (Phase B item B5)
+# --------------------------------------------------------------------------- #
+
+
+class TestClosePosition:
+    def test_a_close_targets_the_exact_ticket_and_opposite_side(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        instruction = flatten_instruction(
+            ticket=900042, position_side=Side.BUY, close_side=Side.SELL, volume="0.25"
+        )
+
+        gate.close_position(instruction)
+
+        request = fake.order_send_requests[0]
+        assert request["position"] == 900042
+        assert request["type"] == FakeMt5.ORDER_TYPE_SELL
+        assert request["volume"] == pytest.approx(0.25)
+        assert request["symbol"] == "EURUSD"
+        assert "sl" not in request
+        assert "tp" not in request
+
+    def test_closing_a_sell_position_requests_a_buy(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        instruction = flatten_instruction(position_side=Side.SELL, close_side=Side.BUY)
+
+        gate.close_position(instruction)
+
+        assert fake.order_send_requests[0]["type"] == FakeMt5.ORDER_TYPE_BUY
+
+    def test_a_full_close_decodes_as_filled(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        instruction = flatten_instruction()
+
+        result = gate.close_position(instruction)
+
+        assert result.state is OrderState.FILLED
+        assert result.order_request_id == instruction.flatten_request_id
+        assert result.intent_id is None
+        assert result.requested_volume == instruction.volume
+
+    def test_a_rejected_close_decodes_as_rejected(self) -> None:
+        fake = FakeMt5(
+            order_send_response=order_send_result(retcode=10_019, comment="No money", order=0)
+        )
+        gate = gateway(fake)
+
+        result = gate.close_position(flatten_instruction())
+
+        assert result.state is OrderState.REJECTED
+
+    def test_demo_only_guard_applies_before_any_close_is_attempted(self) -> None:
+        fake = FakeMt5(account=account_info(trade_mode=ACCOUNT_TRADE_MODE_REAL))
+        gate = gateway(fake)
+
+        with pytest.raises(AccountGuardError, match="not a demo account"):
+            gate.close_position(flatten_instruction())
+
+        assert fake.order_send_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# close_all_positions — the real per-ticket loop (Phase B item B5)
+# --------------------------------------------------------------------------- #
+
+
+class TestCloseAllPositions:
+    def test_every_open_position_is_closed_and_reported(self) -> None:
+        fake = FakeMt5(
+            positions=(
+                position_row(ticket=1, type=0),  # BUY
+                position_row(ticket=2, type=1),  # SELL
+            ),
+            order_send_responses=[order_send_result(order=1), order_send_result(order=2)],
+        )
+        gate = gateway(fake)
+
+        closed = gate.close_all_positions(reason="operator flatten: test")
+
+        assert closed == (1, 2)
+        assert fake.order_send_requests[0]["position"] == 1
+        assert fake.order_send_requests[0]["type"] == FakeMt5.ORDER_TYPE_SELL  # closes a BUY
+        assert fake.order_send_requests[1]["position"] == 2
+        assert fake.order_send_requests[1]["type"] == FakeMt5.ORDER_TYPE_BUY  # closes a SELL
+
+    def test_a_rejected_ticket_does_not_block_the_rest(self) -> None:
+        fake = FakeMt5(
+            positions=(position_row(ticket=1), position_row(ticket=2)),
+            order_send_responses=[
+                order_send_result(order=0, retcode=10_019, comment="No money"),
+                order_send_result(order=2),
+            ],
+        )
+        gate = gateway(fake)
+
+        closed = gate.close_all_positions(reason="test")
+
+        assert closed == (2,)
+        assert fake.order_send_calls == 2
+
+    def test_a_transport_failure_on_one_ticket_does_not_block_the_rest(self) -> None:
+        fake = FakeMt5(
+            positions=(position_row(ticket=1), position_row(ticket=2)),
+            order_send_responses=[_MISSING, order_send_result(order=2)],
+        )
+        gate = gateway(fake)
+
+        closed = gate.close_all_positions(reason="test")
+
+        assert closed == (2,)
+
+    def test_no_open_positions_closes_nothing(self) -> None:
+        fake = FakeMt5(positions=())
+        gate = gateway(fake)
+
+        closed = gate.close_all_positions(reason="test")
+
+        assert closed == ()
+        assert fake.order_send_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# Everything else — still structurally disabled
 # --------------------------------------------------------------------------- #
 
 
@@ -425,11 +603,6 @@ class TestStillDisabled:
         with pytest.raises(ExecutionDisabledError, match="cancel_pending_orders"):
             gate.cancel_pending_orders()
 
-    def test_close_all_positions_still_refuses(self) -> None:
-        gate = gateway(FakeMt5())
-        with pytest.raises(ExecutionDisabledError, match="close_all_positions"):
-            gate.close_all_positions(reason="test")
-
 
 # --------------------------------------------------------------------------- #
 # Structural proof this slice does not wire the new adapter in
@@ -438,15 +611,19 @@ class TestStillDisabled:
 
 class TestNotWiredIntoTheOrchestrator:
     def test_execution_orchestrator_never_references_the_new_adapter(self) -> None:
-        """Phase B items B1+B2's own scope decision: this class exists,
+        """Phase B items B1+B2's own scope decision, still true after B5:
 
-        fully real and tested, but nothing in `ExecutionOrchestrator`'s
-        own code holds a reference to it — wiring the real call site in
-        is deferred until the account pin (B7), the one-shot canary
-        permit (B8) and the shared execution/Risk authority (Phase
-        C/AG-012) actually exist. A direct, mechanical proof, mirroring
-        `test_execution_reconciliation.py::TestStillInert`'s own
-        `inspect.getsource` idiom.
+        this concrete class exists, fully real and tested, but
+        `application/execution.py` never names it — wiring a real *entry*
+        call site in is still deferred until the account pin (B7), the
+        one-shot canary permit (B8) and the shared execution/Risk
+        authority (Phase C/AG-012) actually exist. Phase B item B5 does
+        add a real *close* capability that the orchestrator can reach —
+        but only through the narrow `application.execution.FlattenCloseSink`
+        Protocol, never through this concrete class by name, so this
+        mechanical assertion is unchanged and still meaningful. A direct
+        proof, mirroring `test_execution_reconciliation.py::TestStillInert`'s
+        own `inspect.getsource` idiom.
         """
         import inspect
 
