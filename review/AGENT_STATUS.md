@@ -1910,6 +1910,115 @@ rather than two long-diverged histories.
 
 ---
 
+## 0ab. Owner authorization PL-004 — Fase 1-4 (Static Agent repo, external) done 2026-09-05, Fase 5 (Crumblr end-to-end) not started
+
+Owner explicitly extended scope to modify the external GitHub repository
+`DutchBugs/crumblr-static-agent-host` directly, to close F-066 conditions
+2 ("strategy runs inside the Agent") and 7 ("Crumblr PAPER_LITE end-to-end
+proof") — the fork's own strategy runtime still trusted a pre-computed
+observation instead of computing Pivot-2.2 itself. This entry covers only
+the external-repo side (Fase 1-4); Fase 5 (the Crumblr-side end-to-end
+product proof) has not been started this session.
+
+**What was built, in the separate clone at
+`c:/Users/Levi's MacBook/Desktop/Projecten/crumblr-static-agent-host`,
+branch `agent/neutral-context-strategy-6.0`, committed and pushed
+(`83c1f64`):**
+
+- `pivot2_engine.py` — a stateless Python re-implementation of the frozen
+  v5.0 MQL causal chain (liquidity sweep → first future FVG → first
+  future MSS → confirmed pivot 2/2 "FINAL CHALLENGER GATE"), run directly
+  against plain OHLC bars. Deliberately narrower than the frozen source:
+  only 2 of its 6 liquidity-sweep detectors are implemented (intraday
+  swing, equal high/low) — the other 4 need more history than a bounded
+  `AgentMarketContextV1.market.bars` window reliably promises. Disclosed,
+  safety-neutral scope reduction: the pivot-2/2 gate still applies
+  regardless of which tag fired, so this can only miss setups the frozen
+  source would also catch, never fabricate one it wouldn't.
+- `neutral_context.py` — parses `AgentMarketContextV1` field-for-field,
+  zero-dependency (this repo ships `dependencies = []`), same manual
+  validation style as the existing `contracts.py`.
+- `neutral_trader.py` — `CrumblrNeutralContextTrader`: binds a detection
+  outcome to Crumblr's exact `neutral-agent-response-1.0` envelope.
+  `STRATEGY_ARTIFACT_VERSION = "6.0"` — a new artifact identity, not a
+  silent v5.0 mutation (content genuinely differs: computation moved
+  in-Agent, sweep-detector set narrowed). `compute_strategy_artifact_hash()`
+  hashes the live running file at call time; a context naming a hash this
+  process isn't running is refused (`ArtifactBindingError`), never
+  coerced. Decision IDs/timestamps are derived deterministically from the
+  inbound context's own content, not wall-clock time — the AG-018 lesson
+  from this same session's Gateway-side fix, deliberately not repeated on
+  the Agent side.
+- Wired into `api.py` (`TraderApiApplication.evaluate()` now dispatches on
+  payload shape — a `provenance` key routes to the neutral trader; the
+  old `TraderContext 1.0` shape keeps going to the legacy
+  `CrumblrStaticTrader`, which remains a valid unhealthy-market smoke
+  path per `feedback.1.27` §6 item A, not the production HEALTHY route
+  any more) and `cli.py` (`evaluate`/`serve` construct
+  `CrumblrNeutralContextTrader` from a `CRUMBLR_AGENT_ID` env var; the
+  route stays disabled, not placeholder-identified, if that var is unset).
+- `AGENTS.md` (that repo's own frozen-strategy rules file) extended with a
+  new section naming this module's own invariants (never edit without a
+  version bump, hash-pinning discipline, no MT5/broker/DB/execution
+  capability — same ceiling as the legacy Static Trader).
+
+**Genuine HEALTHY proof, both directions, per Fase 4's explicit
+requirement — not hardcoded BUY/SELL, not an injected setup flag, not a
+precomputed Pivot/FVG/MSS, not a mocked strategy decision:**
+`tests/test_pivot2_engine.py` (5 tests) hand-builds real OHLC bars
+satisfying the actual causal chain and asserts `evaluate()` derives every
+field of the resulting `DirectionalSetup` itself — direction, entry,
+SL/TP, R:R, reason codes, the three chain timestamps — plus one test
+proving the pivot-2/2 gate is a real, non-bypassable rejection (lowering
+the pivot's own right-confirmation bars flips the same chain to no
+setup). `tests/test_neutral_trader.py` (6 tests) proves the same chain
+through the full `AgentMarketContextV1` → `neutral-agent-response-1.0`
+path, plus artifact-hash-mismatch refusal, non-EURUSD refusal, and
+identical-retry idempotence.
+
+**Evidence:** ran the full existing suite in that repo (not only the new
+files) via `PYTHONPATH=.../crumblr-static-agent-host/src uv run python -m
+unittest discover`, invoked from this Crumblr worktree to reuse its
+tzdata-capable interpreter. 52 tests total, 29 errors — every one of them
+`IntegrityError: frozen source hash mismatch`, and every one traced to
+the *same* pre-existing cause: this local Windows clone has
+`core.autocrlf=true`, which rewrites the frozen `.mq5` source's line
+endings to CRLF on checkout, while `manifest.json`/`AGENTS.md` pin the
+LF-computed hash (`eb6e762a...`) — confirmed by hashing the on-disk file
+both ways. Not introduced by this work (the same 29 tests fail identically
+on this clone with none of my changes present — verified by isolating the
+error signature, not by reverting), not present on the actual Render/Linux
+deployment target (native LF), and does not touch any file this slice
+changed or added — `test_pivot2_engine.py` (5/5) and `test_neutral_trader.py`
+(6/6) both have zero errors. Did not attempt to "fix" the working-tree
+file's line endings back to match the committed blob — that edit path was
+blocked by this environment's own tool classifier; noting it here rather
+than working around the block.
+
+**Not yet done, still open:**
+
+- **Fase 5** (Crumblr-side end-to-end proof): real Pepperstone read-only
+  EUR/USD feed → `AgentMarketContextV1` → this genuine HEALTHY Static
+  Agent (running, reachable) → Gateway → Core Risk → Policy →
+  `SUPERVISOR_SKIPPED_PAPER_MODE` → `SimulatedBroker` → durable
+  audit/portfolio result. Requires running this new Agent server
+  (`crumblr-strategy-agent serve` with `CRUMBLR_AGENT_ID` set) somewhere
+  reachable from a Crumblr-side integration test or `scripts/paper_lite.py`
+  run — not started.
+- A formal `strategy_assets/ict_sb_eurusd_pivot2/6.0/` package directory
+  was considered and deliberately not built — the live-hash approach in
+  `neutral_trader.py` already gives a real, verifiable, tamper-evident
+  identity without a duplicate frozen-copy scaffold; revisit only if a
+  reviewer specifically wants the same manifest/provenance shape as v5.0.
+- Hard boundary reaffirmed, unchanged by any of this: `order_send` stays
+  NO-GO, `ExecutionConfig.feedback_2_0_approved` stays false, no real
+  automatic broker flatten. This work does not authorize or approach live
+  submission, and per the owner's own instruction, `feedback.2.0` is not
+  to be triggered or claimed from this side — evidence recorded here,
+  nothing more.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
