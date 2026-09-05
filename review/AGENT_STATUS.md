@@ -1981,19 +1981,25 @@ files) via `PYTHONPATH=.../crumblr-static-agent-host/src uv run python -m
 unittest discover`, invoked from this Crumblr worktree to reuse its
 tzdata-capable interpreter. 52 tests total, 29 errors — every one of them
 `IntegrityError: frozen source hash mismatch`, and every one traced to
-the *same* pre-existing cause: this local Windows clone has
-`core.autocrlf=true`, which rewrites the frozen `.mq5` source's line
-endings to CRLF on checkout, while `manifest.json`/`AGENTS.md` pin the
-LF-computed hash (`eb6e762a...`) — confirmed by hashing the on-disk file
-both ways. Not introduced by this work (the same 29 tests fail identically
-on this clone with none of my changes present — verified by isolating the
-error signature, not by reverting), not present on the actual Render/Linux
-deployment target (native LF), and does not touch any file this slice
-changed or added — `test_pivot2_engine.py` (5/5) and `test_neutral_trader.py`
-(6/6) both have zero errors. Did not attempt to "fix" the working-tree
-file's line endings back to match the committed blob — that edit path was
-blocked by this environment's own tool classifier; noting it here rather
-than working around the block.
+the *same* pre-existing cause. Not introduced by this work (the same 29
+tests fail identically on this clone with none of my changes present),
+and does not touch any file this slice changed or added —
+`test_pivot2_engine.py` (5/5) and `test_neutral_trader.py` (6/6) both have
+zero errors.
+
+**Correction, 2026-09-06 (PL-004 final preflight, §0ac below): this is not
+a Windows-only artifact — the line above was wrong.** I originally
+attributed the mismatch to this local Windows clone's `core.autocrlf=true`
+rewriting the frozen `.mq5` source's line endings to CRLF on checkout,
+and claimed it would not reproduce "on the actual Render/Linux deployment
+target (native LF)." A genuinely clean Linux container (`git archive` of
+the committed blob, extracted with `tar`, zero Windows involvement)
+reproduces the *identical* CRLF byte content and the identical hash
+mismatch. **The git blob itself stores CRLF line endings** — this predates
+every commit this track has made to this file (never touched in this
+track's diff) and will reproduce on any platform, any clone, including a
+real Render deployment. See §0ac for the full corrected finding and why it
+was not fixed unilaterally.
 
 **Not yet done, still open:**
 
@@ -2016,6 +2022,111 @@ than working around the block.
   submission, and per the owner's own instruction, `feedback.2.0` is not
   to be triggered or claimed from this side — evidence recorded here,
   nothing more.
+
+---
+
+## 0ac. PL-004 final preflight — four fixes, a real cross-repo HTTP proof, and one corrected finding — done 2026-09-06
+
+Owner-requested preflight pass on the external repo before deployment/
+product proof, six numbered sections. Committed and pushed to
+`agent/neutral-context-strategy-6.0` (`7471014`, on top of §0ab's
+`83c1f64`).
+
+**1. `canonical_symbol` fix.** The fork's neutral-context check compared
+against `"EURUSD"` (the legacy fork wire schema's unseparated `const`) —
+Crumblr's real canonical symbol is `"EUR/USD"` (`domain.models.Symbol`,
+confirmed by literally calling `AgentMarketContextV1.model_dump(mode=
+"json")` against real `MarketSnapshot`/`InstrumentSpec` fixtures, not
+assumed). Fixed to `CRUMBLR_CANONICAL_SYMBOL = "EUR/USD"`; a new
+regression test embeds that captured real payload verbatim (not a
+hand-written lookalike) and proves it is now accepted end-to-end.
+
+**2. `pip_size` conversion fix — the more serious one.** `context.point`
+was being passed straight through as `EngineParams.pip_size`. A realistic
+5-digit EURUSD broker's `point` is `0.00001` — a *fractional pip*
+("pipette"), one tenth of a real pip — so every FVG/min-risk/SL-buffer/
+equal-liquidity threshold in the frozen strategy (all expressed as pip
+counts) was silently being interpreted 10x too loose. The existing test
+fixture had `digits=5, point="0.0001"` — a non-realistic combination that
+happened to equal the intended pip size directly and hid the bug. New
+`pip_size_for_digits(digits, point)` (5 digits → `point*10`, 4 digits →
+`point`, anything else fails closed) fixes it; a new test runs the same
+real causal bar chain through 5-digit and 4-digit instrument facts and
+proves identical entry/stop/target geometry and reason codes — the pip
+semantics are now broker-precision-invariant.
+
+**3. `render.yaml`.** Added a separate `crumblr-neutral-strategy-agent-
+staging` service (`crumblr-strategy-agent serve --host 0.0.0.0 --port
+$PORT`, `/health` check, `CRUMBLR_AGENT_ID`/`CRUMBLR_TRADER_SERVICE_TOKEN`
+as unsynced secrets) rather than replacing the existing ChatGPT-agent
+service, which was still starting `crumblr-chatgpt-agent serve`.
+
+**4. `/health` identity split.** Restructured into `legacy_v5_strategy`/
+`neutral_context_strategy` sub-objects, both with an `active_route` flag
+— nothing strategy-identifying at the top level any more, so the legacy
+v5 identity can no longer read as the active neutral-context artifact.
+
+**5. Real cross-repo HTTP contract proof, zero mocks on the boundary.**
+Started the actual `TraderApiApplication`/`ThreadingHTTPServer` (the same
+classes `api.py` uses in production) in a background thread inside a
+clean container, then drove it with Crumblr's own real
+`agent_gateway.neutral_agent_client.HttpNeutralAgentClient` over a
+genuine HTTP socket. Flat/no-signal bars → real `NoTradeDecision`
+(`NO_LIQUIDITY_SWEEP`); the same directional bar chain used throughout
+this work → real `TradeProposal` (`side=BUY`, full SL/TP/reason_codes).
+Both responses passed Crumblr's own pydantic contract validation
+unmodified — full output quoted in this session's report to the owner.
+
+**6. Full Linux gate — and a corrected finding.** Built a `git archive`
+tarball of the branch (pure committed blobs, no working-tree filters
+involved at all) and ran the full suite plus `crumblr-strategy-agent
+verify` in a clean `python:3.12-slim` container. Result: **62 tests, 30
+passed, 32 errors — all 32 the identical pre-existing
+`IntegrityError: frozen source hash mismatch`.** This is the same defect
+§0ab already reported, but **§0ab's own diagnosis was wrong**: it blamed
+local Windows `core.autocrlf` and claimed the real Render/Linux target
+would not reproduce it. It does. Hashing the file inside the container
+(zero Windows involvement, blob read straight from git's object store)
+gives the identical CRLF byte content and the identical wrong hash — **the
+git blob itself stores CRLF**, for both the frozen `.../5.0/source/
+Crumblr_..._CORE.mq5` and the `.../5.0/adapter/Crumblr_...
+_STATIC_SIGNAL_ONLY.mq5` signal-only adapter (`strategy_package.py`'s
+second, separate provenance check) — while `manifest.json`/
+`CORE_PROVENANCE.json`/`AGENTS.md` all pin hashes computed against
+LF-normalized copies of both files. Reproduces on any platform, any
+clone, predates every commit this track has made (neither file appears
+in this track's diff at any point). §0ab's memory entry above is now
+corrected in place rather than left standing.
+
+**Did not fix this myself.** Either resolution — repinning the manifest/
+provenance hashes to the real CRLF-observed values, or restoring the
+files' true bytes to match the already-pinned LF hashes — is a change to
+the frozen strategy package's own integrity anchor, which `AGENTS.md`
+reserves for an explicit, named, owner-approved version bump ("Never
+edit... .mq5", "A strategy change requires an explicitly named new
+strategy version"). For the cross-repo proof only, both files were
+LF-normalized inside the ephemeral container copy — never committed,
+never touched in the real working tree (confirmed via `git status`
+immediately after) — purely to make `CrumblrStaticTrader` constructible
+so the real server could start. With that container-local, uncommitted
+fix in place, the full 62-test suite is 62/62 green — proving the *only*
+thing wrong anywhere in the existing suite is this one pre-existing
+hash-pinning defect, not anything this track built or changed. This
+track's own new files are unaffected either way: `test_pivot2_engine.py`
+5/5, `test_neutral_trader.py` 16/16 once the legacy trader is
+constructible (13/16 without it — the 3 failures are tests that also
+build a `TraderApiApplication` with both traders wired, blocked by the
+same pre-existing legacy-load defect, not by anything in this track's own
+logic).
+
+**Not yet done, still open:** same as §0ab — Fase 5 (a permanent
+Crumblr-side integration, e.g. wiring `scripts/paper_lite.py` at a
+deployed instance of this Agent) is still separate from the ad hoc
+cross-repo proof script this pass used; the owner's own final-preflight
+report names the exact commands/output. The frozen-package hash-pinning
+defect above needs an explicit owner decision before `crumblr-strategy-
+agent verify` can honestly report `PASS` anywhere. `order_send` unchanged:
+NO-GO.
 
 ---
 
