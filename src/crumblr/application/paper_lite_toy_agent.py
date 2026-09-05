@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header, HTTPException
 
 from crumblr.agent_gateway.contracts import NoTradeDecision, TradeProposal
 from crumblr.agent_gateway.market_context import AgentMarketContextV1
-from crumblr.application.paper_lite_agent import PAPER_LITE_AGENT_SCHEMA_VERSION
+from crumblr.agent_gateway.neutral_agent_client import NEUTRAL_AGENT_RESPONSE_SCHEMA_VERSION
 from crumblr.domain.enums import EntryType, Side
 
 
@@ -96,7 +96,7 @@ def create_toy_agent_app(
             )
             decision_type = "TRADE_PROPOSAL"
         return {
-            "schema_version": PAPER_LITE_AGENT_SCHEMA_VERSION,
+            "schema_version": NEUTRAL_AGENT_RESPONSE_SCHEMA_VERSION,
             "decision_type": decision_type,
             "decision": decision.model_dump(mode="json"),
         }

@@ -2,24 +2,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-import crumblr.application.paper_lite_agent as agent_module
-from crumblr.agent_gateway.contracts import NoTradeDecision, PolicyHints, TradeProposal
-from crumblr.agent_gateway.market_context import (
-    AgentMarketContextV1,
-    build_agent_market_context_v1,
-)
-from crumblr.agent_gateway.static_agent_client import StaticAgentClientConfig
-from crumblr.application.paper_lite_agent import (
-    PAPER_LITE_AGENT_SCHEMA_VERSION,
-    HttpPaperLiteTradingAgent,
-    PaperLiteAgentResponseError,
-)
+from crumblr.agent_gateway.contracts import PolicyHints, TradeProposal
+from crumblr.agent_gateway.market_context import AgentMarketContextV1, build_agent_market_context_v1
 from crumblr.application.paper_lite_toy_agent import ToyAgentMode, create_toy_agent_app
 from crumblr.domain.enums import KillSwitchState, ReconciliationStatus, SessionState
 from tests.conftest import FIXED_NOW, make_instrument_spec, make_snapshot
@@ -48,25 +37,6 @@ def context() -> AgentMarketContextV1:
         open_position_count=0,
         policy_hints=PolicyHints(session_blackout_active=False),
     )
-
-
-def client() -> HttpPaperLiteTradingAgent:
-    return HttpPaperLiteTradingAgent(
-        agent_id=AGENT_ID,
-        gateway_credential_secret="gateway-secret",
-        client=StaticAgentClientConfig(
-            base_url="http://127.0.0.1:8788",
-            bearer_token="transport-secret",
-        ),
-    )
-
-
-def envelope(decision: TradeProposal | NoTradeDecision) -> dict[str, Any]:
-    return {
-        "schema_version": PAPER_LITE_AGENT_SCHEMA_VERSION,
-        "decision_type": ("TRADE_PROPOSAL" if isinstance(decision, TradeProposal) else "NO_TRADE"),
-        "decision": decision.model_dump(mode="json"),
-    }
 
 
 class TestToyAgent:
@@ -118,55 +88,3 @@ class TestToyAgent:
         )
         assert response.status_code == 200
         assert response.json()["decision_type"] == "NO_TRADE"
-
-
-class TestHttpPaperLiteTradingAgent:
-    def test_parses_an_exact_crumblr_no_trade_contract(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        sent = context()
-        decision = NoTradeDecision(
-            decision_id=uuid4(),
-            agent_id=AGENT_ID,
-            assignment_id=ASSIGNMENT_ID,
-            context_hash=sent.provenance.content_hash,
-            reason_codes=("TOY_IDLE",),
-            decided_at_utc=FIXED_NOW,
-        )
-        monkeypatch.setattr(agent_module, "evaluate", lambda *_: (200, envelope(decision)))
-
-        assert client().decide(sent) == decision
-
-    @pytest.mark.parametrize(
-        ("field", "value", "message"),
-        [
-            ("agent_id", uuid4(), "another agent_id"),
-            ("assignment_id", uuid4(), "another assignment"),
-            ("context_hash", "stale-context", "another context"),
-        ],
-    )
-    def test_mismatched_binding_fails_before_gateway(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        field: str,
-        value: object,
-        message: str,
-    ) -> None:
-        sent = context()
-        decision = NoTradeDecision(
-            decision_id=uuid4(),
-            agent_id=AGENT_ID,
-            assignment_id=ASSIGNMENT_ID,
-            context_hash=sent.provenance.content_hash,
-            reason_codes=("TOY_IDLE",),
-            decided_at_utc=FIXED_NOW,
-        ).model_copy(update={field: value})
-        monkeypatch.setattr(agent_module, "evaluate", lambda *_: (200, envelope(decision)))
-
-        with pytest.raises(PaperLiteAgentResponseError, match=message):
-            client().decide(sent)
-
-    def test_non_success_status_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(agent_module, "evaluate", lambda *_: (503, {"detail": "down"}))
-        with pytest.raises(PaperLiteAgentResponseError, match="HTTP 503"):
-            client().decide(context())

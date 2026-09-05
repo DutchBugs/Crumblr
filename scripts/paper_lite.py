@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 from crumblr.agent_gateway.gateway import AgentGateway
+from crumblr.agent_gateway.neutral_agent_client import HttpNeutralAgentClient
 from crumblr.agent_gateway.static_agent_client import StaticAgentClientConfig
 from crumblr.application.paper_lite import (
     PaperLiteConfigurationError,
@@ -19,7 +20,6 @@ from crumblr.application.paper_lite import (
     load_paper_lite_settings,
     require_paper_lite_database_url,
 )
-from crumblr.application.paper_lite_agent import HttpPaperLiteTradingAgent
 from crumblr.application.recording import JournalRecorder
 from crumblr.config import load_config
 from crumblr.domain.enums import Environment, IncidentStatus, SessionState
@@ -164,7 +164,7 @@ def main() -> None:
         outcomes=PostgresAgentDecisionOutcomeStore(engine),
         feature_evidence=FeatureSnapshotStore(engine),
     )
-    agent = HttpPaperLiteTradingAgent(
+    agent = HttpNeutralAgentClient(
         agent_id=args.agent_id,
         gateway_credential_secret=credential,
         client=StaticAgentClientConfig(
