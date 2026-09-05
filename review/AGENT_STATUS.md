@@ -1877,6 +1877,39 @@ skips, unrelated), 0 failed, in 478s.
 
 ---
 
+## 0aa. `agent/contracts` merged to `main` — PR #3, owner action — 2026-09-04
+
+The owner merged `agent/contracts` into `main` directly on GitHub
+(`c7ba505`, "Merge pull request #3 from DutchBugs/agent/contracts") —
+neither track triggered this; Dev 1 noticed it while fetching to record
+the AG-024 mirror and flagged it here. **Core, the Agent Gateway, and
+PAPER_LITE are now all on one branch for the first time.**
+
+Fast-forwarded this worktree's local `agent/contracts` to match
+(`c35f4d5` → `10117a5`, trivial — this branch had nothing unpushed).
+Independently re-verified the merged state myself rather than only
+trusting Dev 1's report: ruff/ruff format/mypy clean (197 source files,
+214 formatted), full non-integration suite **1224 passed, 1 pre-existing
+skip, 0 failed** — identical to this track's own last pre-merge count,
+confirming the merge itself changed nothing behaviorally on this side.
+Did not re-run the ~8-minute integration suite a third time (I ran it
+clean against this exact commit before the merge; Dev 1 independently
+ran the full 1480-test suite, including integration, against the merged
+state and got the same total) — re-running it here would confirm
+something already confirmed twice, not surface new information.
+
+**Not yet confirmed**: hosted CI has not run against this exact merge
+commit (no `gh`/`GITHUB_TOKEN` access in either session, per the
+standing F-056/M0 gate note) — Dev 1 flagged this as worth owner
+confirmation, not blocking either track's own work.
+
+This worktree/branch continues as this track's home for whatever comes
+next — nothing structurally changes for how Dev-2 work gets done, only
+that the next PR merges an already-part-of-main branch back into itself
+rather than two long-diverged histories.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
