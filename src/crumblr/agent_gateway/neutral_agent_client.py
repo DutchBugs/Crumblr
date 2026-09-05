@@ -19,18 +19,16 @@ here -- reused from `static_agent_client.evaluate()`, the same zero-
 dependency stdlib client `static_agent_transport.py`'s legacy fork proof
 already uses.
 
-**Not yet the production caller.** `application/paper_lite_agent.py`
-still defines its own copy of this exact envelope
-(`PAPER_LITE_AGENT_SCHEMA_VERSION`/`HttpPaperLiteTradingAgent`) pending
-Dev 3's own switch-over pass, named explicitly in the same work order as a
-Dev-3 action ("Replace paper-only wire-envelope ownership with Dev 2's
-generic Agent adapter") -- deliberately not done unilaterally here to avoid
-rewriting a file and test suite this track does not own. The schema-version
-string below is therefore intentionally distinct from PAPER_LITE's
-still-active `"paper-lite-agent-1.0"`: nothing in production speaks either
-value today (F-064 -- no HTTP transport is deployed anywhere), so there is
-no live wire compatibility to preserve, and consolidating onto one name is
-exactly the substitution Dev 3's own pass makes.
+**Now the production caller (Dev-3 Phase-A convergence, 2026-09-05).**
+`application/paper_lite_agent.py`'s own copy of this exact envelope
+(`PAPER_LITE_AGENT_SCHEMA_VERSION`/`HttpPaperLiteTradingAgent`) has been
+retired -- `scripts/paper_lite.py` and `application/paper_lite_toy_agent.py`
+both migrated onto this module instead, exactly the substitution the work
+order named as a Dev-3 action ("Replace paper-only wire-envelope ownership
+with Dev 2's generic Agent adapter"). The schema-version string below
+(`"neutral-agent-response-1.0"`) is the one production wire value now --
+nothing needed to keep speaking the old `"paper-lite-agent-1.0"`, since
+F-064 means no HTTP transport was ever deployed under either name.
 """
 
 from __future__ import annotations

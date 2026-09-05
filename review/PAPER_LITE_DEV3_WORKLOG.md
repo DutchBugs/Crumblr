@@ -1,11 +1,18 @@
 # PAPER_LITE Dev 3 worklog
 
 **Track:** Dev 3 — PAPER_LITE integration/orchestration
-**Branch:** `lite/paper-orchestrator`
-**Worktree:** `.claude/worktrees/paper-lite`
+**Branch (2026-09-02 to 2026-09-03):** `lite/paper-orchestrator` (merged to
+`main` via PR #3, 2026-09-04 — see `review/AGENT_STATUS.md` §0aa for the
+cross-track record of that merge)
+**Branch (2026-09-05 onward):** `lite/phase-a-convergence`, a fresh branch
+off post-PR-#3 `main` — the old branch's own history is entirely contained
+in `main` now, so this is a new slice, not a continuation of stale work
+**Worktree (2026-09-02 to 2026-09-03):** `.claude/worktrees/paper-lite`
+**Worktree (2026-09-05 onward):** `.claude/worktrees/paper-lite-dev3`
 **Test database:** `crumblr_test_dev3` (required for database-backed tests)
 **Started:** 2026-09-02
-**Baseline:** rebased onto `origin/main` at `dd2106c` on 2026-09-03
+**Baseline (this slice):** `origin/main` at `10117a5` (post PR #3 — Core,
+Agent Gateway and PAPER_LITE are one branch for the first time)
 **Real broker submission:** FORBIDDEN
 
 This is the reviewer/supervisor audit log for the owner-authorized PAPER_LITE
@@ -56,28 +63,26 @@ the Dev-1/Dev-2 owned status documents.
 
 ### PL-001 — Core risk exists; shared Agent-path consumption remains pending
 
-**Status:** OPEN / fail-closed in PAPER_LITE
-**Owner:** shared seam requires Dev 1 + Dev 2 coordination; Dev 3 will not silently
-change the shared semantics.
+**Status:** CLOSED 2026-09-05 (Dev-3 Phase-A convergence, section 2)
+**Closed by:** Dev 2 (D1.4/D2.2, prior session) shipped `agent_gateway
+/decision_path.py::evaluate_agent_trade_intent()` calling `risk
+.portfolio_risk.assess_open_risk()` directly — `PortfolioSnapshot` no longer
+carries a position-count approximation at all, confirmed by reading the
+current source, not assumed from an older description. This session removed
+PAPER_LITE's own `if positions: EXACT_OPEN_RISK_UNAVAILABLE` guard (§5
+2026-09-05 entry) now that the seam this finding was waiting for genuinely
+exists. Regression: `tests/unit/test_paper_lite.py
+::TestPaperLiteFlow::test_a_second_full_size_position_exceeding_the_open_risk_budget_is_blocked`
+(>3% blocks on `OPEN_RISK_LIMIT`, not on position count),
+`::test_several_small_positions_under_the_open_risk_budget_are_not_blocked_by_count`
+(<3% combined does not block), `::test_flat_portfolio_open_risk_is_exact_zero_not_unknown`.
 
-After rebasing, Core `risk/portfolio_risk.py::assess_open_risk()` is the sole
-PAPER_LITE authority: paper positions, the trusted spec and paper equity feed
-that function directly. The local quote-based risk definition was removed.
-
-`agent_gateway/decision_path.py::PortfolioSnapshot` still contains only
-`account`, `open_positions` and `reconciliation_status`. The implementation then
-sets `PortfolioState.open_risk_fraction` to:
-
-```text
-config.risk.max_risk_per_trade * len(open_positions)
-```
-
-This is exactly the approximation prohibited by Owner Policy v1 and the Lite
-work order. PAPER_LITE therefore must not send a directional proposal into this
-path while any open paper position exists unless an exact open-risk seam has
-been supplied. The neutral Agent context and durable risk-session receive the
-Core assessment. A second directional entry remains fail-closed until the shared
-decision path consumes it, rather than retaining an independent risk semantic.
+Original finding, kept for the historical record: after the 2026-09-03
+rebase, `PortfolioSnapshot` still fed `PortfolioState.open_risk_fraction` as
+`config.risk.max_risk_per_trade * len(open_positions)` — the exact
+approximation Owner Policy v1 and this work order forbid — so PAPER_LITE
+fail-closed on any second directional proposal rather than accept an
+approximation. That approximation is gone from the current source.
 
 ### PL-002 — current Core Risk still enforces one exposure per symbol
 
@@ -88,11 +93,23 @@ PAPER_LITE risk rule.
 
 ### PL-003 — current intraday Core policy still models daily flatten
 
-**Status:** OPEN / owned by Dev 1
-The owner work order assigns replacement of the old daily intraday behavior with
-Friday/weekend semantics to Dev 1. PAPER_LITE will consume that Core policy once
-available and will not invent a second calendar. Until then, weekday-overnight
-and Friday/weekend acceptance evidence cannot honestly be claimed complete.
+**Status:** CLOSED 2026-09-05 (Dev-3 Phase-A convergence, section 1)
+**Closed by:** Dev 1 shipped the weekly Friday/weekend redesign
+(`risk/trading_window.py`, D1.5/ADR-012) in the intervening period —
+confirmed by reading the module directly: `SessionPhase`/`phase_at()`/
+`IntradayPolicy` are the exact weekly-close-relative shape this finding was
+waiting for, already consumed by `LiveDecisionOrchestrator`/
+`ExecutionOrchestrator`. This session removed PAPER_LITE's own duplicate
+`PaperLiteSessionPhase`/`paper_lite_session_phase()` and switched
+`platform_config()`'s `IntradayConfig.enabled` from `False` to `True`, so
+PAPER_LITE now consumes the one canonical calendar authority instead of a
+second definition that could drift from it. Regression:
+`tests/unit/test_paper_lite.py::TestSessionPolicy` (rewritten to prove the
+config→policy wiring, not re-test Core's own already-tested arithmetic),
+`::TestPaperLiteFlow::test_friday_deadline_flattens_remaining_paper_exposure`/
+`::test_weekend_exposure_raises_instead_of_carrying_silently` (end-to-end,
+unchanged, still pass — they test the orchestrator's behavior, not the
+removed function).
 
 ### PL-004 — genuine HEALTHY Static Agent strategy runtime
 
@@ -118,17 +135,19 @@ as `SAFETY_STATE_UNKNOWN`; Lite never silently manufactures a fresh budget.
 
 ### PL-006 — recovered Core risk maxima are not used by the shared gate
 
-**Status:** OPEN in shared Core / fail-closed guard present in PAPER_LITE
-**Owner:** Dev 1/shared Risk seam; Dev 3 will not alter shared Risk on this branch
-
-`recover_session()` preserves `max_session_loss_fraction` and
-`max_drawdown_fraction`, but `risk.policies.evaluate()` compares the ledger's
-current `session_loss_fraction` and `drawdown_fraction`. When current equity has
-recovered, a previously reached maximum can therefore cease to gate a new
-trade. PAPER_LITE checks the persisted maxima against the same configured 4%
-and 8% thresholds during recovery and trips the existing KillSwitch with
-`DAILY_LOSS_LIMIT`/`MAX_DRAWDOWN`. This is conservative composition glue, not a
-new Risk rule; the shared semantics still need owner-track review.
+**Status:** CLOSED — shared Core fix landed in the intervening period
+(unrelated commit series also numbered "PL-006" in the owner work order,
+confirmed the same underlying gap by reading the code, not assumed from
+name collision alone)
+`risk.session.recover_session()` now checks the recovered
+`max_drawdown_fraction`/`max_session_loss_fraction` against the *configured*
+thresholds itself (`risk/session.py` lines ~315-320) and halts during
+recovery if either is already exhausted — exactly this finding's ask, now
+owned by the one shared function every pipeline (`LiveDecisionOrchestrator`,
+`decision_path.py`, and PAPER_LITE) calls. PAPER_LITE's own
+`_recover_risk_session()` already removed its duplicate hand-rolled check in
+a prior session once this shipped (see that method's own docstring); nothing
+further needed here.
 
 ### PL-007 — no durable incident register is available to PAPER_LITE
 
@@ -243,22 +262,125 @@ as plainly as passed checks.
   write or external Agent claim. Genuine HEALTHY Static Agent acceptance remains
   outstanding under PL-004.
 
+### 2026-09-05 — Phase-A convergence (owner work order, sections 1-3 + 7)
+
+New worktree/branch off post-PR-#3 `main` (`10117a5`) — the prior
+`lite/paper-orchestrator` branch's entire history is now inside `main`
+itself, so this is a fresh slice, not a rebase of stale work. Removed the
+temporary integration glue the owner work order named, now that the shared
+seams it was waiting on genuinely exist (confirmed by reading the current
+source before removing anything, not assumed from this worklog's own older
+description of the gap):
+
+- **Section 1 (session-policy duplication).** Removed
+  `PaperLiteSessionPhase`/`paper_lite_session_phase()`. PAPER_LITE now
+  enables Core's own shared `risk.trading_window` (D1.5/ADR-012) via
+  `platform_config()`'s `IntradayConfig.enabled=True`, and
+  `PaperLiteOrchestrator.process()` calls `trading_window.phase_at()`
+  directly. Closes PL-003.
+- **Section 2 (single-position open-risk guard).** Removed the
+  `if positions: EXACT_OPEN_RISK_UNAVAILABLE` block —
+  `agent_gateway/decision_path.py::evaluate_agent_trade_intent()` already
+  calls Core `assess_open_risk()` directly (shipped by Dev 2 in the
+  intervening period), so the seam this guard was waiting for exists.
+  Closes PL-001. `PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE` removed
+  as dead code.
+- **Section 3 (generic neutral-Agent adapter).** Retired
+  `application/paper_lite_agent.py` (`HttpPaperLiteTradingAgent`,
+  `PAPER_LITE_AGENT_SCHEMA_VERSION`) entirely — `scripts/paper_lite.py` now
+  constructs `agent_gateway.neutral_agent_client.HttpNeutralAgentClient`
+  instead, and `application/paper_lite_toy_agent.py`'s response envelope
+  now speaks `NEUTRAL_AGENT_RESPONSE_SCHEMA_VERSION`. Every caller was
+  migrated before deletion, per the work order's own instruction — checked
+  by grep, not assumed. `tests/unit/test_paper_lite_agent.py` deleted; its
+  `TestToyAgent` class (still needed — nothing else covers
+  `create_toy_agent_app`) moved to a new `tests/unit/test_paper_lite_toy_agent.py`
+  with the schema-constant import updated; its `TestHttpPaperLiteTradingAgent`
+  class was not preserved, since `tests/unit/test_neutral_agent_client.py`
+  (Dev 2's own test file, already existed) covers the same envelope more
+  thoroughly.
+- **Section 4 (AG-012/023/024)** — verified untouched: grepped
+  `risk_ledger_lock`/`RISK_LEDGER_LOCK_UNAVAILABLE` across the diff,
+  confirmed the lock-protected recover/persist pair and its fail-closed
+  exception handling are exactly as the prior session shipped them. No
+  code changed here.
+- **Section 5 (Supervisor skip)** — verified already correct: PAPER_LITE's
+  own call into `evaluate_agent_trade_intent()` never passes `proposal=`/
+  `external_supervisor=`, so the external-Supervisor step is skipped
+  structurally, not by a bypass; `SUPERVISOR_SKIPPED_PAPER_MODE` is only
+  recorded after both Core Risk PASS and platform Policy APPROVE. Added
+  `TestTypedPaperOnlyBoundary::test_the_supervisor_skip_cannot_activate_outside_paper_mode`
+  proving the orchestrator itself refuses to construct against a non-PAPER
+  config or a non-PAPER assignment — the real reason this can never
+  activate outside paper mode, not merely an assertion that it doesn't
+  today.
+- **Section 7 (regressions).** Rewrote `TestSessionPolicy` against the
+  shared `trading_window` wiring (not re-testing Core's own already-tested
+  arithmetic — see `tests/unit/test_trading_window.py`). Added: a
+  >3%-budget block test, a <3%-combined not-blocked-by-count test, a
+  flat-portfolio-exact-zero test, the paper-only-Supervisor-skip
+  construction-guard test above, and a parametrized static-source check
+  (`test_no_real_demo_order_send_reference_anywhere_in_the_paper_path`)
+  across `paper_lite.py`/`paper_lite_toy_agent.py`/`scripts/paper_lite.py`
+  for `demo_execution`/`DemoOrderSendMt5Gateway`/`order_send` references.
+
+**Section 6 (real Phase-A product proof) not attempted** — PL-004 (a
+genuine HEALTHY Static Agent) remains open, owned by Dev 2 and the external
+Agent Developer; no session for that developer has been available to
+coordinate with. Nothing on the Crumblr side blocks it once that runtime
+exists — `scripts/paper_lite.py`/`create_toy_agent_app` now speak the one
+canonical wire contract (section 3) a real Static Agent would need to
+match.
+
+**Self-reviewed** (`/code-review medium`) before this entry: one finding
+(this status update itself was missing) — no code defects found. Verified
+independently, not only trusted: read `risk/session.py` directly to
+confirm PL-006's closure claim before writing it, grepped for every
+remaining reference to removed symbols repo-wide (zero hits outside test
+files already updated), and read `decision_path.py`'s actual
+`assess_open_risk()` call site before claiming PL-001 closed rather than
+assuming it from an older description.
+
+Evidence: full non-integration suite **1225 passed**, 1 pre-existing skip,
+0 failed. Full integration suite, against the dedicated `crumblr_test_dev3`
+database (created fresh this session — did not previously exist):
+**256 passed, 2 skipped** (pre-existing `test_halt_survives_restart.py`
+Windows-permission-bits skips, unrelated), 0 failed, in 407s. `ruff check`/
+`ruff format --check`/`mypy` all clean (196 source files). No Pepperstone
+connection, MT5 execution call, real broker write, or external Agent claim
+made during this gate.
+
 ## 6. Reviewer/supervisor handoff
 
-- **Dev 1 / Core:** review PL-001, PL-002, PL-003, PL-006 and PL-007. PAPER_LITE is
-  deliberately fail-closed for a second position until the exact open-risk
-  field is accepted by shared Risk, and its Friday guard remains temporary.
-- **Dev 2 / external Agent:** run the final acceptance with a genuine HEALTHY
-  Static Agent response using the same neutral HTTP contract. The toy Agent is
-  plumbing evidence only.
-- **Operator/owner:** supply the dedicated database URL, Gateway credential,
-  Agent bearer token, stable IDs and Windows read-only MT5 feed described in the
-  runbook. First safety activation/reset must include operator identity and an
-  incident note.
-- **Promotion status:** local implementation milestone only. Do not call the
-  final PAPER_LITE goal complete until the real read-only Pepperstone feed and
-  genuine HEALTHY Static Agent evidence have run with zero broker writes.
-- **Git status:** the first reviewer said "do not merge yet" but explicitly
-  authorized committing and pushing `lite/paper-orchestrator` so the actual
-  source can be reviewed. This log entry records that scope: branch push only,
-  no merge to `main`.
+**Updated 2026-09-05 — most of this section was stale after the Phase-A
+convergence pass; only PL-004/PL-007 and the real product proof remain
+genuinely open.**
+
+- **PL-001, PL-003, PL-006 — CLOSED this session**, see the 2026-09-05
+  evidence-log entry above. No further Dev-1 review requested for these
+  specifically; flag only if the closure reasoning above looks wrong.
+- **PL-002, PL-005 — already CLOSED**, unchanged.
+- **PL-007 (durable incident register) — still OPEN**, owned by Core/
+  control-plane integration; the operator-assertion workaround is
+  unchanged and still the only path to `IncidentStatus.CLEAR`.
+- **Dev 2 / external Agent Developer:** PL-004 is the one remaining real
+  blocker — a genuine HEALTHY Static Agent response is still needed for
+  the actual Phase-A product proof (section 6 of the 2026-09-05 owner work
+  order). The toy Agent now speaks the same canonical neutral-Agent wire
+  contract (`agent_gateway/neutral_agent_client.py`) a real Static Agent
+  would need to match, so there is no known remaining Crumblr-side gap —
+  this is a pure "run it against the real thing" checkpoint now.
+- **Operator/owner:** supply the dedicated database URL, Gateway
+  credential, Agent bearer token, stable IDs and Windows read-only MT5
+  feed described in the runbook, once a genuine HEALTHY Static Agent
+  exists to point at. First safety activation/reset must include operator
+  identity and an incident note.
+- **Promotion status:** local implementation milestone only. Do not call
+  the final PAPER_LITE goal complete until the real read-only Pepperstone
+  feed and genuine HEALTHY Static Agent evidence have run with zero broker
+  writes.
+- **Git status:** committing/pushing `lite/phase-a-convergence` is this
+  session's own continuation of the prior explicit authorization (the
+  original `lite/paper-orchestrator` branch it superseded was itself
+  already merged to `main` via PR #3, 2026-09-04) — branch push only, no
+  merge to `main` performed by this session.

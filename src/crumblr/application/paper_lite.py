@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -74,15 +74,10 @@ from crumblr.persistence.paper_lite import (
     DurablePaperBroker,
     PaperPortfolioView,
 )
-from crumblr.risk import session
+from crumblr.risk import session, trading_window
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
-from crumblr.trading_agent.sessions import (
-    NEW_YORK,
-    WEEK_CLOSE_HOUR_ET,
-    is_market_open,
-    trading_day,
-)
+from crumblr.trading_agent.sessions import NEW_YORK, trading_day
 
 _log = get_logger("paper_lite")
 
@@ -197,11 +192,12 @@ class PaperLiteSettings(ConfigSection):
     def platform_config(self, base: PlatformConfig) -> PlatformConfig:
         """Apply Owner Policy v1 to a PAPER base without enabling submission.
 
-        Core's current ``IntradayPolicy`` means *every* daily rollover. Owner
-        Policy v1 means only the Friday/weekend boundary. It is disabled here
-        and the temporary PAPER_LITE-only weekend guard below enforces the
-        owner rule using Core's canonical New York market clock. PL-003 tracks
-        replacement by Dev 1's shared Core seam.
+        `IntradayConfig`/`risk.trading_window` is Core's own weekly
+        Friday/weekend session-boundary policy (D1.5, ADR-012, supersedes the
+        old daily-rollover reading PL-003 was originally written against) --
+        enabled here, not disabled, so PAPER_LITE consumes the one canonical
+        calendar authority every other pipeline already does rather than a
+        second local definition that could drift from it.
         """
 
         risk = RiskConfig(
@@ -229,7 +225,7 @@ class PaperLiteSettings(ConfigSection):
             expected_leverage=self.leverage,
         )
         intraday = IntradayConfig(
-            enabled=False,
+            enabled=True,
             last_entry_minutes_before_close=self.friday_last_entry_minutes_before_close,
             flatten_minutes_before_close=self.friday_flatten_minutes_before_close,
         )
@@ -253,43 +249,6 @@ def load_paper_lite_settings(path: Path) -> PaperLiteSettings:
     if not isinstance(raw, dict):
         raise PaperLiteConfigurationError(f"{path} must contain a YAML mapping")
     return PaperLiteSettings.model_validate(raw)
-
-
-class PaperLiteSessionPhase(StrEnum):
-    OPEN = "OPEN"
-    NO_NEW_ENTRIES = "NO_NEW_ENTRIES"
-    FLATTEN_REQUIRED = "FLATTEN_REQUIRED"
-    CLOSED = "CLOSED"
-
-
-def paper_lite_session_phase(
-    moment: UtcDatetime,
-    *,
-    last_entry_offset: timedelta = timedelta(minutes=15),
-    flatten_offset: timedelta = timedelta(minutes=5),
-) -> PaperLiteSessionPhase:
-    """Owner Policy v1's weekday-overnight / Friday-only boundary.
-
-    ``NEW_YORK``, ``WEEK_CLOSE_HOUR_ET`` and ``is_market_open`` are Core's
-    canonical market facts. No UTC close hour is copied here, so DST remains
-    correct. This narrow guard is temporary integration code pending PL-003.
-    """
-
-    if last_entry_offset < flatten_offset:
-        raise ValueError("last-entry offset must not be closer than flatten offset")
-    if not is_market_open(moment):
-        return PaperLiteSessionPhase.CLOSED
-    local = moment.astimezone(NEW_YORK)
-    if local.weekday() != 4:
-        return PaperLiteSessionPhase.OPEN
-    close = datetime.combine(local.date(), time(WEEK_CLOSE_HOUR_ET, 0), tzinfo=NEW_YORK).astimezone(
-        moment.tzinfo
-    )
-    if moment >= close - flatten_offset:
-        return PaperLiteSessionPhase.FLATTEN_REQUIRED
-    if moment >= close - last_entry_offset:
-        return PaperLiteSessionPhase.NO_NEW_ENTRIES
-    return PaperLiteSessionPhase.OPEN
 
 
 class PaperLiteTradingAgent(Protocol):
@@ -321,7 +280,6 @@ class PaperLiteOutcomeType(StrEnum):
     NO_TRADE = "NO_TRADE"
     GATEWAY_REJECTED = "GATEWAY_REJECTED"
     SESSION_BLOCKED = "SESSION_BLOCKED"
-    EXACT_OPEN_RISK_UNAVAILABLE = "EXACT_OPEN_RISK_UNAVAILABLE"
     RISK_BLOCKED = "RISK_BLOCKED"
     POLICY_BLOCKED = "POLICY_BLOCKED"
     PAPER_ORDER_CHECK_BLOCKED = "PAPER_ORDER_CHECK_BLOCKED"
@@ -419,14 +377,13 @@ class PaperLiteOrchestrator:
             self._recover_risk_session(snapshot)
         now = self._clock()
         self._risk_recorded_at = snapshot.received_time_utc
-        session_phase = paper_lite_session_phase(
-            now,
-            last_entry_offset=timedelta(
-                minutes=self._settings.friday_last_entry_minutes_before_close
-            ),
-            flatten_offset=timedelta(minutes=self._settings.friday_flatten_minutes_before_close),
+        session_phase = trading_window.phase_at(
+            now, trading_window.policy_from_config(self._config.intraday)
         )
-        if session_phase is PaperLiteSessionPhase.FLATTEN_REQUIRED and self._broker.positions():
+        if (
+            session_phase is trading_window.SessionPhase.FLATTEN_REQUIRED
+            and self._broker.positions()
+        ):
             flatten_id = uuid5(
                 NAMESPACE_URL,
                 f"crumblr:paper-lite:friday-flatten:{now.astimezone(NEW_YORK).date()}",
@@ -442,7 +399,7 @@ class PaperLiteOrchestrator:
                     "Friday flatten result does not match the paper closed-trade ledger"
                 )
             closed_trades = (*closed_trades, *flattened_trades)
-        elif session_phase is PaperLiteSessionPhase.CLOSED and self._broker.positions():
+        elif session_phase is trading_window.SessionPhase.CLOSED and self._broker.positions():
             self._trip_risk_session(
                 (ReasonCode.OVERNIGHT_EXPOSURE,),
                 snapshot,
@@ -497,7 +454,7 @@ class PaperLiteOrchestrator:
             policy_hints=PolicyHints(
                 max_intents_per_hour_hint=self._assignment.max_proposals_per_hour,
                 min_stop_distance_points_hint=self._config.risk.min_stop_distance_points,
-                session_blackout_active=session_phase is not PaperLiteSessionPhase.OPEN,
+                session_blackout_active=session_phase is not trading_window.SessionPhase.OPEN,
                 notes=PAPER_LITE_POLICY_VERSION,
             ),
         )
@@ -583,7 +540,7 @@ class PaperLiteOrchestrator:
                 detail=detail,
             )
 
-        if session_phase is not PaperLiteSessionPhase.OPEN:
+        if session_phase is not trading_window.SessionPhase.OPEN:
             self._broker.record_audit_fact(
                 "PAPER_LITE_SESSION_BLOCKED",
                 correlation_id=gateway_result.outcome_id,
@@ -595,23 +552,6 @@ class PaperLiteOrchestrator:
                 gateway_result,
                 closed_trades=closed_trades,
                 detail=session_phase.value,
-            )
-
-        # Core owns the exact assessment above. The shared Agent decision path
-        # does not consume that seam yet, so never route a second proposal
-        # through its legacy position-count approximation.
-        if positions:
-            self._broker.record_audit_fact(
-                "PAPER_LITE_EXACT_OPEN_RISK_UNAVAILABLE",
-                correlation_id=gateway_result.outcome_id,
-                detail="shared Agent decision path does not consume Core open-risk yet",
-            )
-            return self._outcome(
-                PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE,
-                context,
-                gateway_result,
-                closed_trades=closed_trades,
-                detail="shared Agent decision path does not consume Core open-risk yet",
             )
 
         assert gateway_result.trade_intent is not None

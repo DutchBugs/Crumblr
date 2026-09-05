@@ -39,14 +39,19 @@ from crumblr.application.paper_lite import (
     PaperLiteOrchestrator,
     PaperLiteOutcomeType,
     PaperLiteSafetyError,
-    PaperLiteSessionPhase,
     PaperLiteSettings,
-    paper_lite_session_phase,
     require_paper_lite_database_url,
 )
 from crumblr.application.recording import NullRecorder
 from crumblr.config import PlatformConfig
-from crumblr.domain.enums import EntryType, Environment, IncidentStatus, ReasonCode, Side
+from crumblr.domain.enums import (
+    EntryType,
+    Environment,
+    IncidentStatus,
+    ReasonCode,
+    RiskVerdict,
+    Side,
+)
 from crumblr.domain.models import InstrumentSpec, MarketSnapshot
 from crumblr.persistence.paper_lite import (
     PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
@@ -54,6 +59,7 @@ from crumblr.persistence.paper_lite import (
     DurablePaperBroker,
     PaperJournalEventType,
 )
+from crumblr.risk import trading_window
 from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.session import (
     InMemoryRiskLedgerLock,
@@ -113,6 +119,7 @@ class ToyAgent:
     agent_id: UUID = AGENT_ID
     credential_secret: str = CREDENTIAL
     directional: bool = True
+    requested_risk_fraction: Decimal = Decimal("0.02")
 
     def decide(self, context: AgentMarketContextV1) -> TradeProposal | NoTradeDecision:
         decision_id = uuid5(NAMESPACE_URL, f"toy:{context.provenance.content_hash}")
@@ -137,7 +144,7 @@ class ToyAgent:
             stop_loss_price=context.market.ask - Decimal("0.00200"),
             take_profit_price=context.market.ask + Decimal("0.00400"),
             confidence=1.0,
-            requested_risk_fraction=Decimal("0.02"),
+            requested_risk_fraction=self.requested_risk_fraction,
             reason_codes=("TOY_BREAKOUT_VOCABULARY",),
             evidence_refs=(),
             submitted_at_utc=context.provenance.issued_at_utc,
@@ -149,6 +156,7 @@ class ToyAgent:
 class Fixture:
     path: Path
     directional: bool = True
+    requested_risk_fraction: Decimal = Decimal("0.02")
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
     risk_ledger_lock: RiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
 
@@ -156,7 +164,9 @@ class Fixture:
         lite_settings = settings(self.path)
         base = PlatformConfig.model_validate(paper_config_payload())
         config = lite_settings.platform_config(base)
-        agent = ToyAgent(directional=self.directional)
+        agent = ToyAgent(
+            directional=self.directional, requested_risk_fraction=self.requested_risk_fraction
+        )
         gateway = AgentGateway(
             identities=InMemoryAgentIdentityStore(),
             credentials=InMemoryAgentCredentialStore(),
@@ -292,11 +302,33 @@ class TestAG024RiskLedgerLockFailureFailsClosed:
         assert ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE in orchestrator._kill_switch.active_reasons
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class TestTypedPaperOnlyBoundary:
     def test_module_has_no_real_execution_adapter_import(self) -> None:
         source = inspect.getsource(paper_lite_module)
         assert "mt5_gateway.execution" not in source
         assert "OrderCheckMt5Gateway" not in source
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/crumblr/application/paper_lite.py",
+            "src/crumblr/application/paper_lite_toy_agent.py",
+            "scripts/paper_lite.py",
+        ],
+    )
+    def test_no_real_demo_order_send_reference_anywhere_in_the_paper_path(self, path: str) -> None:
+        """Section 7 regression: none of PAPER_LITE's own files may
+        reference the real DEMO order_send adapter (`mt5_gateway
+        /demo_execution.py::DemoOrderSendMt5Gateway`, Dev-1's Phase-B B1+B2
+        slice) -- a static source check, not only a runtime assertion, so a
+        future import cannot slip in unnoticed."""
+        source = (REPO_ROOT / path).read_text(encoding="utf-8")
+        assert "demo_execution" not in source
+        assert "DemoOrderSendMt5Gateway" not in source
+        assert "order_send" not in source
 
     def test_any_real_submission_flag_refuses_startup(self, tmp_path: Path) -> None:
         lite_settings = settings(tmp_path / "paper.jsonl")
@@ -312,6 +344,51 @@ class TestTypedPaperOnlyBoundary:
                 config,
                 settings=lite_settings,
                 assignment=assignment(),
+                agent=ToyAgent(),
+                gateway=orchestrator._gateway,
+                broker=broker,
+                recorder=NullRecorder(),
+                session_store=InMemoryRiskSessionStore(),
+                risk_ledger_lock=InMemoryRiskLedgerLock(),
+                kill_switch=KillSwitch(),
+                code_commit="test",
+            )
+
+    def test_the_supervisor_skip_cannot_activate_outside_paper_mode(self, tmp_path: Path) -> None:
+        """Section 5/7: `SUPERVISOR_SKIPPED_PAPER_MODE` is only ever reached
+        through `PaperLiteOrchestrator.process()`, which hardcodes
+        `environment=Environment.PAPER` in its call into the shared
+        decision path -- the real guarantee this can never activate outside
+        paper mode is that the orchestrator itself refuses to construct
+        against anything else, checked at both the config and the
+        assignment level."""
+        lite_settings = settings(tmp_path / "paper.jsonl")
+        base = PlatformConfig.model_validate(paper_config_payload())
+        config = lite_settings.platform_config(base)
+        orchestrator, broker = Fixture(tmp_path / "unused.jsonl").build()
+
+        non_paper_config = config.model_copy(update={"environment": Environment.SHADOW})
+        with pytest.raises(PaperLiteConfigurationError, match="requires Environment"):
+            PaperLiteOrchestrator(
+                non_paper_config,
+                settings=lite_settings,
+                assignment=assignment(),
+                agent=ToyAgent(),
+                gateway=orchestrator._gateway,
+                broker=broker,
+                recorder=NullRecorder(),
+                session_store=InMemoryRiskSessionStore(),
+                risk_ledger_lock=InMemoryRiskLedgerLock(),
+                kill_switch=KillSwitch(),
+                code_commit="test",
+            )
+
+        non_paper_assignment = assignment().model_copy(update={"environment": Environment.SHADOW})
+        with pytest.raises(PaperLiteConfigurationError, match="assignment must target PAPER"):
+            PaperLiteOrchestrator(
+                config,
+                settings=lite_settings,
+                assignment=non_paper_assignment,
                 agent=ToyAgent(),
                 gateway=orchestrator._gateway,
                 broker=broker,
@@ -365,28 +442,49 @@ class TestTypedPaperOnlyBoundary:
 
 
 class TestSessionPolicy:
-    def test_weekday_overnight_has_no_daily_cutoff(self) -> None:
+    """PAPER_LITE no longer owns a session-phase calendar -- Section 1 of
+    the Dev-3 Phase-A convergence work order removed `PaperLiteSessionPhase`/
+    `paper_lite_session_phase()` in favor of Core's own shared
+    `risk.trading_window` authority (D1.5/ADR-012), the one calendar every
+    other pipeline (`LiveDecisionOrchestrator`, `ExecutionOrchestrator`)
+    already uses. `trading_window.phase_at()`'s own arithmetic is already
+    proven in `tests/unit/test_trading_window.py` -- these tests instead
+    prove PAPER_LITE's *wiring* is correct: `PaperLiteSettings.platform_config()`
+    must produce an `IntradayConfig` that, once turned into a policy and
+    evaluated, reproduces the exact same four phases at the exact same
+    15/5-minute Friday boundaries this track's own tests always required."""
+
+    def _policy(self, path: Path) -> trading_window.IntradayPolicy:
+        base = PlatformConfig.model_validate(paper_config_payload())
+        config = settings(path).platform_config(base)
+        assert config.intraday.enabled, "PAPER_LITE must enable Core's session policy, not opt out"
+        return trading_window.policy_from_config(config.intraday)
+
+    def test_weekday_overnight_has_no_daily_cutoff(self, tmp_path: Path) -> None:
         thursday_1659_ny = datetime(2026, 9, 3, 20, 59, tzinfo=UTC)
-        assert paper_lite_session_phase(thursday_1659_ny) is PaperLiteSessionPhase.OPEN
+        policy = self._policy(tmp_path / "paper.jsonl")
+        assert trading_window.phase_at(thursday_1659_ny, policy) is trading_window.SessionPhase.OPEN
 
-    def test_friday_entry_cutoff_and_flatten_deadline(self) -> None:
+    def test_friday_entry_cutoff_and_flatten_deadline(self, tmp_path: Path) -> None:
         friday = datetime(2026, 9, 4, tzinfo=UTC)
+        policy = self._policy(tmp_path / "paper.jsonl")
         assert (
-            paper_lite_session_phase(friday.replace(hour=20, minute=44))
-            is PaperLiteSessionPhase.OPEN
+            trading_window.phase_at(friday.replace(hour=20, minute=44), policy)
+            is trading_window.SessionPhase.OPEN
         )
         assert (
-            paper_lite_session_phase(friday.replace(hour=20, minute=45))
-            is PaperLiteSessionPhase.NO_NEW_ENTRIES
+            trading_window.phase_at(friday.replace(hour=20, minute=45), policy)
+            is trading_window.SessionPhase.NO_NEW_ENTRIES
         )
         assert (
-            paper_lite_session_phase(friday.replace(hour=20, minute=55))
-            is PaperLiteSessionPhase.FLATTEN_REQUIRED
+            trading_window.phase_at(friday.replace(hour=20, minute=55), policy)
+            is trading_window.SessionPhase.FLATTEN_REQUIRED
         )
 
-    def test_weekend_is_closed(self) -> None:
+    def test_weekend_is_closed(self, tmp_path: Path) -> None:
         saturday = datetime(2026, 9, 5, 12, tzinfo=UTC)
-        assert paper_lite_session_phase(saturday) is PaperLiteSessionPhase.CLOSED
+        policy = self._policy(tmp_path / "paper.jsonl")
+        assert trading_window.phase_at(saturday, policy) is trading_window.SessionPhase.CLOSED
 
 
 class TestPaperLiteFlow:
@@ -517,9 +615,16 @@ class TestPaperLiteFlow:
         assert restarted._kill_switch.is_halted
         assert restarted._kill_switch.active_reasons[0].value == "SAFETY_STATE_UNKNOWN"
 
-    def test_second_directional_position_fails_closed_until_exact_core_seam_lands(
+    def test_a_second_full_size_position_exceeding_the_open_risk_budget_is_blocked(
         self, tmp_path: Path
     ) -> None:
+        """Section 2 of the Dev-3 Phase-A convergence work order: the
+        temporary single-position guard is gone -- PAPER_LITE now routes
+        every proposal through the same Core `assess_open_risk()` every
+        other pipeline uses. Two full-size (owner-default 2%) positions
+        would together request ~4% against the owner's 3% total open-risk
+        budget, so the second must BLOCK on the real budget, not on a
+        position-count proxy."""
         orchestrator, broker = Fixture(tmp_path / "paper.jsonl").build()
         snapshot, spec = compatible_snapshot()
         first = process_clear(orchestrator, snapshot, spec)
@@ -535,16 +640,67 @@ class TestPaperLiteFlow:
         orchestrator._clock = lambda: later
         second = process_clear(orchestrator, second_snapshot, spec)
 
-        assert second.outcome_type is PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE
+        assert second.outcome_type is PaperLiteOutcomeType.RISK_BLOCKED
+        assert second.decision_path is not None
+        assert second.decision_path.risk_decision is not None
+        assert ReasonCode.OPEN_RISK_LIMIT in second.decision_path.risk_decision.reason_codes
         assert len(broker.positions()) == 1
 
+    def test_several_small_positions_under_the_open_risk_budget_are_not_blocked_by_count(
+        self, tmp_path: Path
+    ) -> None:
+        """Section 7 regression: several positions whose combined risk
+        stays under the owner's 3% total budget must not be refused merely
+        because a position already exists -- both entries here request 1%
+        each, ~2% combined, comfortably under budget."""
+        orchestrator, broker = Fixture(
+            tmp_path / "paper.jsonl", requested_risk_fraction=Decimal("0.01")
+        ).build()
+        snapshot, spec = compatible_snapshot()
+        first = process_clear(orchestrator, snapshot, spec)
+        assert first.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+
+        later = FIXED_NOW + timedelta(minutes=1)
+        second_snapshot, _ = compatible_snapshot(
+            snapshot_id=uuid4(),
+            event_time_utc=later,
+            received_time_utc=later,
+            bars=(make_snapshot().bars[-1].model_copy(update={"open_time_utc": later}),),
+        )
+        orchestrator._clock = lambda: later
+        second = process_clear(orchestrator, second_snapshot, spec)
+
+        assert second.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+        assert len(broker.positions()) == 2
+
+    def test_flat_portfolio_open_risk_is_exact_zero_not_unknown(self, tmp_path: Path) -> None:
+        """Section 7 regression: a flat book must reach Core Risk as an
+        exact, known `0`, never as `OPEN_RISK_UNKNOWN` -- a directional
+        proposal against a flat portfolio must be able to PASS on its own
+        merits, with no open-risk-derived refusal at all."""
+        orchestrator, _ = Fixture(tmp_path / "paper.jsonl").build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+        assert outcome.decision_path is not None
+        assert outcome.decision_path.risk_decision is not None
+        assert outcome.decision_path.risk_decision.verdict is RiskVerdict.PASS
+        assert ReasonCode.OPEN_RISK_UNKNOWN not in outcome.decision_path.risk_decision.reason_codes
+
     def test_weekday_overnight_position_remains_open(self, tmp_path: Path) -> None:
+        """Open-risk budget arithmetic is covered separately above -- this
+        test is only about overnight retention, so the second cycle asks
+        for NO_TRADE rather than a second entry, keeping the two concerns
+        apart."""
         orchestrator, broker = Fixture(tmp_path / "paper.jsonl").build()
         snapshot, spec = compatible_snapshot()
         assert (
             process_clear(orchestrator, snapshot, spec).outcome_type
             is PaperLiteOutcomeType.PAPER_FILLED
         )
+        orchestrator._agent.directional = False  # type: ignore[attr-defined]
 
         tuesday = FIXED_NOW + timedelta(days=1)
         later_snapshot, _ = compatible_snapshot(
@@ -557,7 +713,7 @@ class TestPaperLiteFlow:
 
         outcome = process_clear(orchestrator, later_snapshot, spec)
 
-        assert outcome.outcome_type is PaperLiteOutcomeType.EXACT_OPEN_RISK_UNAVAILABLE
+        assert outcome.outcome_type is PaperLiteOutcomeType.NO_TRADE
         assert len(broker.positions()) == 1
 
     def test_friday_deadline_flattens_remaining_paper_exposure(self, tmp_path: Path) -> None:
