@@ -2130,6 +2130,69 @@ NO-GO.
 
 ---
 
+## 0ad. Neutral staging service decoupled from the legacy v5 package — startup blocker fixed — done 2026-09-06
+
+Owner-requested follow-up to §0ac: the frozen v5 package's own
+integrity-check defect (still unfixed, still an explicit owner decision,
+per §0ac) was reachable from the *neutral* staging service's own startup
+path, purely by accident — `cli.main()` unconditionally called
+`_load_trader()` (`StrategyPackage.load()` + `CrumblrStaticTrader`)
+before even checking `args.command`, so `crumblr-neutral-strategy-agent-
+staging`'s `serve` invocation was blocked by a package it never actually
+needed. Committed and pushed on top of §0ac (`7471014` → `395e7b1`, same
+branch, `agent/neutral-context-strategy-6.0`).
+
+**Fix:** new `crumblr-strategy-agent serve --neutral-only` — constructs
+only `CrumblrNeutralContextTrader` (StrategyArtifact 6.0), never
+`StrategyPackage.load()`/`CrumblrStaticTrader`. Requires
+`CRUMBLR_AGENT_ID` and a service token unconditionally (no
+`--allow-unauthenticated-loopback` exception in this mode — stricter than
+the legacy `serve` path on purpose, since a deployed neutral-only staging
+service is never meant to run unauthenticated). `TraderApiApplication
+.legacy_trader` is now `Optional` throughout; a legacy `TraderContext 1.0`
+payload gets `422 LEGACY_ROUTE_DISABLED`, never a crash and never a
+silent fallback; `/health`'s `legacy_v5_strategy` reports `null` rather
+than a placeholder identity when no legacy trader was constructed.
+`render.yaml`'s neutral staging service now starts with
+`--neutral-only`.
+
+**Evidence, clean Linux (`git archive` of the committed blob, fresh
+`python:3.12-slim` container, no patching of any kind):**
+- Full suite: 71 tests, 39 passed, 32 errors — all 32 the same
+  pre-existing legacy-package `IntegrityError` from §0ac, unchanged count
+  from before this pass (62→71 total is exactly the 9 new tests, all
+  passing).
+- New `tests/test_neutral_only_service.py` in isolation: **9/9 pass**,
+  with zero patching and zero legacy-package involvement — the whole
+  point being proven directly, not asserted.
+- A *real* `crumblr-strategy-agent serve --neutral-only` process (the
+  actual installed console-script entrypoint, not a Python-internal
+  shortcut) started clean and answered real HTTP: `GET /health` returned
+  `legacy_v5_strategy: null` and a full `neutral_context_strategy` block;
+  a real legacy-shaped `POST /v1/trader/evaluate` got `422
+  LEGACY_ROUTE_DISABLED`, not a crash.
+- Re-ran the cross-repo HTTP contract proof from §0ac end-to-end against
+  this fix, this time with **no legacy trader constructed at all** (the
+  LF-patching workaround §0ac needed to make the legacy trader
+  constructible is no longer needed for this proof): real
+  `HttpNeutralAgentClient` → real running neutral-only server → genuine
+  `NoTradeDecision` (flat bars) and genuine `TradeProposal` (`side=BUY`,
+  real SL/TP/reason_codes), both passing Crumblr's own contract
+  validation unmodified.
+
+Full field-by-field report (health JSON, both HTTP proofs, exact
+`startCommand`) given to the owner directly; not duplicated here.
+
+**Still not touched, still an explicit owner decision:** the frozen v5
+`.mq5`/manifest/provenance hash mismatch itself (§0ac) — this pass made
+the *neutral* service immune to it, not fixed it. `crumblr-strategy-agent
+verify` (the legacy-package command) still cannot honestly report `PASS`
+on any platform until that decision is made. `order_send` unchanged:
+NO-GO. Not deployed — owner review pending before deployment, per
+explicit instruction.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
