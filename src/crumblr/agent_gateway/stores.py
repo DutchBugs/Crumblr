@@ -314,6 +314,17 @@ class AgentDecisionOutcomeStore(Protocol):
         tell the two apart."""
         ...
 
+    def latest_outcome_id_for(self, assignment_id: UUID) -> UUID | None:
+        """The most recently claimed outcome for one assignment, by
+
+        `claimed_at_utc`. Read-only convenience for a display surface that
+        needs "what did this assignment last do" without already knowing an
+        `outcome_id` — every other lookup here is keyed by `outcome_id`
+        itself and cannot answer that on its own. Returns `None` if nothing
+        has ever been claimed for this assignment, exactly like the other
+        lookups. Mirrors `DecisionContextBundleStore.latest_for`'s shape."""
+        ...
+
 
 class InMemoryAgentDecisionOutcomeStore:
     def __init__(self) -> None:
@@ -458,3 +469,13 @@ class InMemoryAgentDecisionOutcomeStore:
         return next(
             (event for event in stored.events if event.event_type in _SETTLING_EVENT_TYPES), None
         )
+
+    def latest_outcome_id_for(self, assignment_id: UUID) -> UUID | None:
+        candidates = [
+            (outcome_id, outcome)
+            for outcome_id, outcome in self._outcomes.items()
+            if outcome.assignment_id == assignment_id
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda pair: pair[1].claimed_at_utc)[0]

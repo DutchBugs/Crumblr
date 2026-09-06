@@ -11264,6 +11264,107 @@ until that lands.
 
 ---
 
+## Update 2026-09-06 (corrective commit) — Dashboard NO-GO review addressed: identity-bound Last Decision, no more inferred rejections, real execution gates
+
+The owner reviewed commit `8d29b32` and returned **NO-GO for merge**, same
+branch, with six concrete findings. All six addressed, none deferred:
+
+1. **`scripts/_seed_dashboard_demo.py` removed from the branch entirely** —
+   no mutating demo/seeder code belongs in a read-only dashboard change.
+2. **`build_last_decision` rewritten to bind to one concrete `outcome_id`
+   per `assignment_id`.** The first version found "the most recent capsule/
+   journal fact anywhere" — with two PAPER assignments, that could show one
+   assignment's outcome under another's Agent panel. Added one more
+   additive, owner-pre-authorized read method (same category as the first
+   commit's `DecisionContextBundleStore.latest_for`):
+   `AgentDecisionOutcomeStore.latest_outcome_id_for(assignment_id)`
+   (Protocol + `InMemory`/`Postgres` implementations, `agent_gateway/
+   stores.py` + `persistence/agent_gateway.py`). Every subsequent lookup —
+   `settlement_for(outcome_id)`, journal facts filtered by `payload
+   .correlation_id == str(outcome_id)`, and the capsule via its
+   deterministic `capsule_id = uuid5(NAMESPACE_URL, "crumblr:agent-capsule:
+   {outcome_id}")` derivation — is now anchored to that one identity, never
+   "whichever is most recent in time."
+3. **No more inferring `GATEWAY_REJECTED` from absence.** The first version
+   treated "claimed but nothing else recorded" as evidence of a rejection —
+   it is equally consistent with a crash or an unpropagated settlement.
+   `GATEWAY_REJECTED` now requires a real `AgentDecisionOutcomeStore
+   .settlement_for(outcome_id)` returning an actual `REJECTED` event.
+   Genuine "claimed, nothing further known" now reports a new
+   `AWAITING_EVIDENCE` outcome instead.
+4. **`AgentHealth` now checks `AgentIdentity.status` explicitly.**
+   `SUSPENDED`/`RETIRED` map to `NOT PROVISIONED` (a known, deliberate
+   non-active state), never `HEALTHY` — the first version only checked
+   assignment validity and left agent status unexamined.
+5. **A corrupt PAPER_LITE journal line now fails closed, visibly.**
+   `paper_lite_journal.read_journal_entries` returns a
+   `JournalReadResult(entries, had_corruption)` instead of a bare tuple;
+   `build_last_decision` checks `had_corruption` first and returns a new
+   `DEGRADED` outcome immediately, before attempting any correlation — the
+   first version logged the bad line server-side and silently proceeded
+   with whatever else parsed, which could still produce a confident-looking
+   answer.
+6. **New `dashboard/execution_panel.py`**: the Execution header card is now
+   `build_execution_gate_state(execution_config, live_trading_acknowledged)`
+   — reads `ExecutionConfig.submission_enabled`/`.feedback_2_0_approved`/
+   `.flatten_submission_enabled` and `PlatformConfig
+   .live_trading_acknowledged` directly and reports which are closed,
+   rather than a fixed `DISABLED` template literal. Deliberately does not
+   call the full `risk.submission_gate.evaluate_submission_gate` — that
+   function needs live account/reconciliation/market-data/kill-switch
+   context this passive status page does not hold; checking these four
+   config-level gates is a strict, honest subset of the real 10-condition
+   gate, never a looser one.
+
+**Kept as the owner explicitly asked:** the 503-response secret-leak fix
+and the read-only `reconcile()` call — both unchanged from commit `8d29b32`.
+
+**A named, deliberate scope reduction, flagged to the owner rather than
+hidden:** `PAPER_FILLED` is no longer reachable through this precedence.
+`persistence/paper_lite.py`'s `PAPER_ORDER_ACCEPTED` journal entry (the
+durable trace of a real fill) carries no `outcome_id`/`correlation_id` in
+its payload — confirmed by reading `DurablePaperBroker.submit()` directly.
+Every other audit fact this module reads is written with
+`correlation_id=gateway_result.outcome_id`; a fill is not. Guessing a fill
+from timing (an entry appearing shortly after the right facts) is exactly
+the kind of un-anchored inference finding 3 above required removing, so a
+capsule with Risk `PASS` + Policy `APPROVE` and no further outcome_id-bound
+fact now reports `AWAITING_OUTCOME` — correct even for a genuinely filled
+order, until `application/paper_lite.py` (Dev-2/Dev-3 owned, out of this
+branch's scope) adds a correlation id to that payload.
+
+New regression tests, one per finding the owner listed: two independently-
+claimed PAPER assignments never cross-contaminate (real
+`PostgresAgentDecisionOutcomeStore`, real claims, real capsules — the one
+guarantee proven against the real store rather than a fake);
+`SUSPENDED`/`RETIRED` agents are never `HEALTHY`; a decision-window claim
+with no terminal evidence reports `AWAITING_EVIDENCE`, not
+`GATEWAY_REJECTED`; a corrupt journal line reports `DEGRADED` even with a
+complete, otherwise-correct outcome underneath it; all-gates-closed and
+all-gates-open both render correctly with the real closed-gate names shown.
+
+Evidence: `uv run ruff check .`/`ruff format --check .` clean, `uv run
+mypy` clean (203 source files, unchanged from the previous commit — the net
+module count didn't change; `execution_panel.py` added, `_seed_dashboard_demo
+.py` removed). Full suite, isolated run: **1526 passed, 3 skipped, 0
+failed**, real PostgreSQL against `crumblr_test_dev1`. Dashboard-specific
+subset (`test_dashboard.py`/`test_dashboard_agent_state.py`/
+`test_dashboard_paper_lite_journal.py`) is **69 passed, 0 failed**.
+Manually re-verified against the real running server too (restarted after
+the rewrite): the old seed data's capsule — sealed directly, never claimed
+through the real `AgentDecisionOutcomeStore` — correctly no longer appears
+as a Last Decision under the new identity-bound design (`NO EVIDENCE`,
+`agent_health: WAITING`), confirming the fix behaves as intended rather
+than merely passing its own unit tests.
+
+Decision: new commit on the same branch, pushed to
+`origin/dev1/dashboard-current-state`, **still not merged** — stopping for
+owner re-review per the same standing instruction.
+
+Next: owner re-review of the corrective commit.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

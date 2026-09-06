@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from crumblr.config import AccountGuardConfig, RiskConfig
+from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
 from crumblr.dashboard.state import DashboardState, build_state
 from crumblr.domain.enums import Environment
 from crumblr.observability.logging import get_logger
@@ -42,7 +42,14 @@ _GOOD_STATES = frozenset(
     {"CONNECTED", "HEALTHY", "RUNNING", "GOOD", "MATCHED", "ACTIVE", "PAPER_FILLED"}
 )
 _WARN_STATES = frozenset(
-    {"STALE", "UNCALIBRATED", "DEGRADED", "WAITING", "NOT_YET_VALID", "AWAITING_OUTCOME"}
+    {
+        "STALE",
+        "UNCALIBRATED",
+        "WAITING",
+        "NOT_YET_VALID",
+        "AWAITING_OUTCOME",
+        "AWAITING_EVIDENCE",
+    }
 )
 _BAD_STATES = frozenset(
     {
@@ -55,6 +62,7 @@ _BAD_STATES = frozenset(
         "NOT PROVISIONED",
         "EXPIRED",
         "DISABLED",
+        "DEGRADED",
         "GATEWAY_REJECTED",
         "RISK_BLOCKED",
         "SESSION_BLOCKED",
@@ -172,6 +180,7 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             **asdict(state.reconciliation),
             "checked_at_utc": state.reconciliation.checked_at_utc.isoformat(),
         },
+        "execution_gate": asdict(state.execution_gate),
         "latest_tick": (
             {
                 "event_time_utc": state.latest_tick.event_time_utc.isoformat(),
@@ -207,6 +216,8 @@ def create_app(
     engine: Engine,
     guard: AccountGuardConfig,
     risk_config: RiskConfig,
+    execution_config: ExecutionConfig,
+    live_trading_acknowledged: bool,
     environment: Environment,
     canonical_symbol: str = "EUR/USD",
     timeframe: str = "M5",
@@ -222,7 +233,7 @@ def create_app(
     read path in this codebase (`MarketDataStore`, `EventJournal`, ...) uses.
     `agent_assignment_id`/`paper_lite_journal_path` are both optional: with
     neither supplied, the Agent panel renders `NOT PROVISIONED` and the Last
-    Decision card renders from `CapsuleStore` alone — never an error.
+    Decision card renders `NO EVIDENCE` — never an error.
     """
     app = FastAPI(
         title="Crumblr — read-only",
@@ -239,6 +250,8 @@ def create_app(
             engine=engine,
             guard=guard,
             risk_config=risk_config,
+            execution_config=execution_config,
+            live_trading_acknowledged=live_trading_acknowledged,
             environment=environment,
             canonical_symbol=canonical_symbol,
             timeframe=timeframe,

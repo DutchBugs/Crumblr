@@ -2,34 +2,58 @@
 
 Every function here only reads already-persisted facts and reduces them to a
 display shape; none of them evaluate a proposal, call the Gateway, or touch
-Risk/Policy. Two genuine gaps in what is durably persisted shape this module:
+Risk/Policy.
 
-- `AgentMarketContextV1` and `PaperLiteOutcomeType` (see
-  `application/paper_lite.py`) are only ever in-process values — neither is
-  stored as its own row. What *is* durable, keyed consistently by the
-  Gateway's own `outcome_id`, is: `AgentDecisionOutcomeStore`'s settlement
-  event, PAPER_LITE's own append-only audit journal (`paper_lite_journal
-  .py`), and the sealed `DecisionCapsule` (`persistence/journal.py
-  ::CapsuleStore`) for any outcome that reached Core Risk. `build_last_decision`
-  reconstructs "what actually happened most recently" by reading those three
-  in the same precedence PAPER_LITE's own code produces them in — it does
-  not re-run or duplicate that logic, only reads its traces.
-- Some terminal states (`GATEWAY_REJECTED`, `SESSION_BLOCKED`, a kill-switch
-  `RISK_BLOCKED`) leave no capsule at all. When the latest decision window
-  has neither a matching journal fact nor a capsule sealed after it, this
-  module infers `GATEWAY_REJECTED` (the one path that leaves no local trace
-  by design) and marks the result `inferred=True` rather than presenting a
-  guess as a certainty.
+**Identity discipline (review feedback, second pass):** the first version of
+`build_last_decision` found "the most recent capsule/journal fact anywhere"
+and presented it as though it were this assignment's decision — with two or
+more PAPER assignments active, that could show one assignment's outcome next
+to another's Agent panel. Every lookup here is now anchored to a single,
+concrete `outcome_id`, obtained from `AgentDecisionOutcomeStore
+.latest_outcome_id_for(assignment_id)` — the one store that actually records
+which assignment claimed which outcome. The PAPER_LITE journal and
+`CapsuleStore` are only ever consulted *for that exact `outcome_id`*
+(`correlation_id` on a journal audit fact, or the deterministic
+`capsule_id = uuid5(NAMESPACE_URL, f"crumblr:agent-capsule:{outcome_id}")`
+derivation `decision_path.py` itself uses) — never by "whichever is most
+recent in time," which is exactly the cross-assignment leak this replaces.
+
+**No more inferring `GATEWAY_REJECTED` from absence.** The first version
+treated "a decision window was claimed but nothing else was ever recorded"
+as good evidence of a Gateway rejection. It is not: it is equally consistent
+with a crash between claim and settlement, or a settlement that has not
+propagated yet. `GATEWAY_REJECTED` is now reported *only* when
+`AgentDecisionOutcomeStore.settlement_for(outcome_id)` returns a real
+`REJECTED` event — a durable fact, not a guess. Genuine "claimed, nothing
+further known" now reports `AWAITING_EVIDENCE`, and a corrupt PAPER_LITE
+journal line (surfaced by `paper_lite_journal.read_journal_entries`'s
+`had_corruption` flag) reports `DEGRADED` immediately, before any
+correlation is attempted — an incomplete read must not produce a confident
+answer.
+
+**Named, deliberate gap: `PAPER_FILLED` is not currently reachable through
+this precedence.** `persistence.paper_lite.py`'s `PAPER_ORDER_ACCEPTED`
+journal entry (the durable trace of a real fill) carries no `outcome_id`/
+`correlation_id` in its payload — confirmed by reading `DurablePaperBroker
+.submit()` directly. Every other audit fact this module reads
+(`PAPER_LITE_SAFETY_HALTED`/`_SESSION_BLOCKED`/`_ORDER_CHECK_BLOCKED`/
+`SUPERVISOR_SKIPPED_PAPER_MODE`) is written with `correlation_id=
+gateway_result.outcome_id`, so those bind cleanly; a fill does not. Rather
+than guess a fill from timing (exactly the kind of un-anchored inference
+this rewrite removes), a capsule with Risk `PASS` + Policy `APPROVE` and no
+further outcome_id-bound fact reports `AWAITING_OUTCOME` — correct even for
+a genuinely filled order, until `application/paper_lite.py` (Dev-2/Dev-3
+owned, out of this branch's scope) adds a correlation id to that payload.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Literal, Protocol
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from crumblr.domain.enums import Environment, RiskVerdict, SupervisorVerdict
+from crumblr.agent_gateway.events import AgentDecisionEventType
+from crumblr.domain.enums import RiskVerdict, SupervisorVerdict
 from crumblr.domain.models import DecisionCapsule
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.market_data.pipeline import interval_for
@@ -42,15 +66,15 @@ _SAFETY_HALTED_FACT = "PAPER_LITE_SAFETY_HALTED"
 _SESSION_BLOCKED_FACT = "PAPER_LITE_SESSION_BLOCKED"
 _ORDER_CHECK_BLOCKED_FACT = "PAPER_LITE_ORDER_CHECK_BLOCKED"
 _SUPERVISOR_SKIPPED_FACT = "SUPERVISOR_SKIPPED_PAPER_MODE"
-_WINDOW_CLAIMED_FACT = "PAPER_LITE_DECISION_WINDOW_CLAIMED"
-
-_NO_EVIDENCE_FOR_WINDOW_DETAIL = "no risk/policy evidence recorded for the latest decision window"
 
 _AUDIT_FACT_OUTCOME = {
     _SAFETY_HALTED_FACT: "RISK_BLOCKED",
     _SESSION_BLOCKED_FACT: "SESSION_BLOCKED",
     _ORDER_CHECK_BLOCKED_FACT: "PAPER_ORDER_CHECK_BLOCKED",
 }
+
+_DEGRADED_DETAIL = "a PAPER_LITE journal line could not be read; evidence may be incomplete"
+_AWAITING_EVIDENCE_DETAIL = "the outcome was claimed but no further evidence has been recorded yet"
 
 
 class _AssignmentStoreLike(Protocol):
@@ -63,6 +87,11 @@ class _IdentityStoreLike(Protocol):
 
 class _ContextBundleStoreLike(Protocol):
     def latest_for(self, assignment_id: UUID) -> Any: ...
+
+
+class _OutcomeStoreLike(Protocol):
+    def latest_outcome_id_for(self, assignment_id: UUID) -> UUID | None: ...
+    def settlement_for(self, outcome_id: UUID, *, connection: Any = None) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -100,19 +129,17 @@ class TradeProposalSummary:
 
 @dataclass(frozen=True)
 class LastDecisionState:
-    """The most recent PAPER_LITE cycle this module could find evidence for.
+    """The decision this exact assignment's most recently claimed outcome
 
-    `platform_outcome` is one of `NO_TRADE`, `GATEWAY_REJECTED`,
+    resolves to. `platform_outcome` is one of `NO_TRADE`, `GATEWAY_REJECTED`,
     `SESSION_BLOCKED`, `RISK_BLOCKED`, `POLICY_BLOCKED`,
-    `PAPER_ORDER_CHECK_BLOCKED`, `PAPER_FILLED`, `AWAITING_OUTCOME` — the
-    last one is a genuine, honestly-labelled ambiguity (Core Risk passed and
-    Platform Policy approved, but no later journal fact says what happened
-    next — a crash between approval and order-check, most likely)."""
+    `PAPER_ORDER_CHECK_BLOCKED`, `AWAITING_OUTCOME`, `AWAITING_EVIDENCE`,
+    `DEGRADED` — see the module docstring for what each of the last three
+    means and why `PAPER_FILLED` is not currently reachable here."""
 
     occurred_at_utc: UtcDatetime | None
     platform_outcome: str
     platform_outcome_detail: str | None
-    inferred: bool
     proposal: TradeProposalSummary | None
     risk_verdict: str | None
     risk_reason_codes: tuple[str, ...]
@@ -201,15 +228,15 @@ def _from_capsule(capsule: DecisionCapsule, *, supervisor_skipped: bool) -> Last
     elif policy is None or policy.verdict is not SupervisorVerdict.APPROVE:
         outcome = "POLICY_BLOCKED"
     else:
-        # Risk PASS + Policy APPROVE with no later journal fact to say what
-        # happened at order-check/fill time -- a real, not fabricated, gap.
+        # Risk PASS + Policy APPROVE with no outcome_id-bound fact to say
+        # what happened at order-check/fill time -- see the module
+        # docstring's "named, deliberate gap" note on PAPER_FILLED.
         outcome = "AWAITING_OUTCOME"
 
     return LastDecisionState(
         occurred_at_utc=capsule.occurred_at_utc,
         platform_outcome=outcome,
         platform_outcome_detail=None,
-        inferred=False,
         proposal=_proposal_summary(capsule),
         risk_verdict=risk_verdict,
         risk_reason_codes=(tuple(code.value for code in risk.reason_codes) if risk else ()),
@@ -220,50 +247,69 @@ def _from_capsule(capsule: DecisionCapsule, *, supervisor_skipped: bool) -> Last
 
 def build_last_decision(
     *,
+    outcome_store: _OutcomeStoreLike,
     capsule_store: CapsuleStore,
+    assignment_id: UUID | None,
     journal_entries: tuple[dict[str, Any], ...],
+    journal_had_corruption: bool,
 ) -> LastDecisionState | None:
-    """`None` means no PAPER_LITE evidence exists anywhere yet ("NO EVIDENCE")."""
-    window_claims = [
-        entry
-        for entry in journal_entries
-        if entry.get("event_type") == "AUDIT_FACT"
-        and entry.get("payload", {}).get("fact") == _WINDOW_CLAIMED_FACT
-    ]
-    latest_claim = max(window_claims, key=lambda entry: entry["sequence"], default=None)
-    latest_claim_sequence = latest_claim["sequence"] if latest_claim is not None else -1
+    """`None` means no evidence exists anywhere yet for this assignment
 
-    after_claim = [entry for entry in journal_entries if entry["sequence"] > latest_claim_sequence]
-
-    supervisor_skipped = any(
-        entry.get("event_type") == "AUDIT_FACT"
-        and entry.get("payload", {}).get("fact") == _SUPERVISOR_SKIPPED_FACT
-        for entry in after_claim
-    )
-
-    fill_entry = next(
-        (entry for entry in after_claim if entry.get("event_type") == "PAPER_ORDER_ACCEPTED"),
-        None,
-    )
-    if fill_entry is not None:
+    ("NO EVIDENCE"). Every other return is anchored to one concrete
+    `outcome_id` this exact `assignment_id` actually claimed — see the
+    module docstring for the full identity-binding discipline.
+    """
+    if journal_had_corruption:
+        # Fail closed before attempting any correlation: an incomplete read
+        # of the journal must not produce a confident answer, even one that
+        # happens to not need the missing line.
         return LastDecisionState(
             occurred_at_utc=None,
-            platform_outcome="PAPER_FILLED",
-            platform_outcome_detail=None,
-            inferred=False,
+            platform_outcome="DEGRADED",
+            platform_outcome_detail=_DEGRADED_DETAIL,
             proposal=None,
             risk_verdict=None,
             risk_reason_codes=(),
             policy_verdict=None,
-            supervisor_skipped=supervisor_skipped,
+            supervisor_skipped=False,
         )
 
+    if assignment_id is None:
+        return None
+    outcome_id = outcome_store.latest_outcome_id_for(assignment_id)
+    if outcome_id is None:
+        return None
+
+    settlement = outcome_store.settlement_for(outcome_id)
+    if settlement is not None and settlement.event_type is AgentDecisionEventType.REJECTED:
+        return LastDecisionState(
+            occurred_at_utc=settlement.occurred_at_utc,
+            platform_outcome="GATEWAY_REJECTED",
+            platform_outcome_detail=settlement.detail,
+            proposal=None,
+            risk_verdict=None,
+            risk_reason_codes=tuple(settlement.reason_codes),
+            policy_verdict=None,
+            supervisor_skipped=False,
+        )
+
+    outcome_id_str = str(outcome_id)
+    matching = tuple(
+        entry
+        for entry in journal_entries
+        if entry.get("payload", {}).get("correlation_id") == outcome_id_str
+    )
+    supervisor_skipped = any(
+        entry.get("event_type") == "AUDIT_FACT"
+        and entry["payload"].get("fact") == _SUPERVISOR_SKIPPED_FACT
+        for entry in matching
+    )
     fact_entry = next(
         (
             entry
-            for entry in after_claim
+            for entry in matching
             if entry.get("event_type") == "AUDIT_FACT"
-            and entry.get("payload", {}).get("fact") in _AUDIT_FACT_OUTCOME
+            and entry["payload"].get("fact") in _AUDIT_FACT_OUTCOME
         ),
         None,
     )
@@ -273,7 +319,6 @@ def build_last_decision(
             occurred_at_utc=None,
             platform_outcome=_AUDIT_FACT_OUTCOME[fact],
             platform_outcome_detail=fact_entry["payload"].get("detail"),
-            inferred=False,
             proposal=None,
             risk_verdict=None,
             risk_reason_codes=(),
@@ -281,53 +326,21 @@ def build_last_decision(
             supervisor_skipped=supervisor_skipped,
         )
 
-    capsules = capsule_store.read_all(environment=Environment.PAPER)
-    latest_capsule = capsules[-1] if capsules else None
+    capsule_id = uuid5(NAMESPACE_URL, f"crumblr:agent-capsule:{outcome_id}")
+    capsule = capsule_store.get(capsule_id)
+    if capsule is not None:
+        return _from_capsule(capsule, supervisor_skipped=supervisor_skipped)
 
-    if latest_capsule is None:
-        if latest_claim is None:
-            return None
-        return LastDecisionState(
-            occurred_at_utc=_parse_claim_bar_time(latest_claim),
-            platform_outcome="GATEWAY_REJECTED",
-            platform_outcome_detail=_NO_EVIDENCE_FOR_WINDOW_DETAIL,
-            inferred=True,
-            proposal=None,
-            risk_verdict=None,
-            risk_reason_codes=(),
-            policy_verdict=None,
-            supervisor_skipped=False,
-        )
-
-    if latest_claim is not None:
-        window_bar_time = _parse_claim_bar_time(latest_claim)
-        if window_bar_time is not None and latest_capsule.occurred_at_utc < window_bar_time:
-            # The most recent capsule predates the most recent decision
-            # window -- that window produced no capsule and no fact, which
-            # is exactly what a Gateway rejection looks like from here.
-            return LastDecisionState(
-                occurred_at_utc=window_bar_time,
-                platform_outcome="GATEWAY_REJECTED",
-                platform_outcome_detail=(_NO_EVIDENCE_FOR_WINDOW_DETAIL),
-                inferred=True,
-                proposal=None,
-                risk_verdict=None,
-                risk_reason_codes=(),
-                policy_verdict=None,
-                supervisor_skipped=False,
-            )
-
-    return _from_capsule(latest_capsule, supervisor_skipped=supervisor_skipped)
-
-
-def _parse_claim_bar_time(claim_entry: dict[str, Any]) -> UtcDatetime | None:
-    detail = claim_entry.get("payload", {}).get("detail")
-    if not detail:
-        return None
-    try:
-        return datetime.fromisoformat(detail)
-    except ValueError:
-        return None
+    return LastDecisionState(
+        occurred_at_utc=(settlement.occurred_at_utc if settlement is not None else None),
+        platform_outcome="AWAITING_EVIDENCE",
+        platform_outcome_detail=_AWAITING_EVIDENCE_DETAIL,
+        proposal=None,
+        risk_verdict=None,
+        risk_reason_codes=(),
+        policy_verdict=None,
+        supervisor_skipped=supervisor_skipped,
+    )
 
 
 def build_agent_health(
@@ -339,9 +352,16 @@ def build_agent_health(
 ) -> AgentHealthState:
     if agent_panel is None or agent_panel.assignment_status != "ACTIVE":
         return "NOT PROVISIONED"
-    if agent_panel.runtime_version is None:
+    if agent_panel.agent_status is None:
         # The assignment names an agent_id no AgentIdentity record exists
         # for -- a real inconsistency, not merely "no evidence yet".
+        return "UNKNOWN"
+    if agent_panel.agent_status != "ACTIVE":
+        # SUSPENDED / RETIRED -- a known, deliberate non-active state.
+        # Never green, and distinct from "identity missing entirely".
+        return "NOT PROVISIONED"
+    if last_decision is not None and last_decision.platform_outcome == "DEGRADED":
+        # Cannot trust the evidence used to judge recency below.
         return "UNKNOWN"
     if last_decision is None or last_decision.occurred_at_utc is None:
         return "WAITING"

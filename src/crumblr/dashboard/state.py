@@ -37,7 +37,7 @@ from uuid import UUID
 
 from sqlalchemy import Engine
 
-from crumblr.config import AccountGuardConfig, RiskConfig
+from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
 from crumblr.dashboard.agent_state import (
     AgentHealthState,
     AgentPanelState,
@@ -46,7 +46,8 @@ from crumblr.dashboard.agent_state import (
     build_agent_panel,
     build_last_decision,
 )
-from crumblr.dashboard.paper_lite_journal import read_journal_entries
+from crumblr.dashboard.execution_panel import ExecutionGateState, build_execution_gate_state
+from crumblr.dashboard.paper_lite_journal import JournalReadResult, read_journal_entries
 from crumblr.dashboard.reader_health import read_health_snapshot
 from crumblr.dashboard.reconciliation_panel import (
     ReconciliationPanelState,
@@ -60,6 +61,7 @@ from crumblr.domain.models import SupervisorDecision as SupervisorDecisionPayloa
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.pipeline import interval_for
 from crumblr.persistence.agent_gateway import (
+    PostgresAgentDecisionOutcomeStore,
     PostgresAgentIdentityStore,
     PostgresDecisionContextBundleStore,
     PostgresTradingAssignmentStore,
@@ -183,6 +185,10 @@ class DashboardState:
 
     risk_panel: RiskPanelState
     reconciliation: ReconciliationPanelState
+    execution_gate: ExecutionGateState
+    """Renders the "Execution" header card — derived from real config gates,
+
+    never hardcoded."""
 
     latest_signal: DecisionSummary | None
     latest_risk_decision: DecisionSummary | None
@@ -331,6 +337,8 @@ def build_state(
     engine: Engine,
     guard: AccountGuardConfig,
     risk_config: RiskConfig,
+    execution_config: ExecutionConfig,
+    live_trading_acknowledged: bool,
     environment: Environment,
     canonical_symbol: str,
     timeframe: str,
@@ -377,12 +385,17 @@ def build_state(
         assignment_id=agent_assignment_id,
         now=now,
     )
-    journal_entries = (
-        read_journal_entries(paper_lite_journal_path) if paper_lite_journal_path is not None else ()
+    journal_read = (
+        read_journal_entries(paper_lite_journal_path)
+        if paper_lite_journal_path is not None
+        else JournalReadResult((), had_corruption=False)
     )
     last_decision = build_last_decision(
+        outcome_store=PostgresAgentDecisionOutcomeStore(engine),
         capsule_store=CapsuleStore(engine),
-        journal_entries=journal_entries,
+        assignment_id=agent_assignment_id,
+        journal_entries=journal_read.entries,
+        journal_had_corruption=journal_read.had_corruption,
     )
     agent_health = build_agent_health(
         agent_panel=agent_panel,
@@ -401,6 +414,10 @@ def build_state(
         canonical_symbol=canonical_symbol,
         expected_spec_version=expected_spec_version,
         now=now,
+    )
+    execution_gate = build_execution_gate_state(
+        execution_config=execution_config,
+        live_trading_acknowledged=live_trading_acknowledged,
     )
 
     return DashboardState(
@@ -428,6 +445,7 @@ def build_state(
         last_decision=last_decision,
         risk_panel=risk_panel,
         reconciliation=reconciliation,
+        execution_gate=execution_gate,
         latest_signal=(
             _decision_summary(
                 latest_signal,
@@ -468,5 +486,5 @@ def build_state(
         recent_events=tuple(
             _event_summary(event) for event in journal.recent(limit=RECENT_EVENT_COUNT)
         ),
-        paper_lite_activity=_paper_lite_activity(journal_entries, limit=RECENT_EVENT_COUNT),
+        paper_lite_activity=_paper_lite_activity(journal_read.entries, limit=RECENT_EVENT_COUNT),
     )
