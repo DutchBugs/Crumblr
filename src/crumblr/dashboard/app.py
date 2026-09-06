@@ -13,6 +13,7 @@ from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -20,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from crumblr.config import AccountGuardConfig
+from crumblr.config import AccountGuardConfig, RiskConfig
 from crumblr.dashboard.state import DashboardState, build_state
 from crumblr.domain.enums import Environment
 from crumblr.observability.logging import get_logger
@@ -29,14 +30,46 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 _log = get_logger("dashboard")
 
-_GOOD_STATES = frozenset({"CONNECTED", "HEALTHY", "RUNNING", "GOOD", "MATCHED"})
-_WARN_STATES = frozenset({"STALE", "UNCALIBRATED", "DEGRADED"})
-_BAD_STATES = frozenset({"DISCONNECTED", "HALTED", "UNKNOWN", "MISMATCHED", "DOWN", "UNHEALTHY"})
+_DATABASE_UNAVAILABLE_MESSAGE = "database unavailable — see server logs"
+"""Never the raw `str(error)` — a SQLAlchemy/psycopg connection error's text
+
+can include the DSN (host, user, sometimes more). The full error still goes
+to the server-side `_log.warning(...)` call below; only the client-facing
+message is fixed and generic, since both `/api/state` and the rendered HTML
+must never carry anything credential-shaped."""
+
+_GOOD_STATES = frozenset(
+    {"CONNECTED", "HEALTHY", "RUNNING", "GOOD", "MATCHED", "ACTIVE", "PAPER_FILLED"}
+)
+_WARN_STATES = frozenset(
+    {"STALE", "UNCALIBRATED", "DEGRADED", "WAITING", "NOT_YET_VALID", "AWAITING_OUTCOME"}
+)
+_BAD_STATES = frozenset(
+    {
+        "DISCONNECTED",
+        "HALTED",
+        "UNKNOWN",
+        "MISMATCHED",
+        "DOWN",
+        "UNHEALTHY",
+        "NOT PROVISIONED",
+        "EXPIRED",
+        "DISABLED",
+        "GATEWAY_REJECTED",
+        "RISK_BLOCKED",
+        "SESSION_BLOCKED",
+        "POLICY_BLOCKED",
+        "PAPER_ORDER_CHECK_BLOCKED",
+    }
+)
 """Review 1.13 §9's visual-state semantics, as a lookup instead of a chain of
 
 conditionals repeated across the template. `UNKNOWN` is deliberately in the
 unsafe bucket, not a neutral one — "the most conservative state should
-dominate visually" is the review's own rule."""
+dominate visually" is the review's own rule. `NO_TRADE`/`PAPER_FILLED`/
+`AWAITING_OUTCOME` are deliberately in neither bucket — `NO_TRADE` is a
+normal strategy result, not a warning or an error, and `state_class` already
+falls back to `"neutral"` for anything unlisted."""
 
 
 def format_age(delta: timedelta) -> str:
@@ -84,13 +117,39 @@ def _decision_to_json(summary: Any) -> dict[str, Any]:
     return {**asdict(summary), "occurred_at_utc": summary.occurred_at_utc.isoformat()}
 
 
+def _agent_panel_to_json(panel: Any) -> dict[str, Any] | None:
+    if panel is None:
+        return None
+    payload = asdict(panel)
+    payload["agent_id"] = str(panel.agent_id)
+    payload["assignment_id"] = str(panel.assignment_id)
+    payload["strategy_artifact_id"] = str(panel.strategy_artifact_id)
+    payload["valid_from_utc"] = panel.valid_from_utc.isoformat()
+    payload["valid_until_utc"] = panel.valid_until_utc.isoformat()
+    payload["latest_context_issued_at_utc"] = (
+        panel.latest_context_issued_at_utc.isoformat()
+        if panel.latest_context_issued_at_utc is not None
+        else None
+    )
+    return payload
+
+
+def _last_decision_to_json(decision: Any) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    payload = asdict(decision)
+    payload["occurred_at_utc"] = (
+        decision.occurred_at_utc.isoformat() if decision.occurred_at_utc is not None else None
+    )
+    return payload
+
+
 def state_to_json(state: DashboardState) -> dict[str, Any]:
     """A JSON-safe rendering of `DashboardState`, for the polling refresh and the chart."""
     payload: dict[str, Any] = {
         "generated_at_utc": state.generated_at_utc.isoformat(),
         "environment": state.environment,
         "environment_badge_label": state.environment_badge_label,
-        "milestone_label": state.milestone_label,
         "expected_broker_server": state.expected_broker_server,
         "expected_currency": state.expected_currency,
         "expected_leverage": state.expected_leverage,
@@ -105,7 +164,14 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
         "bar_anomaly_count": state.bar_anomaly_count,
         "halt": state.halt.to_payload(),
         "uncalibrated_supervisor_checks": list(state.uncalibrated_supervisor_checks),
-        "decision_pipeline_label": state.decision_pipeline_label,
+        "agent_health": state.agent_health,
+        "agent_panel": _agent_panel_to_json(state.agent_panel),
+        "last_decision": _last_decision_to_json(state.last_decision),
+        "risk_panel": asdict(state.risk_panel),
+        "reconciliation": {
+            **asdict(state.reconciliation),
+            "checked_at_utc": state.reconciliation.checked_at_utc.isoformat(),
+        },
         "latest_tick": (
             {
                 "event_time_utc": state.latest_tick.event_time_utc.isoformat(),
@@ -128,6 +194,7 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             }
             for event in state.recent_events
         ],
+        "paper_lite_activity": [asdict(row) for row in state.paper_lite_activity],
     }
     for key in ("latest_signal", "latest_risk_decision", "latest_supervisor_decision"):
         summary = getattr(state, key)
@@ -139,17 +206,23 @@ def create_app(
     *,
     engine: Engine,
     guard: AccountGuardConfig,
+    risk_config: RiskConfig,
     environment: Environment,
     canonical_symbol: str = "EUR/USD",
     timeframe: str = "M5",
     reader_health_path: Path,
-    milestone_label: str = "M1 PASSED",
+    agent_assignment_id: UUID | None = None,
+    paper_lite_journal_path: Path | None = None,
+    expected_spec_version: str | None = None,
 ) -> FastAPI:
     """Build the dashboard app against one already-open database engine.
 
     The caller owns the engine's lifecycle (disposal, connection pooling) —
     this function only reads through it, the same convention every other
     read path in this codebase (`MarketDataStore`, `EventJournal`, ...) uses.
+    `agent_assignment_id`/`paper_lite_journal_path` are both optional: with
+    neither supplied, the Agent panel renders `NOT PROVISIONED` and the Last
+    Decision card renders from `CapsuleStore` alone — never an error.
     """
     app = FastAPI(
         title="Crumblr — read-only",
@@ -165,11 +238,14 @@ def create_app(
         return build_state(
             engine=engine,
             guard=guard,
+            risk_config=risk_config,
             environment=environment,
             canonical_symbol=canonical_symbol,
             timeframe=timeframe,
             reader_health_path=reader_health_path,
-            milestone_label=milestone_label,
+            agent_assignment_id=agent_assignment_id,
+            paper_lite_journal_path=paper_lite_journal_path,
+            expected_spec_version=expected_spec_version,
         )
 
     @app.get("/", response_class=HTMLResponse)
@@ -179,12 +255,18 @@ def create_app(
         except SQLAlchemyError as error:
             # F-043: a database outage must read as "DATABASE UNAVAILABLE",
             # never as an empty-but-otherwise-normal page — those are
-            # different claims and this template distinguishes them.
+            # different claims and this template distinguishes them. The
+            # full error goes to the server log only — never to the client,
+            # since the exception text can carry the database DSN.
             _log.warning("dashboard.database_unavailable", error=str(error))
             return templates.TemplateResponse(
                 request,
                 "dashboard.html",
-                {"state": None, "state_json": None, "database_error": str(error)},
+                {
+                    "state": None,
+                    "state_json": None,
+                    "database_error": _DATABASE_UNAVAILABLE_MESSAGE,
+                },
                 status_code=503,
             )
         return templates.TemplateResponse(
@@ -200,7 +282,8 @@ def create_app(
         except SQLAlchemyError as error:
             _log.warning("dashboard.database_unavailable", error=str(error))
             return JSONResponse(
-                {"error": "database_unavailable", "detail": str(error)}, status_code=503
+                {"error": "database_unavailable", "detail": _DATABASE_UNAVAILABLE_MESSAGE},
+                status_code=503,
             )
         return JSONResponse(state_to_json(state))
 

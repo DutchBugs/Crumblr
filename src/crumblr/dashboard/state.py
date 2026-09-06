@@ -1,24 +1,29 @@
-"""Assemble one read-only snapshot of platform state for Dashboard v0.
+"""Assemble one read-only snapshot of platform state for the dashboard.
 
 Every value here comes from PostgreSQL (via `MarketDataStore`/`EventJournal`/
-`PostgresSafetyStateStore`, all already-existing read paths) or from the
-`LiveReader` health JSON file (`reader_health.py`). Nothing here opens an MT5
-connection, reads a credential, or writes anything — see the package
-docstring for the boundary this must hold.
+`PostgresSafetyStateStore`/the Agent-Gateway and PAPER_LITE read paths, all
+already-existing read paths or new read-only additions in this package) or
+from the `LiveReader`/PAPER_LITE health/journal files on disk. Nothing here
+opens an MT5 connection, reads a credential, evaluates a proposal, or writes
+anything — see the package docstring for the boundary this must hold.
 
-Two review 1.13 findings shape this module specifically:
+Two review 1.13 findings still shape this module:
 
 - **F-043** — the state model must distinguish fresh data, stale data, a
   disconnected reader, a missing health snapshot and (at the caller level,
   since it means this whole function raised) an unavailable database, rather
   than only exposing raw numbers a template has to interpret. `mt5_connectivity`
-  and `data_feed_state` exist for exactly this.
-- **F-044** — `LiveReader` (real MT5 ticks/bars) and the replay decision
-  pipeline (`TradingAgent`/risk/supervisor) are two unconnected systems today;
-  nothing in this codebase feeds a live tick into a live decision. Any journal
-  entry this module finds is therefore a replay/backtest decision, never a
-  live one, and `decision_pipeline_label` says so rather than letting a
-  polished layout imply otherwise.
+  and `data_feed_state` exist for exactly this, and the same discipline now
+  extends to `agent_health`/`last_decision`/`risk_panel`/`reconciliation`:
+  `UNKNOWN` is a real, distinguishable outcome, never silently upgraded to
+  something that reads as healthy.
+- **F-044**'s original concern (a journalled decision must never be presented
+  as though it belongs to the live feed shown next to it) is now handled by
+  showing the *real* current pipeline (Agent Gateway -> Core Risk -> Platform
+  Policy -> External Supervisor -> Paper Broker) and its actual latest
+  decision, rather than a fixed "replay" label — the ambiguity F-044 warned
+  about no longer applies once the shown decision is genuinely the platform's
+  own latest one, not a replay-only artifact.
 """
 
 from __future__ import annotations
@@ -28,19 +33,42 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
+from uuid import UUID
 
 from sqlalchemy import Engine
 
-from crumblr.config import AccountGuardConfig
+from crumblr.config import AccountGuardConfig, RiskConfig
+from crumblr.dashboard.agent_state import (
+    AgentHealthState,
+    AgentPanelState,
+    LastDecisionState,
+    build_agent_health,
+    build_agent_panel,
+    build_last_decision,
+)
+from crumblr.dashboard.paper_lite_journal import read_journal_entries
 from crumblr.dashboard.reader_health import read_health_snapshot
+from crumblr.dashboard.reconciliation_panel import (
+    ReconciliationPanelState,
+    build_reconciliation_panel,
+)
+from crumblr.dashboard.risk_panel import RiskPanelState, build_risk_panel
 from crumblr.domain.enums import Environment
 from crumblr.domain.events import Event, EventType, SignalGenerated
 from crumblr.domain.models import Contract, MarketBar, MarketTick, RiskDecision
 from crumblr.domain.models import SupervisorDecision as SupervisorDecisionPayload
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.pipeline import interval_for
-from crumblr.persistence.journal import EventJournal
+from crumblr.persistence.agent_gateway import (
+    PostgresAgentIdentityStore,
+    PostgresDecisionContextBundleStore,
+    PostgresTradingAssignmentStore,
+)
+from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.instrument_specs import InstrumentSpecStore
+from crumblr.persistence.journal import CapsuleStore, EventJournal
 from crumblr.persistence.market_data import MarketDataStore
+from crumblr.persistence.risk_session import PostgresRiskSessionStore
 from crumblr.persistence.safety_state import PostgresSafetyStateStore
 from crumblr.risk.safety_state import SafetyState
 
@@ -56,13 +84,11 @@ RECENT_EVENT_COUNT = 20
 
 @dataclass(frozen=True)
 class DecisionSummary:
-    """One journalled decision, with the context F-044 requires alongside it.
+    """One journalled decision, with the context needed to place it —
 
     `environment`/`source`/`occurred_at_utc`/`correlation_id` are shown next
-    to every decision precisely so a viewer never has to guess whether it
-    belongs to the live feed they are also looking at (it never does, today —
-    see `decision_pipeline_label`).
-    """
+    to every decision so a viewer never has to guess which pipeline it came
+    from."""
 
     occurred_at_utc: UtcDatetime
     environment: str
@@ -84,19 +110,29 @@ class EventSummary:
 
 
 @dataclass(frozen=True)
+class PaperLiteActivityRow:
+    """One PAPER_LITE journal entry, reduced to an activity-timeline row.
+
+    No wall-clock timestamp: `persistence.paper_lite.PaperJournalEntry` does
+    not carry one (only a monotonic `sequence`) — shown by sequence rather
+    than fabricating a time the journal itself does not record."""
+
+    sequence: int
+    event_type: str
+    detail: str | None
+
+
+@dataclass(frozen=True)
 class DashboardState:
-    """Everything Dashboard v0's single screen renders, gathered once per request."""
+    """Everything the dashboard's single screen renders, gathered once per request."""
 
     generated_at_utc: UtcDatetime
     environment: str
     environment_badge_label: str
-    """F-045: what the top-bar badge actually says — never the raw
+    """What the top-bar badge actually says — never the raw `Environment`
 
-    `Environment` value, because `PAPER` reads as an active paper-execution
-    campaign to an owner glancing at the screen, and none has started (this
-    build has no order path at all; see F-035). See `_environment_badge_label`.
-    """
-    milestone_label: str
+    value, because `PAPER` reads as an active paper-execution campaign to an
+    owner glancing at the screen. See `_environment_badge_label`."""
     expected_broker_server: str
     expected_currency: str | None
     expected_leverage: int | None
@@ -110,7 +146,9 @@ class DashboardState:
     run) or could not be read."""
 
     mt5_connectivity: ConnectivityState
+    """Renders as the "Market Reader" header card."""
     data_feed_state: DataFeedState
+    """Renders as the "Market Data" header card."""
 
     latest_tick: MarketTick | None
     latest_bar: MarketBar | None
@@ -127,6 +165,24 @@ class DashboardState:
     """Total anomalies flagged across `recent_bars`."""
 
     halt: SafetyState
+    """Renders as the "Safety" header card."""
+
+    agent_health: AgentHealthState
+    """Renders as the "Agent" header card — `HEALTHY`/`WAITING`/
+
+    `NOT PROVISIONED`/`UNKNOWN`, never fabricated green. See
+    `dashboard.agent_state.build_agent_health`."""
+    agent_panel: AgentPanelState | None
+    """`None` only when no assignment is configured/found — the Agent panel
+
+    then renders `NOT PROVISIONED`, not blank and not an error."""
+    last_decision: LastDecisionState | None
+    """`None` only when no PAPER_LITE evidence exists anywhere yet — the
+
+    Last Decision card then renders `NO EVIDENCE`."""
+
+    risk_panel: RiskPanelState
+    reconciliation: ReconciliationPanelState
 
     latest_signal: DecisionSummary | None
     latest_risk_decision: DecisionSummary | None
@@ -137,13 +193,15 @@ class DashboardState:
     build.md §22 asks the observability dashboard to show which controls are
     not actually in force (review F-024) rather than let an approval read as
     though every configured check passed."""
-    decision_pipeline_label: str
-    """F-044: "LATEST REPLAY DECISION" or "NO LIVE DECISION PIPELINE ACTIVE" —
-
-    never phrased as though a decision belongs to the live feed above it."""
 
     recent_events: tuple[EventSummary, ...]
     """Oldest first, up to `RECENT_EVENT_COUNT` — for the activity timeline."""
+
+    paper_lite_activity: tuple[PaperLiteActivityRow, ...]
+    """Oldest first, up to `RECENT_EVENT_COUNT` — PAPER_LITE's own audit
+
+    trail, shown separately from `recent_events` since it has no comparable
+    wall-clock timestamp to sort-merge against."""
 
 
 def _signal_summary(payload: SignalGenerated) -> str:
@@ -193,6 +251,36 @@ def _event_summary(event: Event[Contract]) -> EventSummary:
     )
 
 
+_PAPER_LITE_ACTIVITY_EVENT_TYPES = ("AUDIT_FACT", "PAPER_ORDER_ACCEPTED")
+_PAPER_LITE_NOISE_FACTS = frozenset({"PAPER_LITE_DECISION_WINDOW_CLAIMED"})
+"""Fires every single cycle regardless of outcome — real, but not the kind
+
+of "activity" this timeline is for; every other audit fact is a genuine
+per-cycle event worth a row."""
+
+
+def _paper_lite_activity(
+    entries: tuple[dict[str, Any], ...], *, limit: int
+) -> tuple[PaperLiteActivityRow, ...]:
+    rows = [
+        PaperLiteActivityRow(
+            sequence=entry["sequence"],
+            event_type=(
+                entry["payload"]["fact"]
+                if entry["event_type"] == "AUDIT_FACT"
+                else entry["event_type"]
+            ),
+            detail=(
+                entry["payload"].get("detail") if entry["event_type"] == "AUDIT_FACT" else None
+            ),
+        )
+        for entry in entries
+        if entry.get("event_type") in _PAPER_LITE_ACTIVITY_EVENT_TYPES
+        and entry.get("payload", {}).get("fact") not in _PAPER_LITE_NOISE_FACTS
+    ]
+    return tuple(rows[-limit:])
+
+
 def _count_bar_gaps(bars: tuple[MarketBar, ...], timeframe: str) -> int:
     if len(bars) < 2:
         return 0
@@ -205,14 +293,11 @@ def _count_bar_gaps(bars: tuple[MarketBar, ...], timeframe: str) -> int:
 
 
 def _environment_badge_label(environment: Environment) -> str:
-    """F-045 (review 1.14 §6): `PAPER` must not read as a running campaign.
+    """`Environment.PAPER` must not read as a running campaign.
 
     `Environment.PAPER` is a config namespace — it selects `config/paper.yaml`
-    and the Pepperstone demo account, nothing more. No paper-execution
-    campaign exists yet (`status.md` "Paper campaign: NOT STARTED") and this
-    build has no order path at all, so showing the raw enum value implied a
-    campaign was already running. Every other environment value already says
-    what it means without that ambiguity.
+    and the Pepperstone demo account, nothing more. Every other environment
+    value already says what it means without that ambiguity.
     """
     if environment is Environment.PAPER:
         return "DEMO DATA"
@@ -220,14 +305,13 @@ def _environment_badge_label(environment: Environment) -> str:
 
 
 def _connectivity(reader_health: dict[str, Any] | None) -> tuple[ConnectivityState, DataFeedState]:
-    """F-043: derive the two headline health cards from the reader's own status.
+    """Derive the two headline health cards from the reader's own status.
 
     `reader_health["status"]` already encodes `LiveReader`'s real
     `stale_after` threshold and reconnect logic (`HEALTHY`/`STALE`/
     `DISCONNECTED`/`UNHEALTHY`) — this maps that authoritative signal onto
-    the two cards review 1.13 §5's layout asks for, rather than re-deriving
-    freshness from a raw timestamp with a threshold the dashboard would have
-    to guess at independently.
+    the two cards, rather than re-deriving freshness from a raw timestamp
+    with a threshold the dashboard would have to guess at independently.
     """
     if reader_health is None:
         return "UNKNOWN", "UNKNOWN"
@@ -246,11 +330,14 @@ def build_state(
     *,
     engine: Engine,
     guard: AccountGuardConfig,
+    risk_config: RiskConfig,
     environment: Environment,
     canonical_symbol: str,
     timeframe: str,
     reader_health_path: Path,
-    milestone_label: str = "M1 PASSED",
+    agent_assignment_id: UUID | None = None,
+    paper_lite_journal_path: Path | None = None,
+    expected_spec_version: str | None = None,
     clock: Callable[[], UtcDatetime] = utc_now,
 ) -> DashboardState:
     """Read every source once and return one consistent-enough snapshot.
@@ -266,6 +353,8 @@ def build_state(
     returned an empty snapshot on a database outage would be indistinguishable
     from "no data yet", which F-043 explicitly asks not to conflate.
     """
+    now = clock()
+
     market = MarketDataStore(engine)
     journal = EventJournal(engine)
     halt = PostgresSafetyStateStore(engine).load()
@@ -277,21 +366,47 @@ def build_state(
     reader_health = read_health_snapshot(reader_health_path)
     mt5_connectivity, data_feed_state = _connectivity(reader_health)
 
-    any_decision = (
-        latest_signal is not None or latest_risk is not None or latest_supervisor is not None
-    )
-    decision_pipeline_label = (
-        "LATEST REPLAY DECISION" if any_decision else "NO LIVE DECISION PIPELINE ACTIVE"
-    )
     recent_bars = market.recent_bars(
         canonical_symbol=canonical_symbol, timeframe=timeframe, limit=RECENT_BAR_COUNT
     )
 
+    agent_panel = build_agent_panel(
+        assignment_store=PostgresTradingAssignmentStore(engine),
+        identity_store=PostgresAgentIdentityStore(engine),
+        context_bundle_store=PostgresDecisionContextBundleStore(engine),
+        assignment_id=agent_assignment_id,
+        now=now,
+    )
+    journal_entries = (
+        read_journal_entries(paper_lite_journal_path) if paper_lite_journal_path is not None else ()
+    )
+    last_decision = build_last_decision(
+        capsule_store=CapsuleStore(engine),
+        journal_entries=journal_entries,
+    )
+    agent_health = build_agent_health(
+        agent_panel=agent_panel,
+        last_decision=last_decision,
+        now=now,
+        timeframe=timeframe,
+    )
+    risk_panel = build_risk_panel(
+        risk_config=risk_config,
+        session_store=PostgresRiskSessionStore(engine),
+    )
+    reconciliation = build_reconciliation_panel(
+        broker_state=BrokerStateStore(engine),
+        instrument_specs=InstrumentSpecStore(engine),
+        guard=guard,
+        canonical_symbol=canonical_symbol,
+        expected_spec_version=expected_spec_version,
+        now=now,
+    )
+
     return DashboardState(
-        generated_at_utc=clock(),
+        generated_at_utc=now,
         environment=environment.value,
         environment_badge_label=_environment_badge_label(environment),
-        milestone_label=milestone_label,
         expected_broker_server=guard.expected_server,
         expected_currency=guard.expected_currency,
         expected_leverage=guard.expected_leverage,
@@ -308,6 +423,11 @@ def build_state(
         bar_gap_count=_count_bar_gaps(recent_bars, timeframe),
         bar_anomaly_count=sum(len(bar.anomalies) for bar in recent_bars),
         halt=halt,
+        agent_health=agent_health,
+        agent_panel=agent_panel,
+        last_decision=last_decision,
+        risk_panel=risk_panel,
+        reconciliation=reconciliation,
         latest_signal=(
             _decision_summary(
                 latest_signal,
@@ -345,8 +465,8 @@ def build_state(
             if latest_supervisor is not None
             else ()
         ),
-        decision_pipeline_label=decision_pipeline_label,
         recent_events=tuple(
             _event_summary(event) for event in journal.recent(limit=RECENT_EVENT_COUNT)
         ),
+        paper_lite_activity=_paper_lite_activity(journal_entries, limit=RECENT_EVENT_COUNT),
     )

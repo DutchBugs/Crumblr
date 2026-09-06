@@ -41,18 +41,19 @@
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 16px 20px; border-bottom: 1px solid var(--border);
-    background: var(--bg-raised);
+    background: var(--bg-raised); flex-wrap: wrap; gap: 10px;
   }
   .topbar .identity { display: flex; align-items: baseline; gap: 10px; }
   .topbar .brand { font-size: 1.25em; font-weight: 700; letter-spacing: 0.02em; }
   .topbar .subtitle { color: var(--text-dim); font-size: 0.9em; }
-  .topbar .badges { display: flex; gap: 8px; align-items: center; }
+  .topbar .badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 5px 12px; border-radius: 999px; font-size: 0.78em;
     font-weight: 700; letter-spacing: 0.04em; border: 1px solid transparent;
   }
   .pill-demo { background: var(--neutral-bg); color: var(--text-dim); border-color: var(--border); }
+  .pill-agent { background: rgba(91, 141, 239, 0.14); color: var(--accent); border-color: rgba(91, 141, 239, 0.3); }
   .pill-readonly { background: rgba(91, 141, 239, 0.14); color: var(--accent); border-color: rgba(91, 141, 239, 0.3); }
   .pill-exec-disabled {
     background: var(--bad-bg); color: var(--bad); border-color: rgba(251, 84, 104, 0.45);
@@ -65,13 +66,23 @@
     font-size: 0.75em; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint);
     text-transform: uppercase; margin: 0 0 10px 2px;
   }
+  .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
   .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
   .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .grid-hero { display: grid; grid-template-columns: 300px 1fr; gap: 14px; }
+  @media (max-width: 1100px) {
+    .grid-5 { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 1000px) {
+    .grid-5 { grid-template-columns: repeat(2, 1fr); }
     .grid-4 { grid-template-columns: repeat(2, 1fr); }
     .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
     .grid-hero { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .grid-5 { grid-template-columns: 1fr; }
   }
 
   .card {
@@ -86,7 +97,7 @@
   }
   .status-card .state {
     display: flex; align-items: center; gap: 8px; margin-top: 8px;
-    font-size: 1.35em; font-weight: 700;
+    font-size: 1.25em; font-weight: 700;
   }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
   .dot.good { background: var(--good); box-shadow: 0 0 8px rgba(52, 211, 153, 0.6); }
@@ -114,7 +125,7 @@
   .chart-card svg { width: 100%; height: 260px; display: block; }
   .chart-wrap { position: relative; }
 
-  /* ---- F-046: historical/offline treatment — never let old data pass as live ---- */
+  /* ---- historical/offline treatment — never let old data pass as live ---- */
   .historical-banner {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     margin-bottom: 12px; padding: 8px 12px; border-radius: 8px;
@@ -144,23 +155,45 @@
   .panel-title { font-size: 0.78em; font-weight: 700; letter-spacing: 0.05em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
   .muted { color: var(--text-faint); }
   .na { color: var(--text-faint); font-style: italic; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; cursor: help; }
+  .badge-inline {
+    display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.78em;
+    font-weight: 700; letter-spacing: 0.03em;
+  }
+  .badge-inline.good { background: var(--good-bg); color: var(--good); }
+  .badge-inline.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge-inline.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge-inline.neutral { background: var(--neutral-bg); color: var(--text-dim); }
 
-  /* ---- Row 4: decision pipeline ---- */
-  .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  @media (max-width: 1000px) { .pipeline { grid-template-columns: 1fr 1fr; } }
+  /* ---- Agent panel ---- */
+  .agent-empty {
+    padding: 22px; text-align: center; color: var(--text-dim);
+    border: 1px dashed var(--border-soft); border-radius: 8px; font-size: 0.92em;
+  }
+  .agent-empty b { color: var(--text); }
+
+  /* ---- Decision pipeline ---- */
+  .pipeline { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; }
+  @media (max-width: 1200px) { .pipeline { grid-template-columns: repeat(4, 1fr); } }
+  @media (max-width: 700px) { .pipeline { grid-template-columns: repeat(2, 1fr); } }
   .pipeline-card {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 14px 16px; height: 100%;
+    padding: 12px 14px; height: 100%;
   }
-  .pipeline-card .stage-name { font-size: 0.72em; font-weight: 700; letter-spacing: 0.06em; color: var(--text-faint); text-transform: uppercase; }
-  .pipeline-card .stage-verdict { margin-top: 8px; font-size: 1.1em; font-weight: 700; }
-  .pipeline-card .stage-detail { margin-top: 6px; font-size: 0.82em; color: var(--text-dim); }
-  .pipeline-banner {
-    margin-top: 10px; padding: 8px 12px; border-radius: 8px; font-size: 0.78em;
-    background: var(--neutral-bg); color: var(--text-dim); border: 1px solid var(--border-soft);
-  }
+  .pipeline-card .stage-name { font-size: 0.68em; font-weight: 700; letter-spacing: 0.05em; color: var(--text-faint); text-transform: uppercase; }
+  .pipeline-card .stage-verdict { margin-top: 8px; font-size: 1em; font-weight: 700; }
+  .pipeline-card .stage-detail { margin-top: 6px; font-size: 0.78em; color: var(--text-dim); }
+  .pipeline-arrow { display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 1.1em; }
+  @media (max-width: 1200px) { .pipeline-arrow { display: none; } }
 
-  /* ---- Row 5: activity timeline ---- */
+  /* ---- Last decision card ---- */
+  .last-decision-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  .last-decision-outcome { font-size: 1.5em; font-weight: 700; }
+  .last-decision-inferred { font-size: 0.75em; color: var(--text-faint); font-weight: 400; }
+  .proposal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+  @media (max-width: 700px) { .proposal-grid { grid-template-columns: 1fr 1fr; } }
+
+  /* ---- Row: activity timeline ---- */
   table.timeline { width: 100%; border-collapse: collapse; font-size: 0.85em; }
   table.timeline th {
     text-align: left; color: var(--text-faint); font-weight: 700; font-size: 0.75em;
@@ -189,8 +222,11 @@
   </div>
   <div class="badges">
     <span class="pill pill-demo">{{ state.environment_badge_label if state else "—" }}</span>
+    {% if state and state.agent_panel and state.agent_panel.assignment_status == "ACTIVE" %}
+    <span class="pill pill-agent" id="paperlite-badge">PAPER_LITE / SHADOW</span>
+    {% endif %}
     <span class="pill pill-readonly">READ ONLY</span>
-    <span class="pill pill-exec-disabled">⛔ EXECUTION DISABLED</span>
+    <span class="pill pill-exec-disabled">⛔ REAL EXECUTION DISABLED</span>
   </div>
 </div>
 
@@ -207,11 +243,11 @@
 
 {% else %}
 
-  <!-- Row 1: status cards -->
+  <!-- Row 1: header status cards -->
   <div class="section">
-    <div class="grid-4">
+    <div class="grid-5">
       <div class="card status-card">
-        <div class="label">MT5</div>
+        <div class="label">Market Reader</div>
         <div class="state {{ state.mt5_connectivity | state_class }}" id="mt5-state">
           <span class="dot {{ state.mt5_connectivity | state_class }}" id="mt5-dot"></span>
           <span id="mt5-text">{{ state.mt5_connectivity }}</span>
@@ -226,7 +262,7 @@
       </div>
 
       <div class="card status-card">
-        <div class="label">Data feed</div>
+        <div class="label">Market Data</div>
         <div class="state {{ state.data_feed_state | state_class }}" id="feed-state">
           <span class="dot {{ state.data_feed_state | state_class }}" id="feed-dot"></span>
           <span id="feed-text">{{ state.data_feed_state }}</span>
@@ -241,6 +277,21 @@
       </div>
 
       <div class="card status-card">
+        <div class="label">Agent</div>
+        <div class="state {{ state.agent_health | state_class }}" id="agent-state">
+          <span class="dot {{ state.agent_health | state_class }}" id="agent-dot"></span>
+          <span id="agent-text">{{ state.agent_health }}</span>
+        </div>
+        <div class="sub" id="agent-sub">
+          {% if state.agent_panel %}
+            {{ state.agent_panel.canonical_symbol }} / {{ state.agent_panel.timeframe }}
+          {% else %}
+            no assignment configured
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card status-card">
         <div class="label">Safety</div>
         <div class="state {{ state.halt.state.value | state_class }}" id="safety-state">
           <span class="dot {{ state.halt.state.value | state_class }}" id="safety-dot"></span>
@@ -250,12 +301,12 @@
       </div>
 
       <div class="card status-card">
-        <div class="label">Milestone</div>
-        <div class="state good">
-          <span class="dot good"></span>
-          {{ state.milestone_label }}
+        <div class="label">Execution</div>
+        <div class="state bad">
+          <span class="dot bad"></span>
+          DISABLED
         </div>
-        <div class="sub">Read-only — no order path exists</div>
+        <div class="sub">real order_send is globally unreachable</div>
       </div>
     </div>
   </div>
@@ -311,7 +362,210 @@
     </div>
   </div>
 
-  <!-- Row 3: operating health -->
+  <!-- Row 3: Agent / StrategyArtifact panel -->
+  <div class="section">
+    <div class="section-title">Agent / StrategyArtifact</div>
+    <div class="card">
+      {% if state.agent_panel %}
+      <div class="grid-3">
+        <div>
+          <div class="panel-title">Assignment</div>
+          <div class="kv"><span class="k">Agent ID</span><span class="v mono" title="{{ state.agent_panel.agent_id }}">{{ state.agent_panel.agent_id | string | truncate(13, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Assignment ID</span><span class="v mono" title="{{ state.agent_panel.assignment_id }}">{{ state.agent_panel.assignment_id | string | truncate(13, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Status</span><span class="v"><span class="badge-inline {{ state.agent_panel.assignment_status | state_class }}">{{ state.agent_panel.assignment_status }}</span></span></div>
+          <div class="kv"><span class="k">Valid from</span><span class="v">{{ state.agent_panel.valid_from_utc }}</span></div>
+          <div class="kv"><span class="k">Valid until</span><span class="v">{{ state.agent_panel.valid_until_utc }}</span></div>
+          <div class="kv"><span class="k">Symbol / timeframe</span><span class="v">{{ state.agent_panel.canonical_symbol }} / {{ state.agent_panel.timeframe }}</span></div>
+        </div>
+        <div>
+          <div class="panel-title">StrategyArtifact</div>
+          <div class="kv"><span class="k">Artifact ID</span><span class="v mono" title="{{ state.agent_panel.strategy_artifact_id }}">{{ state.agent_panel.strategy_artifact_id | string | truncate(13, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Artifact hash</span><span class="v mono" title="{{ state.agent_panel.strategy_artifact_hash }}">{{ state.agent_panel.strategy_artifact_hash | truncate(16, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Runtime version</span><span class="v">{{ state.agent_panel.runtime_version or "UNKNOWN" }}</span></div>
+          <div class="kv"><span class="k">Agent status</span><span class="v">{{ state.agent_panel.agent_status or "UNKNOWN" }}</span></div>
+        </div>
+        <div>
+          <div class="panel-title">Latest context</div>
+          {% if state.agent_panel.latest_context_issued_at_utc %}
+          <div class="kv"><span class="k">Issued at</span><span class="v">{{ state.agent_panel.latest_context_issued_at_utc }}</span></div>
+          <div class="kv"><span class="k">Content hash</span><span class="v mono" title="{{ state.agent_panel.latest_context_hash }}">{{ state.agent_panel.latest_context_hash | truncate(16, True, '…') }}</span></div>
+          {% else %}
+          <div class="kv"><span class="k">Issued at</span><span class="v na">NO EVIDENCE</span></div>
+          <div class="kv"><span class="k">Content hash</span><span class="v na">NO EVIDENCE</span></div>
+          {% endif %}
+          <div class="kv"><span class="k">Latest decision</span>
+            <span class="v">
+              {% if state.last_decision %}
+              <span class="badge-inline {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</span>
+              {% else %}
+              <span class="na">NO EVIDENCE</span>
+              {% endif %}
+            </span>
+          </div>
+          <div class="kv"><span class="k">Decision time</span><span class="v">{{ state.last_decision.occurred_at_utc if (state.last_decision and state.last_decision.occurred_at_utc) else "—" }}</span></div>
+        </div>
+      </div>
+      {% else %}
+      <div class="agent-empty">
+        <b>NOT PROVISIONED</b> — no `TradingAssignment` is configured for this dashboard,
+        or none was found for the one configured.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Row 4: decision pipeline -->
+  <div class="section">
+    <div class="section-title">Decision pipeline</div>
+    <div class="pipeline">
+      <div class="pipeline-card">
+        <div class="stage-name">Market data</div>
+        <div class="stage-verdict {{ state.data_feed_state | state_class }}">{{ state.data_feed_state }}</div>
+        <div class="stage-detail">Pepperstone, read-only</div>
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">AgentMarketContextV1</div>
+        {% if state.agent_panel and state.agent_panel.latest_context_issued_at_utc %}
+        <div class="stage-verdict good">ISSUED</div>
+        <div class="stage-detail">{{ state.agent_panel.latest_context_issued_at_utc }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">Strategy Agent</div>
+        {% if state.last_decision and state.last_decision.proposal %}
+        <div class="stage-verdict good">TRADE_PROPOSAL</div>
+        <div class="stage-detail">{{ state.last_decision.proposal.side }}</div>
+        {% elif state.last_decision %}
+        <div class="stage-verdict neutral">NO_TRADE</div>
+        <div class="stage-detail">normal strategy result</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">Agent Gateway</div>
+        {% if state.last_decision and state.last_decision.platform_outcome == "GATEWAY_REJECTED" %}
+        <div class="stage-verdict bad">REJECTED{% if state.last_decision.inferred %} (inferred){% endif %}</div>
+        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
+        {% elif state.last_decision %}
+        <div class="stage-verdict good">ACCEPTED</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">Core Risk</div>
+        {% if state.last_decision and state.last_decision.risk_verdict %}
+        <div class="stage-verdict {{ state.last_decision.risk_verdict | state_class }}">{{ state.last_decision.risk_verdict }}</div>
+        <div class="stage-detail">{{ state.last_decision.risk_reason_codes | join(", ") if state.last_decision.risk_reason_codes else "—" }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">Platform Policy</div>
+        {% if state.last_decision and state.last_decision.policy_verdict %}
+        <div class="stage-verdict {{ state.last_decision.policy_verdict | state_class }}">{{ state.last_decision.policy_verdict }}</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">External Supervisor</div>
+        {% if state.last_decision and state.last_decision.supervisor_skipped %}
+        <div class="stage-verdict neutral">SUPERVISOR_SKIPPED_PAPER_MODE</div>
+        <div class="stage-detail">not an approval — paper mode only</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="pipeline" style="margin-top:10px;">
+      <div class="pipeline-card">
+        <div class="stage-name">Paper Broker</div>
+        {% if state.last_decision and state.last_decision.platform_outcome in ("PAPER_FILLED", "PAPER_ORDER_CHECK_BLOCKED") %}
+        <div class="stage-verdict {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</div>
+        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
+        {% else %}
+        <div class="stage-verdict muted">NO EVIDENCE</div>
+        <div class="stage-detail">&nbsp;</div>
+        {% endif %}
+      </div>
+      <div class="pipeline-card">
+        <div class="stage-name">Real broker execution</div>
+        <div class="stage-verdict bad">DISABLED / UNREACHABLE</div>
+        <div class="stage-detail">no order_send path exists in this build</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 5: last decision -->
+  <div class="section">
+    <div class="section-title">Last decision</div>
+    <div class="card">
+      {% if state.last_decision %}
+      <div class="last-decision-head">
+        <div>
+          <span class="last-decision-outcome {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</span>
+          {% if state.last_decision.inferred %}
+          <span class="last-decision-inferred">(inferred — {{ state.last_decision.platform_outcome_detail }})</span>
+          {% endif %}
+        </div>
+        <div class="muted">{{ state.last_decision.occurred_at_utc or "—" }}</div>
+      </div>
+      {% if state.last_decision.proposal %}
+      <div class="proposal-grid">
+        <div class="kv"><span class="k">Side</span><span class="v">{{ state.last_decision.proposal.side }}</span></div>
+        <div class="kv"><span class="k">Order type</span><span class="v">{{ state.last_decision.proposal.entry_type }}</span></div>
+        <div class="kv"><span class="k">Reference price</span><span class="v">{{ state.last_decision.proposal.reference_price }}</span></div>
+        <div class="kv"><span class="k">Stop loss</span><span class="v">{{ state.last_decision.proposal.stop_loss_price or "—" }}</span></div>
+        <div class="kv"><span class="k">Take profit</span><span class="v">{{ state.last_decision.proposal.take_profit_price or "—" }}</span></div>
+        <div class="kv"><span class="k">Requested risk</span><span class="v">{{ state.last_decision.proposal.requested_risk_fraction or "—" }}</span></div>
+      </div>
+      <div class="kv" style="margin-top:6px;"><span class="k">Reason codes</span><span class="v">{{ state.last_decision.proposal.reason_codes | join(", ") if state.last_decision.proposal.reason_codes else "—" }}</span></div>
+      {% elif state.last_decision.platform_outcome == "NO_TRADE" %}
+      <p class="muted" style="margin-top:10px;">NO_TRADE is a normal strategy result, not an error.</p>
+      {% elif state.last_decision.platform_outcome_detail %}
+      <p class="muted" style="margin-top:10px;">{{ state.last_decision.platform_outcome_detail }}</p>
+      {% endif %}
+      {% else %}
+      <div class="agent-empty"><b>NO EVIDENCE</b> — PAPER_LITE has not produced a decision yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Row 6: Risk panel + reconciliation -->
+  <div class="section">
+    <div class="section-title">Risk</div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="panel-title">Configured limits</div>
+        <div class="kv"><span class="k">Max risk / trade</span><span class="v">{{ state.risk_panel.max_risk_per_trade }}</span></div>
+        <div class="kv"><span class="k">Max total open risk</span><span class="v">{{ state.risk_panel.max_open_risk }}</span></div>
+        <div class="kv"><span class="k">Max daily loss</span><span class="v">{{ state.risk_panel.max_daily_loss }}</span></div>
+        <div class="kv"><span class="k">Max drawdown</span><span class="v">{{ state.risk_panel.max_drawdown }}</span></div>
+      </div>
+      <div class="card">
+        <div class="panel-title">Current (shared risk ledger)</div>
+        <div class="kv"><span class="k">Open risk</span><span class="v {% if state.risk_panel.current_open_risk == 'UNKNOWN' %}bad{% endif %}">{{ state.risk_panel.current_open_risk }}</span></div>
+        <div class="kv"><span class="k">Daily loss</span><span class="v {% if state.risk_panel.current_daily_loss == 'UNKNOWN' %}bad{% endif %}">{{ state.risk_panel.current_daily_loss }}</span></div>
+        <div class="kv"><span class="k">Drawdown</span><span class="v {% if state.risk_panel.current_drawdown == 'UNKNOWN' %}bad{% endif %}">{{ state.risk_panel.current_drawdown }}</span></div>
+        <div class="kv"><span class="k">Reconciliation</span><span class="v"><span class="badge-inline {{ state.reconciliation.status | state_class }}">{{ state.reconciliation.status }}</span></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 7: operating health -->
   <div class="section">
     <div class="section-title">Operating health</div>
     <div class="grid-3">
@@ -319,7 +573,6 @@
         <div class="panel-title">Connection</div>
         <div class="kv"><span class="k">Server</span><span class="v">{{ state.expected_broker_server }}</span></div>
         <div class="kv"><span class="k">Reconnects</span><span class="v" id="conn-reconnects">{{ state.reader_health.reconnect_count if state.reader_health else "—" }}</span></div>
-        <div class="kv"><span class="k">Broker clock offset</span><span class="v na">NOT AVAILABLE</span></div>
         <div class="kv"><span class="k">Last gateway error</span>
           <span class="v {% if state.reader_health and state.reader_health.last_error %}bad{% endif %}" id="conn-error">
             {{ state.reader_health.last_error if (state.reader_health and state.reader_health.last_error) else "none" }}
@@ -345,89 +598,55 @@
       <div class="card">
         <div class="panel-title">Account context</div>
         <div class="kv"><span class="k">Server</span><span class="v">{{ state.expected_broker_server }}</span></div>
-        <div class="kv"><span class="k">Entity</span><span class="v na">NOT AVAILABLE</span></div>
-        <div class="kv"><span class="k">Margin mode</span><span class="v na">NOT AVAILABLE</span></div>
         <div class="kv"><span class="k">Currency</span><span class="v">{{ state.expected_currency or "NOT AVAILABLE" }}</span></div>
         <div class="kv"><span class="k">Leverage</span><span class="v">{{ ("1:" ~ state.expected_leverage) if state.expected_leverage else "NOT AVAILABLE" }}</span></div>
       </div>
     </div>
   </div>
 
-  <!-- Row 4: decision pipeline -->
+  <!-- Row 8: activity timeline -->
   <div class="section">
-    <div class="section-title">Decision pipeline — latest replay window</div>
-    <div class="pipeline">
-      <div class="pipeline-card">
-        <div class="stage-name">Trading agent</div>
-        {% if state.latest_signal %}
-        <div class="stage-verdict">{{ state.latest_signal.summary }}</div>
-        <div class="stage-detail">{{ state.latest_signal.occurred_at_utc }}</div>
+    <div class="section-title">Recent activity</div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="panel-title">Platform journal</div>
+        {% if state.recent_events %}
+        <table class="timeline">
+          <thead><tr><th>Time (UTC)</th><th>Component</th><th>Event</th><th>Result</th></tr></thead>
+          <tbody>
+          {% for event in state.recent_events %}
+            <tr>
+              <td>{{ event.occurred_at_utc }}</td>
+              <td>{{ event.component }}</td>
+              <td>{{ event.event_type }}</td>
+              <td>{{ event.summary }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
         {% else %}
-        <div class="stage-verdict muted">NO_TRADE</div>
-        <div class="stage-detail">no signal recorded</div>
+        <div class="empty">No recent journal events</div>
         {% endif %}
       </div>
-
-      <div class="pipeline-card">
-        <div class="stage-name">Risk engine</div>
-        {% if state.latest_risk_decision %}
-        <div class="stage-verdict">{{ state.latest_risk_decision.summary }}</div>
-        <div class="stage-detail">{{ state.latest_risk_decision.reason_codes | join(", ") if state.latest_risk_decision.reason_codes else "—" }}</div>
+      <div class="card">
+        <div class="panel-title">PAPER_LITE audit trail (by sequence, no wall-clock time recorded)</div>
+        {% if state.paper_lite_activity %}
+        <table class="timeline">
+          <thead><tr><th>Seq</th><th>Event</th><th>Detail</th></tr></thead>
+          <tbody>
+          {% for row in state.paper_lite_activity %}
+            <tr>
+              <td>{{ row.sequence }}</td>
+              <td>{{ row.event_type }}</td>
+              <td>{{ row.detail or "—" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
         {% else %}
-        <div class="stage-verdict muted">NO ACTION</div>
-        <div class="stage-detail">no decision recorded</div>
+        <div class="empty">No PAPER_LITE audit entries yet</div>
         {% endif %}
       </div>
-
-      <div class="pipeline-card">
-        <div class="stage-name">Supervisor</div>
-        {% if state.latest_supervisor_decision %}
-        <div class="stage-verdict">{{ state.latest_supervisor_decision.summary }}</div>
-        {% else %}
-        <div class="stage-verdict muted">NO ACTION</div>
-        {% endif %}
-        <div class="stage-detail">
-          uncalibrated: {{ state.uncalibrated_supervisor_checks | join(", ") if state.uncalibrated_supervisor_checks else "none" }}
-        </div>
-      </div>
-
-      <div class="pipeline-card">
-        <div class="stage-name">Execution</div>
-        <div class="stage-verdict bad">DISABLED</div>
-        <div class="stage-detail">no order path exists in this build</div>
-      </div>
-    </div>
-    <div class="pipeline-banner">
-      {{ state.decision_pipeline_label }}
-      {% if state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision %}
-        — {{ (state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision).environment | upper }}
-        via <code>{{ (state.latest_signal or state.latest_risk_decision or state.latest_supervisor_decision).source }}</code>,
-        not connected to the live MT5 feed shown above
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- Row 5: activity timeline -->
-  <div class="section">
-    <div class="section-title">Recent journal activity</div>
-    <div class="card">
-      {% if state.recent_events %}
-      <table class="timeline">
-        <thead><tr><th>Time (UTC)</th><th>Component</th><th>Event</th><th>Result</th></tr></thead>
-        <tbody>
-        {% for event in state.recent_events %}
-          <tr>
-            <td>{{ event.occurred_at_utc }}</td>
-            <td>{{ event.component }}</td>
-            <td>{{ event.event_type }}</td>
-            <td>{{ event.summary }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="empty">No recent journal events</div>
-      {% endif %}
     </div>
   </div>
 
@@ -457,8 +676,8 @@
 
   // Mirrors app.py's state_class() — kept intentionally tiny and duplicated
   // rather than fetched, so a refresh never depends on a second request.
-  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1 };
-  var WARN = { STALE: 1, UNCALIBRATED: 1, DEGRADED: 1 };
+  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1 };
+  var WARN = { STALE: 1, UNCALIBRATED: 1, DEGRADED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1 };
   function stateClass(value) {
     var v = (value || "").toUpperCase();
     if (GOOD[v]) return "good";
@@ -526,6 +745,10 @@
     setClass("feed-dot", "dot", stateClass(state.data_feed_state));
     setText("feed-text", state.data_feed_state);
 
+    setClass("agent-state", "state", stateClass(state.agent_health));
+    setClass("agent-dot", "dot", stateClass(state.agent_health));
+    setText("agent-text", state.agent_health);
+
     var haltState = state.halt ? state.halt.state : "UNKNOWN";
     setClass("safety-state", "state", stateClass(haltState));
     setClass("safety-dot", "dot", stateClass(haltState));
@@ -552,9 +775,9 @@
       if (feedSub) feedSub.textContent = "Last tick " + ageText;
     }
 
-    // F-046: historical/offline treatment tracks data_feed_state on every
-    // poll, not only the first render — a session that goes stale between
-    // refreshes must not keep showing a "live" chart/hero.
+    // Historical/offline treatment tracks data_feed_state on every poll, not
+    // only the first render — a session that goes stale between refreshes
+    // must not keep showing a "live" chart/hero.
     var isLive = state.data_feed_state === "HEALTHY";
     var isUnsafe = state.data_feed_state === "DOWN" || state.data_feed_state === "UNKNOWN";
     var heroBanner = document.getElementById("hero-historical-banner");
