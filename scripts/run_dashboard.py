@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import uvicorn
 
@@ -39,6 +40,19 @@ def main() -> int:
         default=REPO_ROOT / "var" / "live_reader_health.json",
         help="path mt5_live_reader.py's --json snapshot is written to",
     )
+    parser.add_argument(
+        "--agent-assignment-id",
+        type=UUID,
+        default=None,
+        help="the provisioned TradingAssignment to show in the Agent panel, if any",
+    )
+    parser.add_argument(
+        "--paper-lite-journal-path",
+        type=Path,
+        default=REPO_ROOT / "var" / "paper_lite.journal.jsonl",
+        help="PAPER_LITE's own journal file (config/paper_lite.yaml's journal_path) — "
+        "read-only, never created by this process",
+    )
     args = parser.parse_args()
 
     try:
@@ -50,13 +64,18 @@ def main() -> int:
 
     config = load_config(Environment(args.environment), config_dir=REPO_ROOT / "config")
     engine = create_db_engine(url)
+    market = config.market_for(args.canonical_symbol)
     app = create_app(
         engine=engine,
         guard=config.account_guard,
+        risk_config=config.risk,
         environment=Environment(args.environment),
         canonical_symbol=args.canonical_symbol,
         timeframe=args.timeframe,
         reader_health_path=args.reader_health,
+        agent_assignment_id=args.agent_assignment_id,
+        paper_lite_journal_path=args.paper_lite_journal_path,
+        expected_spec_version=market.expected_spec_version if market is not None else None,
     )
 
     print(f"Dashboard v0 (read-only) at http://{args.host}:{args.port}/")

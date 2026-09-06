@@ -221,6 +221,22 @@ class PostgresDecisionContextBundleStore:
             return None
         return DecisionContextBundle.model_validate(row[0])
 
+    def latest_for(self, assignment_id: UUID) -> DecisionContextBundle | None:
+        statement = (
+            select(agent_decision_context_bundles.c.payload)
+            .where(agent_decision_context_bundles.c.assignment_id == assignment_id)
+            .order_by(
+                desc(agent_decision_context_bundles.c.issued_at_utc),
+                desc(agent_decision_context_bundles.c.sequence),
+            )
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).first()
+        if row is None:
+            return None
+        return DecisionContextBundle.model_validate(row[0])
+
 
 class PostgresAgentDecisionOutcomeStore:
     def __init__(self, engine: Engine) -> None:

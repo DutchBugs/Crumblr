@@ -11,16 +11,23 @@ button today is not the same claim as one that cannot grow one by accident.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
-from crumblr.config import AccountGuardConfig
+from crumblr.agent_gateway.contracts import (
+    AgentIdentity,
+    AgentRole,
+    AgentStatus,
+    ChampionShadowStatus,
+    TradingAssignment,
+)
+from crumblr.config import AccountGuardConfig, RiskConfig
 from crumblr.dashboard.app import create_app
 from crumblr.domain.enums import (
     BarOrigin,
@@ -31,7 +38,16 @@ from crumblr.domain.enums import (
     Side,
 )
 from crumblr.domain.events import SignalGenerated, build_event
-from crumblr.domain.models import Bar, MarketBar, MarketTick, RiskDecision
+from crumblr.domain.models import (
+    Bar,
+    MarketBar,
+    MarketTick,
+    RiskDecision,
+)
+from crumblr.persistence.agent_gateway import (
+    PostgresAgentIdentityStore,
+    PostgresTradingAssignmentStore,
+)
 from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.market_data import MarketDataStore, bar_identity, tick_identity
 from crumblr.persistence.safety_state import PostgresSafetyStateStore
@@ -48,18 +64,38 @@ GUARD = AccountGuardConfig.model_validate(
         "expected_leverage": 30,
     }
 )
+RISK_CONFIG = RiskConfig.model_validate(
+    {
+        "max_risk_per_trade": "0.02",
+        "max_open_risk": "0.03",
+        "max_daily_loss": "0.04",
+        "max_drawdown": "0.08",
+        "max_orders_per_hour": 6,
+        "max_open_positions": 10,
+        "min_stop_distance_points": 50,
+    }
+)
 SYMBOL = "EUR/USD"
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
 
-def client(engine: Engine, health_path: Path) -> TestClient:
+def client(
+    engine: Engine,
+    health_path: Path,
+    *,
+    agent_assignment_id: UUID | None = None,
+    paper_lite_journal_path: Path | None = None,
+) -> TestClient:
     app = create_app(
         engine=engine,
         guard=GUARD,
+        risk_config=RISK_CONFIG,
         environment=Environment.PAPER,
         canonical_symbol=SYMBOL,
         timeframe="M5",
         reader_health_path=health_path,
+        agent_assignment_id=agent_assignment_id,
+        paper_lite_journal_path=paper_lite_journal_path,
     )
     return TestClient(app)
 
@@ -71,6 +107,7 @@ class TestReadOnlyBoundary:
         app = create_app(
             engine=engine,
             guard=GUARD,
+            risk_config=RISK_CONFIG,
             environment=Environment.PAPER,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -360,6 +397,7 @@ class TestF043PresentationStates:
         app = create_app(
             engine=unreachable,
             guard=GUARD,
+            risk_config=RISK_CONFIG,
             environment=Environment.PAPER,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -374,6 +412,14 @@ class TestF043PresentationStates:
         assert "DATABASE UNAVAILABLE" in html_response.text
         assert json_response.status_code == 503
         assert json_response.json()["error"] == "database_unavailable"
+        # No secrets: the connection string above carries a fake but
+        # credential-shaped user/password — neither must ever reach a client,
+        # only the fixed, generic message may.
+        assert "baduser" not in html_response.text
+        assert "badpass" not in html_response.text
+        assert "baduser" not in json_response.text
+        assert "badpass" not in json_response.text
+        assert json_response.json()["detail"] == "database unavailable — see server logs"
         unreachable.dispose()
 
 
@@ -408,6 +454,7 @@ class TestF045EnvironmentBadgeIsNotMisreadAsACampaign:
         app = create_app(
             engine=engine,
             guard=GUARD,
+            risk_config=RISK_CONFIG,
             environment=Environment.SHADOW,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -492,19 +539,16 @@ class TestF046HistoricalDataIsNeverMistakenForLive:
 class TestF044DecisionContextIsNeverAmbiguous:
     """Review 1.13 F-044: a journalled decision must never be presented as
 
-    though it belongs to the live MT5 feed shown next to it — nothing in
-    this codebase connects LiveReader's real ticks to the replay decision
-    pipeline, so any decision found is a replay decision, always labelled so.
+    though it belongs to the live MT5 feed shown next to it. The dashboard
+    refresh (2026-09-06) replaced the old fixed `decision_pipeline_label`
+    ("LATEST REPLAY DECISION" / "NO LIVE DECISION PIPELINE ACTIVE") with the
+    real current pipeline (`agent_health`/`last_decision`) — this class now
+    checks the one part of the original concern that still applies: a
+    journalled decision must still carry its own environment/source context,
+    never presented as though it were unqualified live state.
     """
 
-    def test_no_decisions_yet_says_no_live_pipeline_active(
-        self, engine: Engine, tmp_path: Path
-    ) -> None:
-        body = client(engine, tmp_path / "health.json").get("/api/state").json()
-
-        assert body["decision_pipeline_label"] == "NO LIVE DECISION PIPELINE ACTIVE"
-
-    def test_a_journalled_decision_is_labelled_as_replay_with_full_context(
+    def test_a_journalled_decision_still_carries_its_full_context(
         self, engine: Engine, tmp_path: Path
     ) -> None:
         journal = EventJournal(engine)
@@ -529,10 +573,190 @@ class TestF044DecisionContextIsNeverAmbiguous:
 
         body = client(engine, tmp_path / "health.json").get("/api/state").json()
 
-        assert body["decision_pipeline_label"] == "LATEST REPLAY DECISION"
         signal = body["latest_signal"]
         assert signal is not None
         assert signal["environment"] == "replay"
         assert signal["source"] == "trading_agent"
         assert signal["correlation_id"] == str(correlation_id)
         assert signal["version_label"] == "1"
+
+
+def _register_active_assignment(engine: Engine) -> UUID:
+    """Registers a real `TradingAssignment` + `AgentIdentity`, valid right
+
+    now (real wall-clock time — `build_state()`'s own `now` defaults to
+    `utc_now()`, not the fixed `NOW` constant this file otherwise uses),
+    and returns its `assignment_id` for `client(..., agent_assignment_id=...)`.
+    """
+    real_now = datetime.now(UTC)
+    assignment_id = uuid4()
+    agent_id = uuid4()
+    PostgresTradingAssignmentStore(engine).register(
+        TradingAssignment(
+            assignment_id=assignment_id,
+            assignment_version="assignment-v1",
+            allowed_agent_id=agent_id,
+            canonical_symbol=SYMBOL,
+            timeframe="M5",
+            strategy_artifact_id=uuid4(),
+            strategy_artifact_hash="artifact-hash-v1",
+            valid_from_utc=real_now - timedelta(days=1),
+            valid_until_utc=real_now + timedelta(days=30),
+            max_proposals_per_hour=10,
+            allowed_risk_fraction_min=Decimal("0.001"),
+            allowed_risk_fraction_max=Decimal("0.01"),
+            required_evidence_fields=(),
+            supervisor_policy_version="supervisor-policy-v1",
+            environment=Environment.PAPER,
+            champion_shadow_status=ChampionShadowStatus.SHADOW,
+        )
+    )
+    PostgresAgentIdentityStore(engine).register(
+        AgentIdentity(
+            agent_id=agent_id,
+            role=AgentRole.TRADER,
+            runtime_version="toy-agent-v1",
+            service_identity="spiffe://crumblr/agents/toy",
+            status=AgentStatus.ACTIVE,
+            registered_at_utc=real_now,
+        )
+    )
+    return assignment_id
+
+
+class TestAgentPanelRendersInTheUi:
+    def test_no_assignment_configured_shows_not_provisioned(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        response = client(engine, tmp_path / "health.json").get("/")
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+
+        assert "NOT PROVISIONED" in response.text
+        assert body["agent_health"] == "NOT PROVISIONED"
+        assert body["agent_panel"] is None
+
+    def test_a_provisioned_assignment_renders_its_real_fields(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        assignment_id = _register_active_assignment(engine)
+
+        response = client(engine, tmp_path / "health.json", agent_assignment_id=assignment_id).get(
+            "/"
+        )
+        body = (
+            client(engine, tmp_path / "health.json", agent_assignment_id=assignment_id)
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["agent_panel"] is not None
+        assert body["agent_panel"]["assignment_id"] == str(assignment_id)
+        assert body["agent_panel"]["assignment_status"] == "ACTIVE"
+        assert body["agent_panel"]["strategy_artifact_hash"] == "artifact-hash-v1"
+        assert body["agent_panel"]["runtime_version"] == "toy-agent-v1"
+        assert body["agent_health"] == "WAITING"
+        assert "NOT PROVISIONED" not in response.text
+        assert "ACTIVE" in response.text
+
+
+class TestRiskPanelRendersInTheUi:
+    def test_configured_limits_reflect_the_real_config(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+
+        assert body["risk_panel"]["max_risk_per_trade"] == "0.02"
+        assert body["risk_panel"]["max_open_risk"] == "0.03"
+        assert body["risk_panel"]["max_daily_loss"] == "0.04"
+        assert body["risk_panel"]["max_drawdown"] == "0.08"
+
+    def test_no_session_recorded_yet_shows_dashes_not_zero(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+
+        assert body["risk_panel"]["current_open_risk"] == "—"
+        assert body["risk_panel"]["current_daily_loss"] == "—"
+        assert body["risk_panel"]["current_drawdown"] == "—"
+
+
+class TestExecutionIsAlwaysDisabled:
+    def test_the_header_card_and_pipeline_say_disabled(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        response = client(engine, tmp_path / "health.json").get("/")
+
+        assert "real order_send is globally unreachable" in response.text
+        assert "no order_send path exists in this build" in response.text
+
+
+class TestPaperLiteJournalActivity:
+    def test_no_journal_path_configured_shows_empty_not_an_error(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        response = client(engine, tmp_path / "health.json")
+
+        body = response.get("/api/state").json()
+
+        assert body["paper_lite_activity"] == []
+
+    def test_an_audit_fact_in_the_journal_appears_in_the_api_state(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        journal_path.write_text(
+            json.dumps(
+                {
+                    "sequence": 0,
+                    "event_type": "AUDIT_FACT",
+                    "payload": {
+                        "fact": "PAPER_LITE_SESSION_BLOCKED",
+                        "correlation_id": str(uuid4()),
+                        "detail": "CLOSED",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        body = (
+            client(engine, tmp_path / "health.json", paper_lite_journal_path=journal_path)
+            .get("/api/state")
+            .json()
+        )
+
+        assert len(body["paper_lite_activity"]) == 1
+        assert body["paper_lite_activity"][0]["event_type"] == "PAPER_LITE_SESSION_BLOCKED"
+        assert body["paper_lite_activity"][0]["detail"] == "CLOSED"
+
+
+class TestNoSecretsAnywhereInTheResponse:
+    """The work order's own explicit acceptance test: no secret-shaped
+
+    string anywhere in `/api/state` or the rendered HTML, even once real
+    Agent/PAPER_LITE data is present."""
+
+    # "credential" is deliberately excluded from the HTML check: the page's
+    # own footer honestly states "no credentials" as a reassurance, which
+    # would otherwise false-positive this check — the API response (pure
+    # data, no prose) is held to the stricter standard instead.
+    _API_FORBIDDEN_SUBSTRINGS = ("password", "credential", "bearer ", "secret")
+    _PAGE_FORBIDDEN_SUBSTRINGS = ("password", "bearer ", "secret")
+
+    def test_with_a_real_provisioned_agent(self, engine: Engine, tmp_path: Path) -> None:
+        assignment_id = _register_active_assignment(engine)
+
+        api_response = client(
+            engine, tmp_path / "health.json", agent_assignment_id=assignment_id
+        ).get("/api/state")
+        page_response = client(
+            engine, tmp_path / "health.json", agent_assignment_id=assignment_id
+        ).get("/")
+
+        api_text_lower = api_response.text.lower()
+        page_text_lower = page_response.text.lower()
+        for forbidden in self._API_FORBIDDEN_SUBSTRINGS:
+            assert forbidden not in api_text_lower, f"{forbidden!r} leaked into /api/state"
+        for forbidden in self._PAGE_FORBIDDEN_SUBSTRINGS:
+            assert forbidden not in page_text_lower, f"{forbidden!r} leaked into the rendered page"

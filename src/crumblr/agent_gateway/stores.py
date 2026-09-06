@@ -141,6 +141,17 @@ class DecisionContextBundleStore(Protocol):
     def issue(self, bundle: DecisionContextBundle) -> None: ...
     def by_id(self, context_id: UUID) -> DecisionContextBundle | None: ...
     def by_hash(self, content_hash: str) -> DecisionContextBundle | None: ...
+    def latest_for(self, assignment_id: UUID) -> DecisionContextBundle | None:
+        """The most recently issued bundle for one assignment, by `issued_at_utc`.
+
+        Read-only convenience for a display surface (e.g. a dashboard) that
+        wants "the latest context this assignment was given" without already
+        knowing a `context_id`/`content_hash` — every other method here is a
+        pure key lookup and cannot answer that on its own. Returns `None` if
+        the assignment has never been issued one, exactly like the other
+        lookups.
+        """
+        ...
 
 
 class InMemoryDecisionContextBundleStore:
@@ -168,6 +179,14 @@ class InMemoryDecisionContextBundleStore:
 
     def by_hash(self, content_hash: str) -> DecisionContextBundle | None:
         return self._by_hash.get(content_hash)
+
+    def latest_for(self, assignment_id: UUID) -> DecisionContextBundle | None:
+        candidates = [
+            bundle for bundle in self._by_id.values() if bundle.assignment_id == assignment_id
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda bundle: bundle.issued_at_utc)
 
 
 # --------------------------------------------------------------------------- #

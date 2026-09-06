@@ -11041,6 +11041,77 @@ anything beyond what this session's own local re-run already checked.
 
 ---
 
+## Update 2026-09-06 — Dashboard refresh: reflect the current architecture (owner work order, branch `dev1/dashboard-current-state`, NOT merged)
+
+Owner-authorized UI refresh, on its own branch off `origin/main` @ `1971d7a`
+(so this copy of `status.md` predates a few later `main`-only entries —
+notably the PAPER_LITE ownership handover — a merge will need to reconcile
+that, not this entry). Scope: `src/crumblr/dashboard/**` and its tests only;
+no execution/risk/policy/Agent-decision logic touched, no MT5 adapter, no
+secrets, two `GET` routes only, same as before.
+
+The old dashboard described an obsolete platform (`"M1 PASSED"`,
+`"LATEST REPLAY DECISION"`/`"NO LIVE DECISION PIPELINE ACTIVE"`) — written
+before the Agent Gateway, `AgentMarketContextV1`, PAPER_LITE and the real
+neutral Strategy Agent existed. Rebuilt to show the actual current pipeline:
+
+- New header row: `MARKET READER` / `MARKET DATA` / `AGENT` / `SAFETY` /
+  `EXECUTION` (`AGENT` is new — `HEALTHY`/`WAITING`/`NOT PROVISIONED`/
+  `UNKNOWN`, computed from a real `TradingAssignment` + recent evidence,
+  never fabricated green).
+- New Agent/StrategyArtifact panel, Last Decision card (with the exact
+  `GATEWAY_REJECTED`/`RISK_BLOCKED`/`POLICY_BLOCKED`/
+  `PAPER_ORDER_CHECK_BLOCKED`/`PAPER_FILLED`/`NO_TRADE` vocabulary), a
+  7-stage decision pipeline diagram, and a Risk panel (configured limits
+  from `RiskConfig` + current open risk/daily loss/drawdown from the real
+  shared `RiskSessionStore` ledger, ADR-021's own store).
+- Found and fixed one real pre-existing bug while auditing `app.py`'s error
+  handling: the 503 responses put raw `str(SQLAlchemyError)` into both the
+  JSON body and the rendered HTML — a connection failure's exception text
+  can carry the DSN. Fixed to a fixed, generic client-facing message; the
+  full error still goes to the server log only.
+- One additive method outside `dashboard/`, owner-pre-authorized ("you may
+  add read-only query/read-model code"): `DecisionContextBundleStore
+  .latest_for(assignment_id)` (Protocol in `agent_gateway/stores.py` +
+  `InMemory`/`Postgres` implementations) — no existing method's signature or
+  behaviour changed. Dev 2 (`agent_gateway/**`'s owner) notified as a
+  courtesy, not a blocking handshake.
+- Two genuine architecture gaps found and designed around, not papered
+  over: `AgentMarketContextV1`/`PaperLiteOutcomeType` are never durably
+  persisted as their own rows — `dashboard/agent_state.py::build_last_decision`
+  reconstructs the real terminal outcome from `AgentDecisionOutcomeStore`'s
+  settlement event, PAPER_LITE's own audit journal, and the sealed
+  `DecisionCapsule`, in the same precedence the real orchestrator produces
+  them in (documented as a table in that module's own docstring); and
+  `DurablePaperBroker`'s constructor writes to disk if the journal file
+  doesn't exist yet, so a new `dashboard/paper_lite_journal.py` reads the
+  JSONL file directly and never constructs the broker.
+- One real bug caught during manual verification (not by the automated
+  suite): `_from_capsule()`'s caller silently hardcoded `supervisor_skipped
+  =False` on the capsule-fallback path instead of forwarding the value
+  computed from the journal — found by seeding realistic data and running
+  the actual server, not just trusting the test suite. Fixed, with a new
+  regression test named after exactly this failure.
+
+Evidence: `uv run ruff check .`/`ruff format --check .` clean, `uv run mypy`
+clean (203 source files). Full suite, isolated single run: **1516 passed, 3
+skipped, 0 failed**, real PostgreSQL against `crumblr_test_dev1`. Manual
+verification: seeded realistic Agent/Risk/PAPER_LITE-journal data
+(`scripts/_seed_dashboard_demo.py`, a throwaway convenience script, not part
+of the shipped surface), ran the real `scripts/run_dashboard.py` server, and
+fetched both `GET /` and `GET /api/state` over real HTTP — this is how the
+`supervisor_skipped` bug above was actually found. No browser/screenshot
+tool is available in this environment, so visual verification was the raw
+fetched HTML/JSON, sent to the user directly, rather than a screenshot.
+
+Decision: pushed to `origin/dev1/dashboard-current-state`, **not merged** —
+stopping for owner review per the work order's own explicit instruction.
+
+Next: owner review of the branch; no further Dev-1 dashboard work queued
+until that lands.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.
