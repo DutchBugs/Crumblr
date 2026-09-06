@@ -163,6 +163,7 @@ def main() -> None:
         contexts=PostgresDecisionContextBundleStore(engine),
         outcomes=PostgresAgentDecisionOutcomeStore(engine),
         feature_evidence=FeatureSnapshotStore(engine),
+        platform_config=config,
     )
     agent = HttpPaperLiteTradingAgent(
         agent_id=args.agent_id,

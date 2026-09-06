@@ -42,6 +42,7 @@ from crumblr.agent_gateway.errors import (
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType
 from crumblr.agent_gateway.gateway import AgentGateway
+from crumblr.config import PlatformConfig
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.persistence.agent_gateway import (
     PostgresAgentCredentialStore,
@@ -51,7 +52,7 @@ from crumblr.persistence.agent_gateway import (
     PostgresTradingAssignmentStore,
 )
 from crumblr.persistence.features import FeatureSnapshotStore
-from tests.conftest import FIXED_NOW
+from tests.conftest import FIXED_NOW, paper_config_payload
 
 pytestmark = pytest.mark.integration
 
@@ -144,6 +145,7 @@ def build_gateway(engine: Engine) -> AgentGateway:
         contexts=PostgresDecisionContextBundleStore(engine),
         outcomes=PostgresAgentDecisionOutcomeStore(engine),
         feature_evidence=FeatureSnapshotStore(engine),
+        platform_config=PlatformConfig.model_validate(paper_config_payload()),
     )
 
 

@@ -898,6 +898,7 @@ class TestStrategyNeutralityThroughTheRealGateway:
             contexts=InMemoryDecisionContextBundleStore(),
             outcomes=InMemoryAgentDecisionOutcomeStore(),
             feature_evidence=InMemoryFeatureEvidenceStore(),
+            platform_config=config(),
         )
         spec = make_instrument_spec()
         snapshot = make_snapshot(symbol_spec_version=spec.spec_version)

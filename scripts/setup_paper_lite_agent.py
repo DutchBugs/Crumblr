@@ -6,6 +6,7 @@ import argparse
 import os
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 from crumblr.agent_gateway.contracts import (
@@ -24,6 +25,7 @@ from crumblr.application.paper_lite import (
     PaperLiteConfigurationError,
     require_paper_lite_database_url,
 )
+from crumblr.config import load_config
 from crumblr.domain.enums import Environment
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.persistence.agent_gateway import (
@@ -35,6 +37,7 @@ from crumblr.persistence.agent_gateway import (
 from crumblr.persistence.engine import create_db_engine, database_url
 
 GATEWAY_CREDENTIAL_ENV = "CRUMBLR_PAPER_LITE_GATEWAY_CREDENTIAL"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +68,7 @@ def main() -> None:
     except PaperLiteConfigurationError as error:
         raise SystemExit(str(error)) from error
     engine = create_db_engine(configured_database_url)
+    platform_config = load_config(Environment.PAPER, config_dir=REPO_ROOT / "config")
     try:
         identities = PostgresAgentIdentityStore(engine)
         credentials = PostgresAgentCredentialStore(engine)
@@ -79,6 +83,7 @@ def main() -> None:
             contexts=InMemoryDecisionContextBundleStore(),
             outcomes=PostgresAgentDecisionOutcomeStore(engine),
             feature_evidence=InMemoryFeatureEvidenceStore(),
+            platform_config=platform_config,
         )
         gateway.register_identity(
             AgentIdentity(

@@ -61,6 +61,20 @@ class AssignmentConflictError(AgentGatewayError):
     """The same `assignment_id` was already registered with different content."""
 
 
+class MarketNotApprovedError(AgentGatewayError):
+    """A `TradingAssignment` was proposed for a `canonical_symbol` that is
+    not in Crumblr's own approved Market Universe (`PlatformConfig
+    .enabled_symbols()`/`.market_for()`) -- either not configured at all,
+    or configured but not currently enabled. Crumblr decides the
+    approved markets; an agent chooses only within that universe (owner
+    direction 2026-09-06). Enforced at registration time
+    (`AgentGateway.issue_assignment`) so this can never be registered and
+    only caught later, at intent-time, by `risk/policies.py`'s existing
+    `SYMBOL_NOT_ALLOWED` check (unchanged, still correct as a second,
+    independent gate -- this is a registration-time gate, not a
+    replacement for it)."""
+
+
 class AssignmentScopeConflictError(AgentGatewayError):
     """A *different* `assignment_id` already covers this
     `(allowed_agent_id, canonical_symbol, timeframe)` triple with an

@@ -39,6 +39,7 @@ from crumblr.agent_gateway.errors import (
     AuthenticationError,
     DecisionConflictError,
     ImpersonationError,
+    MarketNotApprovedError,
     UnknownAgentError,
     UnknownFeatureSnapshotError,
 )
@@ -52,9 +53,10 @@ from crumblr.agent_gateway.stores import (
     InMemoryFeatureEvidenceStore,
     InMemoryTradingAssignmentStore,
 )
+from crumblr.config import PlatformConfig
 from crumblr.domain.enums import DataQuality, EntryType, Environment, SessionState, Side
 from crumblr.domain.models import TradeIntent
-from tests.conftest import FIXED_NOW
+from tests.conftest import FIXED_NOW, paper_config_payload
 
 AGENT_ID = uuid4()
 ASSIGNMENT_ID = uuid4()
@@ -143,6 +145,12 @@ def feature_evidence() -> InMemoryFeatureEvidenceStore:
     return InMemoryFeatureEvidenceStore()
 
 
+def platform_config(**overrides: Any) -> PlatformConfig:
+    payload = paper_config_payload()
+    payload.update(overrides)
+    return PlatformConfig.model_validate(payload)
+
+
 @pytest.fixture
 def gateway(
     outcomes: InMemoryAgentDecisionOutcomeStore, feature_evidence: InMemoryFeatureEvidenceStore
@@ -154,6 +162,7 @@ def gateway(
         contexts=InMemoryDecisionContextBundleStore(),
         outcomes=outcomes,
         feature_evidence=feature_evidence,
+        platform_config=platform_config(),
     )
 
 
@@ -333,6 +342,56 @@ class TestAssignmentScope:
         events = outcomes.events_for(rejected.outcome_id)
         assert any(event.event_type is AgentDecisionEventType.REJECTED for event in events)
         assert any(event.event_type is AgentDecisionEventType.RECEIVED for event in events)
+
+
+class TestMarketUniverseRegistrationGate:
+    """Flagged by Dev 1 while building ADR-022 (Market Universe, owner
+    direction 2026-09-06): the only pre-existing enforcement of "is this
+    canonical_symbol even in Crumblr's approved universe" was late, at
+    intent-time (`risk/policies.py`'s `SYMBOL_NOT_ALLOWED`). An assignment
+    could be registered for a symbol outside the Market Universe entirely
+    and only get caught later. `AgentGateway.issue_assignment` now refuses
+    it up front."""
+
+    def _gateway(self, *, markets: list[dict[str, Any]]) -> AgentGateway:
+        return AgentGateway(
+            identities=InMemoryAgentIdentityStore(),
+            credentials=InMemoryAgentCredentialStore(),
+            assignments=InMemoryTradingAssignmentStore(),
+            contexts=InMemoryDecisionContextBundleStore(),
+            outcomes=InMemoryAgentDecisionOutcomeStore(),
+            feature_evidence=InMemoryFeatureEvidenceStore(),
+            platform_config=platform_config(markets=markets),
+        )
+
+    def test_a_symbol_not_configured_in_the_market_universe_at_all_is_refused(self) -> None:
+        gateway = self._gateway(markets=[{"canonical_symbol": "EUR/USD", "enabled": True}])
+
+        with pytest.raises(MarketNotApprovedError):
+            gateway.issue_assignment(assignment(canonical_symbol="GBP/USD"))
+
+    def test_a_symbol_configured_but_not_enabled_is_refused(self) -> None:
+        gateway = self._gateway(
+            markets=[
+                {"canonical_symbol": "EUR/USD", "enabled": True},
+                {"canonical_symbol": "GBP/USD", "enabled": False},
+            ]
+        )
+
+        with pytest.raises(MarketNotApprovedError):
+            gateway.issue_assignment(assignment(canonical_symbol="GBP/USD"))
+
+    def test_a_symbol_configured_and_enabled_is_accepted(self) -> None:
+        gateway = self._gateway(
+            markets=[
+                {"canonical_symbol": "EUR/USD", "enabled": True},
+                {"canonical_symbol": "GBP/USD", "enabled": True},
+            ]
+        )
+
+        gateway.issue_assignment(assignment(canonical_symbol="GBP/USD"))  # must not raise
+
+        assert len(gateway._assignments.for_agent(AGENT_ID)) == 1
 
 
 class TestTradingAssignmentStoreMultiMarket:

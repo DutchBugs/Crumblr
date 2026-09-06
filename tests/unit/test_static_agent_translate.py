@@ -44,7 +44,9 @@ from crumblr.agent_gateway.stores import (
     InMemoryFeatureEvidenceStore,
     InMemoryTradingAssignmentStore,
 )
+from crumblr.config import PlatformConfig
 from crumblr.domain.enums import DataQuality, Environment, SessionState
+from tests.conftest import paper_config_payload
 
 NOW = datetime(2026, 9, 1, 12, 30, 0, tzinfo=UTC)
 AGENT_ID = uuid4()
@@ -195,6 +197,7 @@ def gateway() -> AgentGateway:
         contexts=InMemoryDecisionContextBundleStore(),
         outcomes=InMemoryAgentDecisionOutcomeStore(),
         feature_evidence=InMemoryFeatureEvidenceStore(),
+        platform_config=PlatformConfig.model_validate(paper_config_payload()),
     )
 
 

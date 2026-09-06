@@ -57,6 +57,7 @@ from crumblr.agent_gateway.errors import (
     AgentRejectionReason,
     AuthenticationError,
     ImpersonationError,
+    MarketNotApprovedError,
     UnknownAgentError,
     UnknownFeatureSnapshotError,
 )
@@ -71,6 +72,7 @@ from crumblr.agent_gateway.stores import (
     FeatureEvidenceStore,
     TradingAssignmentStore,
 )
+from crumblr.config import PlatformConfig
 from crumblr.domain.enums import DataQuality, SessionState
 from crumblr.domain.models import TradeIntent
 from crumblr.domain.timeutils import UtcDatetime
@@ -122,6 +124,7 @@ class AgentGateway:
         contexts: DecisionContextBundleStore,
         outcomes: AgentDecisionOutcomeStore,
         feature_evidence: FeatureEvidenceStore,
+        platform_config: PlatformConfig,
     ) -> None:
         self._identities = identities
         self._credentials = credentials
@@ -129,6 +132,7 @@ class AgentGateway:
         self._contexts = contexts
         self._outcomes = outcomes
         self._feature_evidence = feature_evidence
+        self._platform_config = platform_config
 
     # ----------------------------------------------------------------- #
     # Administrative — Crumblr-internal only, never reachable by an agent
@@ -147,6 +151,21 @@ class AgentGateway:
         )
 
     def issue_assignment(self, assignment: TradingAssignment) -> None:
+        """Refuses a `canonical_symbol` outside Crumblr's own approved
+        Market Universe (`PlatformConfig.market_for`) before it is ever
+        durably registered -- "Crumblr bepaalt de toegestane markten, de
+        Agent kiest binnen die toegestane universe" (owner direction
+        2026-09-06). The only enforcement before this was at intent-time
+        (`risk/policies.py`'s `SYMBOL_NOT_ALLOWED` check, unchanged, still
+        the authoritative late gate) -- this closes the earlier
+        registration-time gap flagged by Dev 1 while building ADR-022."""
+        market = self._platform_config.market_for(assignment.canonical_symbol)
+        if market is None or not market.enabled:
+            raise MarketNotApprovedError(
+                f"canonical_symbol {assignment.canonical_symbol!r} is not in Crumblr's "
+                "approved Market Universe"
+                + ("" if market is None else " (configured but not enabled)")
+            )
         self._assignments.register(assignment)
 
     def issue_context_bundle(self, bundle: DecisionContextBundle) -> DecisionContextBundle:

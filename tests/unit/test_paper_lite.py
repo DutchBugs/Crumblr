@@ -164,6 +164,7 @@ class Fixture:
             contexts=InMemoryDecisionContextBundleStore(),
             outcomes=InMemoryAgentDecisionOutcomeStore(),
             feature_evidence=InMemoryFeatureEvidenceStore(),
+            platform_config=config,
         )
         gateway.register_identity(
             AgentIdentity(
