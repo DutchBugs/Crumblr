@@ -148,16 +148,30 @@ class PostgresTradingAssignmentStore:
         with self._engine.begin() as connection:
             # One immutable assignment per (agent, symbol, timeframe) at a
             # time (owner direction 2026-09-06) -- checked inside the same
-            # transaction as the insert. `canonical_symbol`/`allowed_agent_id`
-            # are indexed columns; `timeframe` lives only in `payload` today
-            # (no migration for a rarely-written, operator-driven table),
-            # so the narrow candidate set from those two columns is
-            # deserialized and filtered in Python, reusing the exact same
-            # overlap check `InMemoryTradingAssignmentStore` uses. Not
-            # fully race-free under concurrent registration of the same
-            # market (no advisory lock here, unlike the proposal-claim
-            # path) -- acceptable for a rare, operator-driven action, not a
-            # high-frequency hot path.
+            # transaction as the insert. The SELECT-then-INSERT check below
+            # is not atomic by itself: two concurrent transactions could
+            # both read "no conflict" before either commits. A
+            # transaction-scoped advisory lock keyed on exactly this scope
+            # (same `pg_advisory_xact_lock(hashtext(...))` primitive
+            # `lock_assignment()` already uses for the claim path, released
+            # automatically at commit/rollback) serializes registration for
+            # the *same* scope while leaving unrelated
+            # agent/symbol/timeframe registrations fully concurrent.
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                {
+                    "key": (
+                        f"assignment-scope:{assignment.allowed_agent_id}:"
+                        f"{assignment.canonical_symbol}:{assignment.timeframe}"
+                    )
+                },
+            )
+            # `canonical_symbol`/`allowed_agent_id` are indexed columns;
+            # `timeframe` lives only in `payload` today (no migration for a
+            # rarely-written, operator-driven table), so the narrow
+            # candidate set from those two columns is deserialized and
+            # filtered in Python, reusing the exact same overlap check
+            # `InMemoryTradingAssignmentStore` uses.
             candidates = connection.execute(
                 select(agent_trading_assignments.c.payload).where(
                     agent_trading_assignments.c.allowed_agent_id == assignment.allowed_agent_id,

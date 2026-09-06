@@ -2396,6 +2396,45 @@ to dispatch to) — the store-level capability this pass built is what
 such a loop would need, not the loop itself. `order_send` unchanged:
 NO-GO.
 
+**Corrective commit, 2026-09-06 (owner review before merge, both points
+addressed):**
+
+1. **Boundary semantics fixed.** `validity_windows_overlap()` used strict
+   `<`, so `old.valid_until_utc == new.valid_from_utc` (touching, not
+   overlapping by that definition) was accepted — but
+   `AgentGateway.submit_trade_proposal`'s own check
+   (`valid_from_utc <= now <= valid_until_utc`, `gateway.py`) is inclusive
+   on both ends, so at that exact instant *both* assignments are Gateway-valid
+   simultaneously — a real ambiguity the strict check missed. Fixed to
+   `<=` both sides — touching boundaries now count as overlap. The
+   existing "legitimate hand-off" test was adjusted to a genuine
+   1-second gap (still proving non-overlapping windows are fine), and a
+   new test proves the exact-touching-instant case now correctly raises
+   `AssignmentScopeConflictError` — in both the unit and the Postgres
+   integration suite.
+2. **Postgres scope-uniqueness made concurrency-safe.** The SELECT-then-
+   INSERT conflict check was not atomic by itself — two concurrent
+   transactions could both read "no conflict" before either committed.
+   `PostgresTradingAssignmentStore.register()` now acquires a
+   transaction-scoped advisory lock (`pg_advisory_xact_lock(hashtext(...))`,
+   the exact primitive `lock_assignment()` already uses for the
+   proposal-claim path) keyed on `(allowed_agent_id, canonical_symbol,
+   timeframe)` before the conflict check, serializing registration for
+   the *same* scope while leaving unrelated agent/symbol/timeframe
+   registrations fully concurrent. New test: 8 threads race to register
+   a conflicting assignment for the identical scope against real
+   PostgreSQL — exactly 1 wins, 7 refused, run 5 times to rule out
+   flakiness, all 5 identical.
+
+**Evidence:** unit suite 1232 passed (+1 for the new boundary test),
+Postgres integration suite for this store: 5/5 (was 3, +2 for the
+boundary-touching and concurrency tests). Full-project gate (unit +
+integration + ruff/format/mypy) run before commit. AG-025 left open,
+unchanged, as instructed — it is a disclosed fail-closed gap, not
+something this corrective pass was asked to fix. `crumblr-static-agent-
+host`/StrategyArtifact 6.0 not touched. Not yet merged — owner review
+pending.
+
 ---
 
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)

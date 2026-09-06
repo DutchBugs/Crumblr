@@ -373,13 +373,46 @@ class TestTradingAssignmentStoreMultiMarket:
                 assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
             )
 
-    def test_a_replacement_assignment_starting_only_after_the_old_one_expires_is_not_a_conflict(
+    def test_a_replacement_assignment_starting_strictly_after_the_old_one_expires_is_not_a_conflict(
         self,
     ) -> None:
         """Non-overlapping validity windows for the same market are a
         legitimate hand-off, not ambiguity about "which assignment applies
         right now" -- the invariant is about simultaneity, not exclusivity
-        over all time."""
+        over all time. A genuine gap (not merely touching), since a shared
+        boundary instant is itself a conflict -- see the next test."""
+        store = InMemoryTradingAssignmentStore()
+        first = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW - timedelta(days=30),
+            valid_until_utc=FIXED_NOW,
+        )
+        second = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW + timedelta(seconds=1),
+            valid_until_utc=FIXED_NOW + timedelta(days=30),
+        )
+        store.register(first)
+        store.register(second)  # must not raise
+
+        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
+            first.assignment_id,
+            second.assignment_id,
+        }
+
+    def test_a_replacement_assignment_touching_the_old_ones_expiry_instant_is_a_conflict(
+        self,
+    ) -> None:
+        """`AgentGateway.submit_trade_proposal`'s own validity check is
+        inclusive on both ends (`valid_from_utc <= now <= valid_until_utc`,
+        `gateway.py`) -- at the exact instant `old.valid_until_utc ==
+        new.valid_from_utc`, the Gateway would consider *both* assignments
+        simultaneously valid. Store-level scope enforcement must refuse
+        that, not only a strictly-overlapping pair."""
         store = InMemoryTradingAssignmentStore()
         first = assignment(
             assignment_id=uuid4(),
@@ -396,12 +429,9 @@ class TestTradingAssignmentStoreMultiMarket:
             valid_until_utc=FIXED_NOW + timedelta(days=30),
         )
         store.register(first)
-        store.register(second)  # must not raise
 
-        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
-            first.assignment_id,
-            second.assignment_id,
-        }
+        with pytest.raises(AssignmentScopeConflictError):
+            store.register(second)
 
     def test_re_registering_the_identical_assignment_is_a_safe_no_op_not_a_scope_conflict(
         self,

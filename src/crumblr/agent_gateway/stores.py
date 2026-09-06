@@ -114,12 +114,16 @@ class TradingAssignmentStore(Protocol):
 
 
 def validity_windows_overlap(a: TradingAssignment, b: TradingAssignment) -> bool:
-    return a.valid_from_utc < b.valid_until_utc and b.valid_from_utc < a.valid_until_utc
+    """`<=`, not `<` -- matches `AgentGateway`'s own inclusive-both-ends
+    validity check (`gateway.py`: `valid_from_utc <= now <= valid_until_utc`).
+    A shared boundary instant (`a.valid_until_utc == b.valid_from_utc`) is a
+    real moment at which the Gateway would consider *both* assignments
+    simultaneously valid, so it counts as overlap here too -- a strict `<`
+    would let that exact instant's ambiguity through unnoticed."""
+    return a.valid_from_utc <= b.valid_until_utc and b.valid_from_utc <= a.valid_until_utc
 
 
-def _check_scope_conflict(
-    new: TradingAssignment, others: Iterator[TradingAssignment]
-) -> None:
+def _check_scope_conflict(new: TradingAssignment, others: Iterator[TradingAssignment]) -> None:
     """One immutable assignment per `(allowed_agent_id, canonical_symbol,
     timeframe)` at any moment — the invariant that makes "which assignment
     currently governs this agent's proposals for this market" unambiguous.

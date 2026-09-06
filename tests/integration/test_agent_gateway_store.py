@@ -293,9 +293,39 @@ class TestTradingAssignmentStoreMultiMarketAgainstRealPostgres:
                 assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
             )
 
-    def test_a_replacement_assignment_after_the_old_one_expires_is_not_a_conflict(
+    def test_a_replacement_assignment_starting_strictly_after_the_old_one_expires_is_not_a_conflict(
         self, engine: Engine
     ) -> None:
+        store = PostgresTradingAssignmentStore(engine)
+        first = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW - timedelta(days=30),
+            valid_until_utc=FIXED_NOW,
+        )
+        second = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW + timedelta(seconds=1),
+            valid_until_utc=FIXED_NOW + timedelta(days=30),
+        )
+        store.register(first)
+        store.register(second)  # must not raise
+
+        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
+            first.assignment_id,
+            second.assignment_id,
+        }
+
+    def test_a_replacement_assignment_touching_the_old_ones_expiry_instant_is_a_conflict(
+        self, engine: Engine
+    ) -> None:
+        """`AgentGateway.submit_trade_proposal`'s own validity check is
+        inclusive on both ends -- at the exact instant
+        `old.valid_until_utc == new.valid_from_utc`, the Gateway would
+        consider both assignments simultaneously valid."""
         store = PostgresTradingAssignmentStore(engine)
         first = assignment(
             assignment_id=uuid4(),
@@ -312,12 +342,43 @@ class TestTradingAssignmentStoreMultiMarketAgainstRealPostgres:
             valid_until_utc=FIXED_NOW + timedelta(days=30),
         )
         store.register(first)
-        store.register(second)  # must not raise
 
-        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
-            first.assignment_id,
-            second.assignment_id,
-        }
+        with pytest.raises(AssignmentScopeConflictError):
+            store.register(second)
+
+    def test_concurrent_registration_for_the_same_scope_is_not_a_race(self, engine: Engine) -> None:
+        """The SELECT-then-INSERT scope check is not atomic on its own --
+        two concurrent transactions could both read "no conflict" before
+        either commits. Proves the transaction-scoped advisory lock keyed
+        on (agent, symbol, timeframe) actually serializes registration for
+        the *same* scope: of N concurrent attempts to register a
+        conflicting assignment, exactly one may win."""
+        attempts = [
+            assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+            for _ in range(8)
+        ]
+        results: list[str] = []
+        lock = threading.Lock()
+
+        def register_one(candidate: TradingAssignment) -> None:
+            store = PostgresTradingAssignmentStore(engine)
+            try:
+                store.register(candidate)
+                outcome = "won"
+            except AssignmentScopeConflictError:
+                outcome = "refused"
+            with lock:
+                results.append(outcome)
+
+        threads = [threading.Thread(target=register_one, args=(a,)) for a in attempts]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert results.count("won") == 1
+        assert results.count("refused") == len(attempts) - 1
+        assert len(PostgresTradingAssignmentStore(engine).for_agent(AGENT_ID)) == 1
 
 
 class TestRestartSafety:
