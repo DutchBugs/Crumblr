@@ -2027,6 +2027,21 @@ was not fixed unilaterally.
 
 ## 0ac. PL-004 final preflight — four fixes, a real cross-repo HTTP proof, and one corrected finding — done 2026-09-06
 
+> **Superseded, 2026-09-06 (§0ae): point 6's "corrected finding" below was
+> itself wrong, and more wrong than what it corrected.** There was never a
+> legacy-package hash mismatch on any real platform. The apparent
+> cross-platform reproduction was an artifact of using `git archive` on
+> this Windows machine (`core.autocrlf=true`) as the "clean export"
+> mechanism for feeding Linux containers — `git archive` here silently
+> applies the same CRLF smudge a checkout would, which I had wrongly
+> assumed it does not. Every "clean Linux" run in points 5 and 6 below was
+> genuinely clean Linux fed already-corrupted input. See §0ae for the
+> real root cause, the real numbers (full suite 71/71, `verify` → PASS),
+> and the real StrategyArtifact 6.0 hash (`81894d6a...`, not `7b2803bf...`
+> as reported throughout points 5/6 and to the owner). Points 1-4 above
+> (canonical symbol, pip/point conversion, render.yaml, /health split) are
+> unaffected and remain correct as described.
+
 Owner-requested preflight pass on the external repo before deployment/
 product proof, six numbered sections. Committed and pushed to
 `agent/neutral-context-strategy-6.0` (`7471014`, on top of §0ab's
@@ -2132,6 +2147,17 @@ NO-GO.
 
 ## 0ad. Neutral staging service decoupled from the legacy v5 package — startup blocker fixed — done 2026-09-06
 
+> **Correction, 2026-09-06 (§0ae): the "startup blocker" motivating this
+> entry did not actually exist** — see §0ae. The legacy package loads and
+> verifies fine on real Linux/Render; §0ac's "defect" was a Windows
+> `git archive` artifact, not a real one. The code below (`serve
+> --neutral-only`) is not wrong or harmful — decoupling the neutral
+> service from the legacy package is a reasonable, still-kept
+> architectural improvement — but its stated justification was false, and
+> the "evidence" bullets below inherit §0ac's same corrupted-input bug
+> (still using `git archive` on Windows as the "clean Linux" input). The
+> real, corrected numbers are in §0ae.
+
 Owner-requested follow-up to §0ac: the frozen v5 package's own
 integrity-check defect (still unfixed, still an explicit owner decision,
 per §0ac) was reachable from the *neutral* staging service's own startup
@@ -2190,6 +2216,81 @@ verify` (the legacy-package command) still cannot honestly report `PASS`
 on any platform until that decision is made. `order_send` unchanged:
 NO-GO. Not deployed — owner review pending before deployment, per
 explicit instruction.
+
+---
+
+## 0ae. Correction: there was no legacy-package defect — the real StrategyArtifact 6.0 hash is `81894d6a...` — done 2026-09-06
+
+The owner's Render deployment (real `git clone`, real Linux) reported
+`neutral_context_strategy.strategy_artifact_hash =
+81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5` — not
+the `7b2803bfe146bdbb54ba5e64226f950d0cca578873fc877e1fa28919872cd16a`
+this track reported in §0ac/§0ad. Same commit
+(`395e7b1b8e0c320b04a8ae7230a77c102bcca7ec`), same file, two different
+hashes. The owner asked for a direct diagnosis rather than accepting
+either value on trust.
+
+**Root cause, found and verified, not assumed:** `git archive`, run on
+this Windows machine (`core.autocrlf=true`), silently applies the same
+CRLF smudge a checkout would. I had assumed — and used, for every
+"clean Linux" test this whole PL-004 pass — that `git archive` exports
+raw, filter-free blob content, portable regardless of the exporting
+machine's own config. It does not, on this git-for-windows install, with
+this config. Verified directly, byte-for-byte:
+
+- `git cat-file -p <blob-oid>` (the true, zero-filter raw object) for
+  `pivot2_engine.py` at `395e7b1`: **17643 bytes, sha256
+  `81894d6a...`** — matches `git show <commit>:<path> | sha256sum`
+  exactly (both owner and I get this), and matches the manifest/
+  Render's reported value.
+- `git archive 395e7b1 -- .../pivot2_engine.py`, extracted: **18077
+  bytes, sha256 `7b2803bf...`** — 434 bytes larger, byte-for-byte
+  different from character 78 onward (LF → CRLF throughout). This is
+  what every prior Docker-container test in §0ac/§0ad actually received
+  as input, mistaking it for "the real file."
+- Redid the *entire* gate the correct way: `git bundle create
+  repo.bundle --all` (bundles raw objects, no working-tree filters
+  possible), transferred into a clean `python:3.12-slim` container,
+  cloned/checked out there by **Linux's own git** (default
+  `core.autocrlf=false`, confirmed unset) — zero Windows involvement
+  anywhere in that chain. Result:
+  - `sha256sum src/crumblr_strategy_agent/pivot2_engine.py` →
+    `81894d6a...`
+  - `compute_strategy_artifact_hash()` at runtime → `81894d6a...`
+    (matches Render exactly)
+  - Full existing suite: **`Ran 71 tests ... OK` — 71 passed, 0
+    failed.** Not 39/32 as §0ac/§0ad reported.
+  - `crumblr-strategy-agent verify` → **`"status": "PASS"`**,
+    `source_sha256` matches `manifest.json`'s pinned value exactly.
+
+**The legacy v5 package was never broken, on any platform, at any point
+in this track's work.** §0ab's very first (Windows-checkout) diagnosis
+and §0ac's "correction" of it were both wrong, in the same direction —
+the actual defect was in how *I* was producing test input on this
+machine, not in anything committed to either repo. The `serve
+--neutral-only` startup-decoupling work (§0ad) was built to fix a
+blocker that did not exist; the code itself is still a reasonable
+architectural improvement (worth keeping) but should not be described as
+fixing a real defect, because there wasn't one.
+
+**Corrected canonical values, StrategyArtifact 6.0, commit `395e7b1`:**
+- `strategy_artifact_hash` = `81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5`
+- `strategy_artifact_id` = `6b6f1a8e-2f52-4b9a-9a3d-6f6c9c9a9c60` (unaffected, static constant)
+- `strategy_artifact_version` = `6.0` (unaffected)
+- `runtime_adapter_version` = `neutral-trader-1.0` (unaffected)
+
+**No strategy code changed** — `pivot2_engine.py` was never wrong;
+nothing needed fixing there. **No frozen v5 files touched.** Reported the
+full diagnosis directly to the owner, including the `git show`/`git
+ls-tree` output they asked for verbatim. Not deployed; not provisioned;
+owner review still pending, unchanged from §0ad.
+
+**Lesson for future evidence-gathering on this track, this machine:** do
+not use `git archive` as a "clean export" step when this Windows clone's
+`core.autocrlf=true` is in effect — either `git cat-file -p <blob>` for a
+single file, or `git bundle create --all` + a real clone/checkout
+*inside* the target Linux environment, are the only methods verified
+here to be genuinely filter-free.
 
 ---
 
