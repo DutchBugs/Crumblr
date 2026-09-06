@@ -11140,10 +11140,12 @@ stays globally NO-GO throughout, which is what keeps this safe.
   `tests/unit/test_risk_calendars.py` (10 tests),
   `tests/integration/test_risk_session_per_market.py` (3 tests, real
   cross-contamination proof), `tests/integration/test_migrations.py
-  ::TestRiskSessionCanonicalSymbolBackfill` (3 tests) — all pass in
-  isolation; full-suite integration result pending at the time this entry
-  was written (background run in progress — see the next entry or this
-  branch's push report for the final count)
+  ::TestRiskSessionCanonicalSymbolBackfill` (3 tests) — **full clean run:
+  262 passed, 2 skipped (both pre-existing filesystem-permission skips,
+  unrelated), 552.85s.** An earlier same-directory run overlapped with
+  slice 4's in-flight edits to `risk/session.py` and produced 4 failures
+  purely from that race (see Problems found below) — re-run cleanly after
+  edits settled, confirming this branch introduces no regression
 - `uv run alembic heads` — single head, `8801080869a6`
 
 **New tests, this branch:** `tests/unit/test_risk_calendars.py`,
@@ -11178,13 +11180,16 @@ their own spec (D-060, `review/DEVIATIONS.md`). Do not silently treat this
 as though §30 never said it, and do not block on it either — record and
 proceed, as instructed.
 
-**Next:** slice 5 (`review/adr/ADR-022-market-universe.md` +
-`review/DEVIATIONS.md` D-060 — both written this entry), Dev-2
-coordination message about the registration-time Market Universe
-validation gap, final full verification, push to
-`origin/dev1/market-universe`. **Not merged, and not stacked on the
-dashboard branch** — stop for owner review before merge, matching this
-session's established review cadence.
+**Pushed** to `origin/dev1/market-universe` (`c5efb7a`). **Not merged, and
+not stacked on the dashboard branch** — stop for owner review before
+merge, matching this session's established review cadence. Dev-2
+coordination message sent same day (crumblr-d0): the mechanical fix
+already applied to their two call sites, and the registration-time Market
+Universe validation gap (recommend they add `enabled_symbols()`/
+`market_for()` check in their own `agent_gateway/gateway.py`/`stores.py`).
+
+**Next:** owner review of this branch; if approved, merge to `main`.
+Otherwise idle pending a new work order.
 
 ---
 
