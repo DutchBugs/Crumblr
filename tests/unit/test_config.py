@@ -273,8 +273,18 @@ class TestMarkets:
     def test_duplicate_symbols_are_refused(self) -> None:
         payload = paper_config_payload()
         payload["markets"] = [
-            {"canonical_symbol": "EUR/USD", "enabled": True},
-            {"canonical_symbol": "EUR/USD", "enabled": False},
+            {
+                "canonical_symbol": "EUR/USD",
+                "enabled": True,
+                "asset_class": "FX",
+                "broker_symbol": "EURUSD",
+            },
+            {
+                "canonical_symbol": "EUR/USD",
+                "enabled": False,
+                "asset_class": "FX",
+                "broker_symbol": "EURUSD",
+            },
         ]
         with pytest.raises(ValidationError, match="duplicate canonical_symbol"):
             PlatformConfig.model_validate(payload)
@@ -282,8 +292,18 @@ class TestMarkets:
     def test_disabled_markets_are_excluded(self) -> None:
         payload = paper_config_payload()
         payload["markets"] = [
-            {"canonical_symbol": "EUR/USD", "enabled": True},
-            {"canonical_symbol": "GBP/USD", "enabled": False},
+            {
+                "canonical_symbol": "EUR/USD",
+                "enabled": True,
+                "asset_class": "FX",
+                "broker_symbol": "EURUSD",
+            },
+            {
+                "canonical_symbol": "GBP/USD",
+                "enabled": False,
+                "asset_class": "FX",
+                "broker_symbol": "GBPUSD",
+            },
         ]
         assert PlatformConfig.model_validate(payload).enabled_symbols() == ("EUR/USD",)
 
@@ -314,6 +334,8 @@ class TestMarkets:
             {
                 "canonical_symbol": "EUR/USD",
                 "enabled": True,
+                "asset_class": "FX",
+                "broker_symbol": "EURUSD",
                 "expected_spec_version": "a" * 64,
             }
         ]

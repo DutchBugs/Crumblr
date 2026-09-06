@@ -8,6 +8,8 @@
 markets:
   - canonical_symbol: EUR/USD
     enabled: true
+    asset_class: FX
+    broker_symbol: EURUSD
 
 # The ICT entry model is the required scheme: a trade is only proposed when a
 # liquidity sweep, a structure shift, a displacement gap, a discount/premium

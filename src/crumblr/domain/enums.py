@@ -32,6 +32,20 @@ class EntryType(StrEnum):
     STOP = "STOP"
 
 
+class AssetClass(StrEnum):
+    """Drives trading-calendar selection (`risk/calendars.py::calendar_for`)
+
+    and nothing else yet — deliberately not a dispatch key for strategy or
+    execution logic. `FX`/`METAL` both currently map to the same
+    FX-weekday calendar (this broker trades metals on FX-like hours);
+    `CRYPTO` maps to an always-open calendar. Adding a member here does not
+    by itself approve or enable a market — see `config.MarketConfig`."""
+
+    FX = "FX"
+    CRYPTO = "CRYPTO"
+    METAL = "METAL"
+
+
 class DataQuality(StrEnum):
     """build.md §12.3. A strategy must not trade on SUSPECT data."""
 

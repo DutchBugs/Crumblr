@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import Engine
 
 from crumblr.config import ExecutionConfig, MarketConfig, PlatformConfig
-from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
+from crumblr.domain.enums import AssetClass, Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.hashing import mt5_magic_number
 from crumblr.domain.models import DecisionCapsule
 from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestConflictError
@@ -874,7 +874,11 @@ class TestEndToEnd:
             update={
                 "markets": (
                     MarketConfig(
-                        canonical_symbol="EUR/USD", enabled=True, expected_spec_version=None
+                        canonical_symbol="EUR/USD",
+                        enabled=True,
+                        asset_class=AssetClass.FX,
+                        broker_symbol="EURUSD",
+                        expected_spec_version=None,
                     ),
                 )
             }

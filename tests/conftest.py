@@ -290,7 +290,14 @@ def paper_config_payload() -> dict[str, Any]:
     """A minimal valid paper configuration, as a merged mapping."""
     return {
         "environment": Environment.PAPER.value,
-        "markets": [{"canonical_symbol": "EUR/USD", "enabled": True}],
+        "markets": [
+            {
+                "canonical_symbol": "EUR/USD",
+                "enabled": True,
+                "asset_class": "FX",
+                "broker_symbol": "EURUSD",
+            }
+        ],
         "risk": {
             "max_risk_per_trade": "0.02",
             "max_open_risk": "0.03",

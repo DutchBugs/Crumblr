@@ -23,7 +23,7 @@ from crumblr.application.bootstrap import DurableRuntime, build_durable_runtime
 from crumblr.application.broker_state import BrokerStateObservation
 from crumblr.application.live_decision import LiveDecisionOrchestrator
 from crumblr.config import MarketConfig, PlatformConfig, load_config
-from crumblr.domain.enums import Environment, ReasonCode, SnapshotCompleteness
+from crumblr.domain.enums import AssetClass, Environment, ReasonCode, SnapshotCompleteness
 from crumblr.domain.models import BrokerAccountSnapshot, InstrumentSpec
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.market_data.synthetic import (
@@ -296,6 +296,8 @@ class TestF055PinnedInstrumentSpecBaseline:
                     MarketConfig(
                         canonical_symbol="EUR/USD",
                         enabled=True,
+                        asset_class=AssetClass.FX,
+                        broker_symbol="EURUSD",
                         expected_spec_version=spec.spec_version,
                     ),
                 )

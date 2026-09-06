@@ -93,7 +93,38 @@ account_guard:
 # orders) at pin time. Changing this value is a normal, git-reviewed config
 # edit like any other in this file — not something the platform ever does
 # on its own.
+#
+# Market Universe (ADR-022, 2026-09-07): every market now carries an
+# explicit, Crumblr-approved `broker_symbol` — `mt5_gateway/readonly.py
+# ::resolve_symbol()` confirms this exact name exists on the terminal
+# rather than discovering one via fuzzy prefix-matching. EUR/USD's mapping
+# is the already-known real value from the comment above (line 59),
+# made an explicit, reviewable field instead of a runtime guess — no new
+# information, no behaviour change to which symbol actually gets traded.
+#
+# BTC/USD is a second entry, `enabled: false`: the owner has stated its
+# broker symbol (BTCUSD on PepperstoneUK-Demo) from a sanitized probe run
+# outside this repository — that fixture has been searched for and does
+# NOT exist as a checked-in artifact here (no `var/*.sanitized.json` for
+# BTC/USD, unlike EUR/USD's own first-contact evidence above). Treated as
+# owner-asserted, not independently repo-verified: `expected_spec_version`
+# stays unset (deliberately unpinned, same F-055 discipline as EUR/USD's
+# own history — a baseline is pinned only after a human reviews a real
+# observation, never invented) and `enabled: false` until a real
+# `scripts/mt5_probe.py --canonical-symbol "BTC/USD" --sanitized-json ...`
+# run produces the same kind of checked-in evidence EUR/USD already has.
+# No risk/execution overrides are set: until an owner risk decision exists
+# for this asset class, it inherits the platform defaults below, same as
+# EUR/USD — see review/adr/ADR-022-market-universe.md for the full design
+# and the crypto session-policy gap this deliberately leaves open.
 markets:
   - canonical_symbol: EUR/USD
     enabled: true
+    asset_class: FX
+    broker_symbol: EURUSD
     expected_spec_version: bcd6a59271173c8fc49f4d88d522a9bd55d9e0e5ba44137b6d8c9b4d00283bd4
+  - canonical_symbol: BTC/USD
+    enabled: false
+    asset_class: CRYPTO
+    broker_symbol: BTCUSD
+    expected_spec_version: null

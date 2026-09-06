@@ -23,7 +23,7 @@ from typing import Annotated, Any, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from crumblr.domain.enums import Environment
+from crumblr.domain.enums import AssetClass, Environment
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import Symbol, VersionTag
 from crumblr.domain.money import RiskFraction
@@ -41,30 +41,6 @@ DEMO_ONLY_ENVIRONMENTS: frozenset[Environment] = frozenset({Environment.PAPER, E
 
 class ConfigSection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
-
-
-class MarketConfig(ConfigSection):
-    canonical_symbol: Symbol
-    enabled: bool
-
-    expected_spec_version: Annotated[str, Field(min_length=1, max_length=128)] | None = None
-    """The approved, pinned `InstrumentSpec.spec_version` for this symbol —
-
-    review 1.19 §4 (F-055). `None` (the default) means no baseline has been
-    explicitly authorized yet, and reconciliation must read `UNKNOWN` for
-    this symbol's instrument spec rather than silently trusting whichever
-    observation happened to arrive first (`instrument_specs.earliest()` is
-    trust-on-first-use, not authority — a database reset or a first real
-    session against a materially different broker configuration would
-    otherwise "pin" itself).
-
-    Set this only after a real observation (F-051) has been reviewed and
-    accepted as correct — the value itself is still discovered from the
-    terminal, never invented; this field records that a human looked at
-    what was discovered and approved it. Changing it later is exactly as
-    reviewable as any other config edit, which is the point: an approved
-    baseline changes only through an explicit, git-visible act, not because
-    a database happened to be recreated."""
 
 
 class RiskConfig(ConfigSection):
@@ -114,6 +90,31 @@ class RiskConfig(ConfigSection):
         return self
 
 
+class RiskOverrides(ConfigSection):
+    """Per-market deviations from `PlatformConfig.risk` (Market Universe).
+
+    Every field is optional — a market states only what it changes; anything
+    left `None` falls back to the platform default (`PlatformConfig
+    .risk_for()`). Deliberately not a second `RiskConfig` with all-required
+    fields: forcing every market to restate every number the moment a second
+    market exists would make "no override" indistinguishable from "override,
+    happens to match" and turn every unrelated platform-default change into a
+    multi-file edit. No cross-field ordering validation here (unlike
+    `RiskConfig._check_budget_ordering`) — ordering is checked once the
+    merge with the platform default has actually happened
+    (`PlatformConfig.risk_for()`), since a partial override alone cannot be
+    judged for internal consistency without the values it will inherit.
+    """
+
+    max_risk_per_trade: RiskFraction | None = None
+    max_open_risk: RiskFraction | None = None
+    max_daily_loss: RiskFraction | None = None
+    max_drawdown: RiskFraction | None = None
+    max_orders_per_hour: Annotated[int, Field(ge=0)] | None = None
+    max_open_positions: Annotated[int, Field(ge=0)] | None = None
+    min_stop_distance_points: Annotated[int, Field(ge=0)] | None = None
+
+
 class ExecutionConfig(ConfigSection):
     max_spread_points: int = Field(gt=0)
     max_market_data_age_ms: int = Field(gt=0)
@@ -161,6 +162,70 @@ class ExecutionConfig(ConfigSection):
     deliberate, git-reviewed, owner-made act (Phase E), the same
     "record that a specific real-world identity was approved" role
     `approved_config_version` plays for the risk config."""
+
+
+class ExecutionOverrides(ConfigSection):
+    """Per-market deviations from `PlatformConfig.execution` (Market
+
+    Universe) — same "state only what changes" shape as `RiskOverrides`,
+    for the same reason. Deliberately excludes the four governance/approval
+    fields (`submission_enabled`, `feedback_2_0_approved`,
+    `flatten_submission_enabled`, `approved_canary_account_ref`): those are
+    platform-wide submission-readiness gates, not per-instrument execution
+    parameters, and letting a market "opt itself in" to submission would
+    defeat the entire point of a gate that must be a deliberate, git-visible,
+    owner-made act."""
+
+    max_spread_points: Annotated[int, Field(gt=0)] | None = None
+    max_market_data_age_ms: Annotated[int, Field(gt=0)] | None = None
+    order_timeout_ms: Annotated[int, Field(gt=0)] | None = None
+    max_slippage_points: Annotated[int, Field(ge=0)] | None = None
+
+
+class MarketConfig(ConfigSection):
+    canonical_symbol: Symbol
+    enabled: bool
+    asset_class: AssetClass
+    """Drives trading-calendar selection (`risk/calendars.py::calendar_for`)
+
+    — see `AssetClass`'s own docstring for exactly what it does and does
+    not affect."""
+
+    broker_symbol: Annotated[str, Field(min_length=1, max_length=32)]
+    """The exact broker-side symbol name Crumblr has approved for this
+
+    canonical symbol — e.g. `"EURUSD"` for `EUR/USD` on Pepperstone.
+    Required for every market, including EUR/USD: before this field
+    existed, `mt5_gateway/readonly.py::resolve_symbol()` *discovered* the
+    broker symbol fresh every run via a `.replace("/", "")` + fuzzy-prefix
+    match against the terminal's own symbol table — never Crumblr-owned,
+    never fail-closed, and silently capable of matching the wrong ticker on
+    a broker with more than one candidate. This field makes the mapping an
+    explicit, git-reviewed approval instead; `resolve_symbol()` now
+    confirms this exact name exists on the terminal rather than guessing
+    one. See `review/adr/ADR-022-market-universe.md`."""
+
+    expected_spec_version: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    """The approved, pinned `InstrumentSpec.spec_version` for this symbol —
+
+    review 1.19 §4 (F-055). `None` (the default) means no baseline has been
+    explicitly authorized yet, and reconciliation must read `UNKNOWN` for
+    this symbol's instrument spec rather than silently trusting whichever
+    observation happened to arrive first (`instrument_specs.earliest()` is
+    trust-on-first-use, not authority — a database reset or a first real
+    session against a materially different broker configuration would
+    otherwise "pin" itself).
+
+    Set this only after a real observation (F-051) has been reviewed and
+    accepted as correct — the value itself is still discovered from the
+    terminal, never invented; this field records that a human looked at
+    what was discovered and approved it. Changing it later is exactly as
+    reviewable as any other config edit, which is the point: an approved
+    baseline changes only through an explicit, git-visible act, not because
+    a database happened to be recreated."""
+
+    risk_overrides: RiskOverrides | None = None
+    execution_overrides: ExecutionOverrides | None = None
 
 
 class TradingAgentConfig(ConfigSection):
@@ -333,6 +398,47 @@ class PlatformConfig(ConfigSection):
             (market for market in self.markets if market.canonical_symbol == canonical_symbol),
             None,
         )
+
+    def risk_for(self, canonical_symbol: str) -> RiskConfig:
+        """The effective `RiskConfig` for one market — `self.risk` with any
+
+        `MarketConfig.risk_overrides` merged on top, field by field (`None`
+        in the override means "inherit the platform default"). Re-validates
+        as a real `RiskConfig` after merging, so `_check_budget_ordering`
+        still catches a market whose override, combined with whatever it
+        did *not* override, would violate the same ordering rules a
+        platform-wide `RiskConfig` already enforces — a partial override
+        cannot be judged for internal consistency in isolation.
+        """
+        market = self.market_for(canonical_symbol)
+        overrides = market.risk_overrides if market is not None else None
+        if overrides is None:
+            return self.risk
+        merged = self.risk.model_dump()
+        for field, value in overrides.model_dump().items():
+            if value is not None:
+                merged[field] = value
+        return RiskConfig(**merged)
+
+    def execution_for(self, canonical_symbol: str) -> ExecutionConfig:
+        """The effective `ExecutionConfig` for one market — same merge
+
+        shape as `risk_for()`. Governance/approval fields
+        (`submission_enabled`/`feedback_2_0_approved`/
+        `flatten_submission_enabled`/`approved_canary_account_ref`) are not
+        on `ExecutionOverrides` at all, so they always come from the
+        platform default regardless of market — a market cannot opt itself
+        into submission readiness.
+        """
+        market = self.market_for(canonical_symbol)
+        overrides = market.execution_overrides if market is not None else None
+        if overrides is None:
+            return self.execution
+        merged = self.execution.model_dump()
+        for field, value in overrides.model_dump().items():
+            if value is not None:
+                merged[field] = value
+        return ExecutionConfig(**merged)
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

@@ -26,7 +26,7 @@ from crumblr.config import (
     SupervisorConfig,
     TradingAgentConfig,
 )
-from crumblr.domain.enums import Environment, OrderState
+from crumblr.domain.enums import AssetClass, Environment, OrderState
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import ExecutionResult, FlattenInstruction, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
@@ -359,6 +359,8 @@ def platform_config(
             MarketConfig(
                 canonical_symbol="EUR/USD",
                 enabled=True,
+                asset_class=AssetClass.FX,
+                broker_symbol="EURUSD",
                 expected_spec_version=expected_spec_version,
             ),
         ),
