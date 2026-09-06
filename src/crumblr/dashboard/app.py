@@ -49,8 +49,15 @@ _WARN_STATES = frozenset(
         "NOT_YET_VALID",
         "AWAITING_OUTCOME",
         "AWAITING_EVIDENCE",
+        "CONFIG GATES OPEN",
     }
 )
+"""`CONFIG GATES OPEN` is deliberately `warn`, never `good`: all four
+
+execution config flags reading `True` is not proof real `order_send` is
+reachable — that also needs the execution adapter actually wired into the
+orchestrator, which is a separate, structural fact this card does not
+assert (review feedback, third pass)."""
 _BAD_STATES = frozenset(
     {
         "DISCONNECTED",
