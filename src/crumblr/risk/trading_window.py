@@ -42,7 +42,14 @@ from typing import Self
 
 from crumblr.config import IntradayConfig
 from crumblr.domain.timeutils import UtcDatetime
-from crumblr.trading_agent.sessions import is_market_open, weekly_close
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar
+
+_DEFAULT_CALENDAR = FxWeekdayCalendar()
+"""Every function here defaults to this — zero behaviour change for every
+
+existing caller, none of which pass a `calendar` today. A caller that knows
+its market's `AssetClass` can pass `risk.calendars.calendar_for(asset_class)`
+instead (Market Universe, ADR-022)."""
 
 
 class SessionPhase(StrEnum):
@@ -135,20 +142,32 @@ def policy_from_config(config: IntradayConfig) -> IntradayPolicy:
     )
 
 
-def phase_at(moment: UtcDatetime, policy: IntradayPolicy) -> SessionPhase:
+def phase_at(
+    moment: UtcDatetime,
+    policy: IntradayPolicy,
+    *,
+    calendar: TradingCalendar = _DEFAULT_CALENDAR,
+) -> SessionPhase:
     """Which phase of the trading week `moment` falls in.
 
     Compared directly against the weekly close, with no day-of-week branch:
     Monday's close is days away, so both offset comparisons are false and the
     function falls through to OPEN by arithmetic alone — Monday-Thursday
     "no cutoff" is a consequence of this shape, not a special case in it.
+
+    `calendar.weekly_close(moment)` returning `None` (no weekly-close
+    concept — e.g. `risk.calendars.AlwaysOpenCalendar`) resolves to `OPEN`
+    the same way a disabled `policy` does: there is nothing to measure an
+    `IntradayPolicy` against, not a claim that this calendar is somehow
+    always safe. See `risk/calendars.py`'s own module docstring for why no
+    calendar invents a weekly-close boundary nobody has approved.
     """
-    if not is_market_open(moment):
+    if not calendar.is_market_open(moment):
         return SessionPhase.CLOSED
-    if not policy.enabled:
+    close = calendar.weekly_close(moment)
+    if close is None or not policy.enabled:
         return SessionPhase.OPEN
 
-    close = weekly_close(moment)
     if moment >= close - policy.flatten_offset:
         return SessionPhase.FLATTEN_REQUIRED
     if moment >= close - policy.last_entry_offset:
@@ -156,12 +175,16 @@ def phase_at(moment: UtcDatetime, policy: IntradayPolicy) -> SessionPhase:
     return SessionPhase.OPEN
 
 
-def permits_new_entry(moment: UtcDatetime, policy: IntradayPolicy) -> bool:
+def permits_new_entry(
+    moment: UtcDatetime, policy: IntradayPolicy, *, calendar: TradingCalendar = _DEFAULT_CALENDAR
+) -> bool:
     """Whether a new position may be opened at `moment`."""
-    return phase_at(moment, policy).permits_new_entries
+    return phase_at(moment, policy, calendar=calendar).permits_new_entries
 
 
-def requires_flat(moment: UtcDatetime, policy: IntradayPolicy) -> bool:
+def requires_flat(
+    moment: UtcDatetime, policy: IntradayPolicy, *, calendar: TradingCalendar = _DEFAULT_CALENDAR
+) -> bool:
     """Whether any exposure at `moment` is already past its deadline —
 
     either the Friday flatten deadline, or the market is simply closed
@@ -176,10 +199,18 @@ def requires_flat(moment: UtcDatetime, policy: IntradayPolicy) -> bool:
     """
     if not policy.enabled:
         return False
-    return phase_at(moment, policy) in {SessionPhase.FLATTEN_REQUIRED, SessionPhase.CLOSED}
+    return phase_at(moment, policy, calendar=calendar) in {
+        SessionPhase.FLATTEN_REQUIRED,
+        SessionPhase.CLOSED,
+    }
 
 
-def has_crossed_weekly_close(opened_at_utc: UtcDatetime, moment: UtcDatetime) -> bool:
+def has_crossed_weekly_close(
+    opened_at_utc: UtcDatetime,
+    moment: UtcDatetime,
+    *,
+    calendar: TradingCalendar = _DEFAULT_CALENDAR,
+) -> bool:
     """Whether a position opened at `opened_at_utc` is still open past the
 
     weekly close — i.e. it survived into or through the weekend. A normal
@@ -195,15 +226,24 @@ def has_crossed_weekly_close(opened_at_utc: UtcDatetime, moment: UtcDatetime) ->
     survived the old week's flatten deadline would stop looking like a
     breach one second after becoming one. Comparing weekly closes instead
     means the breach stays a breach until somebody deals with it.
+
+    On a calendar with no weekly-close concept (`None` on both sides) this
+    is always `False` — there is no weekly boundary to have crossed.
     """
-    return weekly_close(opened_at_utc) != weekly_close(moment)
+    return calendar.weekly_close(opened_at_utc) != calendar.weekly_close(moment)
 
 
-def time_until_weekly_close(moment: UtcDatetime) -> timedelta:
+def time_until_weekly_close(
+    moment: UtcDatetime, *, calendar: TradingCalendar = _DEFAULT_CALENDAR
+) -> timedelta | None:
     """How long the trading week has left. Negative past the boundary.
+
+    `None` on a calendar with no weekly-close concept — there is no
+    boundary to measure a remaining time against.
 
     Renamed from the old daily `time_until_close` — same zero production
     callers as before (it exists for tests/tooling), now measured against
     the one weekly boundary rather than a fabricated daily one.
     """
-    return weekly_close(moment) - moment
+    close = calendar.weekly_close(moment)
+    return None if close is None else close - moment

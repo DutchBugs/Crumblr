@@ -26,6 +26,7 @@ import pytest
 from crumblr.config import IntradayConfig
 from crumblr.domain.enums import ReasonCode, RiskVerdict, Side
 from crumblr.domain.models import PositionState, RiskDecision
+from crumblr.risk.calendars import AlwaysOpenCalendar
 from crumblr.risk.trading_window import (
     IntradayPolicy,
     SessionPhase,
@@ -53,6 +54,7 @@ WINTER = datetime(2026, 1, 6, 12, 0, tzinfo=UTC)
 SUMMER = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 WINTER_FRIDAY = datetime(2026, 1, 9, 12, 0, tzinfo=UTC)
 SUMMER_FRIDAY = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+WEEKEND_MIDNIGHT = datetime(2026, 1, 10, 0, 0, tzinfo=UTC)  # Saturday 00:00 UTC
 
 
 def at(day: datetime, hour: int, minute: int = 0) -> datetime:
@@ -131,6 +133,41 @@ class TestThePhases:
     def test_only_open_permits_a_new_entry(self) -> None:
         for phase in SessionPhase:
             assert phase.permits_new_entries is (phase is SessionPhase.OPEN)
+
+
+class TestACalendarWithNoWeeklyCloseConceptNeverEvaluatesThePolicy:
+    """Market Universe (ADR-022): a 24/7 asset class has no owner-approved
+
+    weekly-close policy yet. `phase_at` must resolve to OPEN whenever the
+    market is open, without ever consulting `IntradayPolicy`'s offsets —
+    not because they were computed and found not to apply, but because
+    there is no boundary to measure them against.
+    """
+
+    def test_always_open_resolves_to_open_at_every_fixture_moment(self) -> None:
+        calendar = AlwaysOpenCalendar()
+        for hour in (0, 6, 12, 18, 23):
+            assert phase_at(at(WINTER_FRIDAY, hour), POLICY, calendar=calendar) is (
+                SessionPhase.OPEN
+            )
+
+    def test_an_enabled_policy_never_fires_flatten_or_no_new_entries(self) -> None:
+        """Even at the exact hour/minute that would trigger FLATTEN_REQUIRED
+
+        on `FxWeekdayCalendar` (21:45), a calendar with no weekly close must
+        still resolve to OPEN — there is no boundary those offsets are
+        measured back from.
+        """
+        calendar = AlwaysOpenCalendar()
+        assert phase_at(at(WINTER_FRIDAY, 21, 45), POLICY, calendar=calendar) is (SessionPhase.OPEN)
+
+    def test_has_crossed_weekly_close_is_always_false(self) -> None:
+        calendar = AlwaysOpenCalendar()
+        assert not has_crossed_weekly_close(WINTER_FRIDAY, WEEKEND_MIDNIGHT, calendar=calendar)
+
+    def test_time_until_weekly_close_is_none(self) -> None:
+        calendar = AlwaysOpenCalendar()
+        assert time_until_weekly_close(at(WINTER_FRIDAY, 21, 0), calendar=calendar) is None
 
 
 class TestEntriesAndFlatness:
