@@ -260,6 +260,7 @@ class LiveReader:
         store: MarketDataSink,
         *,
         canonical_symbol: str = "EUR/USD",
+        expected_broker_symbol: str | None = None,
         timeframe: str = "M5",
         source_prefix: str = "mt5",
         terminal_path: str | None = None,
@@ -282,6 +283,7 @@ class LiveReader:
         self._guard = guard
         self._store = store
         self._canonical_symbol = canonical_symbol
+        self._expected_broker_symbol = expected_broker_symbol
         self._timeframe = timeframe
         self._source_prefix = source_prefix
         self._terminal_path = terminal_path
@@ -417,6 +419,7 @@ class LiveReader:
                 self._client,
                 self._guard,
                 canonical_symbol=self._canonical_symbol,
+                expected_broker_symbol=self._expected_broker_symbol,
                 clock=self._clock,
             )
             # Raises AccountGuardError on server/login/currency/leverage/demo

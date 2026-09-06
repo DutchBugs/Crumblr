@@ -211,11 +211,19 @@ def gateway(
     fake: FakeMt5,
     *,
     guard: AccountGuardConfig = GUARD,
+    canonical_symbol: str = "EUR/USD",
+    expected_broker_symbol: str | None = None,
     clock: Callable[[], datetime] = lambda: FAKE_NOW,
 ) -> ReadOnlyMt5Gateway:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=5_000_123, password="x", server="PepperstoneUK-Demo"))
-    return ReadOnlyMt5Gateway(client, guard, clock=clock)
+    return ReadOnlyMt5Gateway(
+        client,
+        guard,
+        canonical_symbol=canonical_symbol,
+        expected_broker_symbol=expected_broker_symbol,
+        clock=clock,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -452,6 +460,57 @@ class TestSymbolDiscovery:
         gate.resolve_symbol()
         gate.resolve_symbol()
         assert fake.selected == ["EURUSD"], "the symbol should be selected once"
+
+
+# --------------------------------------------------------------------------- #
+# Pinned symbol resolution — Market Universe, ADR-022: fail-closed, never
+# fuzzy-fall-back once a market has an approved broker_symbol.
+# --------------------------------------------------------------------------- #
+
+
+class TestPinnedSymbolResolution:
+    def test_a_pinned_symbol_present_verbatim_resolves(self) -> None:
+        fake = FakeMt5(symbols=("EURUSD", "EURUSD.a"))
+        gate = gateway(fake, expected_broker_symbol="EURUSD")
+        assert gate.resolve_symbol() == "EURUSD"
+
+    def test_a_pinned_symbol_absent_fails_closed_not_fuzzy(self) -> None:
+        """The terminal has a plausible fuzzy match (`EURUSD.a`) but not the
+
+        exact pinned name — this must refuse, never quietly accept the
+        near-match the pre-ADR-022 discovery heuristic would have chosen."""
+        fake = FakeMt5(symbols=("EURUSD.a",))
+        gate = gateway(fake, expected_broker_symbol="EURUSD")
+        with pytest.raises(SymbolNotFoundError, match="EURUSD"):
+            gate.resolve_symbol()
+        assert fake.selected == [], "a failed pin must never select any symbol"
+
+    def test_a_pinned_symbol_never_calls_discovery(self) -> None:
+        """Structural proof, not just behavioural: the pinned path in
+
+        `resolve_symbol()`'s own source never names `discover_candidate_symbols`
+        — mirrors this codebase's other `inspect.getsource()`-based boundary
+        proofs (e.g. `test_demo_order_send_gateway.py
+        ::TestNotWiredIntoTheOrchestrator`)."""
+        import inspect
+
+        source = inspect.getsource(ReadOnlyMt5Gateway.resolve_symbol)
+        pinned_branch = source.split("if self._expected_broker_symbol is not None:")[1].split(
+            "else:"
+        )[0]
+        assert "discover_candidate_symbols" not in pinned_branch
+
+    def test_no_pin_still_falls_back_to_discovery(self) -> None:
+        """Unpinned (onboarding) behaviour is unchanged by ADR-022."""
+        fake = FakeMt5(symbols=("EURUSD.a", "GBPUSD"))
+        gate = gateway(fake, expected_broker_symbol=None)
+        assert gate.resolve_symbol() == "EURUSD.a"
+
+    def test_discover_candidate_symbols_is_directly_usable_for_onboarding(self) -> None:
+        fake = FakeMt5(symbols=("BTCUSD", "BTCUSD.a", "ETHUSD"))
+        gate = gateway(fake, canonical_symbol="BTC/USD")
+        assert set(gate.discover_candidate_symbols()) == {"BTCUSD", "BTCUSD.a"}
+        assert fake.selected == [], "discovery alone must not select anything"
 
 
 # --------------------------------------------------------------------------- #

@@ -170,11 +170,16 @@ class OrderCheckMt5Gateway:
         guard: AccountGuardConfig,
         *,
         canonical_symbol: str = "EUR/USD",
+        expected_broker_symbol: str | None = None,
         clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         self._client = client
         self._reader = ReadOnlyMt5Gateway(
-            client, guard, canonical_symbol=canonical_symbol, clock=clock
+            client,
+            guard,
+            canonical_symbol=canonical_symbol,
+            expected_broker_symbol=expected_broker_symbol,
+            clock=clock,
         )
 
     @property

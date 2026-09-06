@@ -172,12 +172,14 @@ def main() -> int:
     store = MarketDataStore(engine)
     broker_state_store = BrokerStateStore(engine)
     instrument_spec_store = InstrumentSpecStore(engine)
+    market = config.market_for(args.canonical_symbol)
     reader = LiveReader(
         Mt5Client(),
         credentials,
         config.account_guard,
         store,
         canonical_symbol=args.canonical_symbol,
+        expected_broker_symbol=market.broker_symbol if market is not None else None,
         timeframe=args.timeframe,
         poll_interval=timedelta(seconds=args.poll_interval),
         stale_after=timedelta(seconds=args.stale_after),

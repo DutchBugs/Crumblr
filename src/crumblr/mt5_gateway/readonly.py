@@ -184,11 +184,20 @@ class ReadOnlyMt5Gateway:
         guard: AccountGuardConfig,
         *,
         canonical_symbol: str = "EUR/USD",
+        expected_broker_symbol: str | None = None,
         clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         self._client = client
         self._guard = guard
         self._canonical_symbol = canonical_symbol
+        self._expected_broker_symbol = expected_broker_symbol
+        """The Crumblr-approved broker symbol for `canonical_symbol`
+
+        (`config.MarketConfig.broker_symbol`, Market Universe, ADR-022).
+        `None` means this symbol has no approved pin yet — `resolve_symbol()`
+        falls back to onboarding-only fuzzy discovery in that case; set,
+        `resolve_symbol()` is fail-closed: the terminal must report exactly
+        this name, never a guess."""
         self._clock = clock
         self._resolved_symbol: str | None = None
         self._broker_clock_offset: timedelta | None = None
@@ -300,30 +309,42 @@ class ReadOnlyMt5Gateway:
     def resolve_symbol(self) -> str:
         """Find the broker's name for the canonical symbol.
 
-        Pepperstone and others append suffixes, so the name is discovered from
-        `symbols_get` rather than assumed. An exact match wins; otherwise the
-        shortest candidate whose base name matches, because `EURUSD.a` is the
-        instrument and `EURUSD.a.cfd` would be something else.
+        Fail-closed once a market has an approved pin (`config.MarketConfig
+        .broker_symbol`, Market Universe / ADR-022): the terminal must
+        report exactly that name, or this refuses outright rather than
+        guessing something close. Without a pin (a market not yet in the
+        Universe, mid-onboarding), falls back to `discover_candidate_symbols
+        ()`'s fuzzy prefix match — the only mode this method had before
+        ADR-022, kept for exactly that bootstrapping purpose and never used
+        on the trading path once a market is approved.
         """
         if self._resolved_symbol is not None:
             return self._resolved_symbol
 
-        wanted = self._canonical_symbol.replace("/", "").upper()
-        symbols = self._client.checked("symbols_get", self._client.module.symbols_get())
-
-        candidates = [
-            str(symbol.name)
-            for symbol in symbols
-            if str(symbol.name).upper().replace(".", "").startswith(wanted)
-        ]
-        if not candidates:
-            raise SymbolNotFoundError(
-                f"no broker symbol found for {self._canonical_symbol!r}; "
-                f"the terminal reported {len(symbols)} symbols"
-            )
-
-        exact = [name for name in candidates if name.upper() == wanted]
-        chosen = exact[0] if exact else min(candidates, key=len)
+        if self._expected_broker_symbol is not None:
+            symbols = self._client.checked("symbols_get", self._client.module.symbols_get())
+            names = tuple(str(symbol.name) for symbol in symbols)
+            if self._expected_broker_symbol not in names:
+                raise SymbolNotFoundError(
+                    f"pinned broker symbol {self._expected_broker_symbol!r} for "
+                    f"{self._canonical_symbol!r} not found on this terminal; the terminal "
+                    f"reported {len(names)} symbols. Crumblr does not fuzzy-match once a "
+                    "market has an approved broker_symbol pin (Market Universe, "
+                    "review/adr/ADR-022-market-universe.md) — fix the pin or the terminal, "
+                    "never guess."
+                )
+            chosen = self._expected_broker_symbol
+            candidates: tuple[str, ...] = (chosen,)
+        else:
+            candidates = self.discover_candidate_symbols()
+            if not candidates:
+                raise SymbolNotFoundError(
+                    f"no broker symbol found for {self._canonical_symbol!r}; the terminal "
+                    "reported no matching candidates and no approved broker_symbol pin exists"
+                )
+            wanted = self._canonical_symbol.replace("/", "").upper()
+            exact = [name for name in candidates if name.upper() == wanted]
+            chosen = exact[0] if exact else min(candidates, key=len)
 
         if not self._client.module.symbol_select(chosen, True):
             code, message = self._client.module.last_error()
@@ -334,9 +355,30 @@ class ReadOnlyMt5Gateway:
             "mt5.symbol_resolved",
             canonical=self._canonical_symbol,
             broker_symbol=chosen,
+            pinned=self._expected_broker_symbol is not None,
             candidates=candidates,
         )
         return chosen
+
+    def discover_candidate_symbols(self) -> tuple[str, ...]:
+        """Onboarding-only diagnostic: every terminal symbol name whose base
+
+        (suffix-stripped) form starts with `canonical_symbol` written
+        without its slash — e.g. `"EUR/USD"` → candidates starting with
+        `"EURUSD"`, including `EURUSD.a`/`EURUSD.pro`/etc. Pepperstone and
+        others append account-type suffixes, so this is how a *new* market's
+        real broker symbol is found before it has an approved pin
+        (`scripts/mt5_probe.py`'s own job). Never called by `resolve_symbol()`
+        once `expected_broker_symbol` is set — a pinned market is looked up
+        by exact name, not rediscovered.
+        """
+        wanted = self._canonical_symbol.replace("/", "").upper()
+        symbols = self._client.checked("symbols_get", self._client.module.symbols_get())
+        return tuple(
+            str(symbol.name)
+            for symbol in symbols
+            if str(symbol.name).upper().replace(".", "").startswith(wanted)
+        )
 
     def _clock_offset(self) -> timedelta:
         """How far ahead of true UTC the terminal's own clock runs (D-039).

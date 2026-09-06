@@ -210,8 +210,12 @@ def main() -> int:
 
     client = Mt5Client()
     client.connect(credentials, terminal_path=os.environ.get("CRUMBLR_MT5_TERMINAL_PATH") or None)
+    market = config.market_for(args.canonical_symbol)
     adapter = OrderCheckMt5Gateway(
-        client, config.account_guard, canonical_symbol=args.canonical_symbol
+        client,
+        config.account_guard,
+        canonical_symbol=args.canonical_symbol,
+        expected_broker_symbol=market.broker_symbol if market is not None else None,
     )
 
     runtime = build_durable_runtime(
