@@ -11039,6 +11039,153 @@ session could see confirmed green first: consider requesting that
 confirmation before treating `main` as unconditionally trustworthy for
 anything beyond what this session's own local re-run already checked.
 
+## Update 2026-09-06 (eighty-eighth entry) — Market Universe (ADR-022), slices 1-4, `dev1/market-universe` branch
+
+```text
+Component: domain/enums.py, config.py, mt5_gateway/{readonly,execution}.py, application/live_reader.py, risk/{calendars.py (new),trading_window,session}.py, persistence/{schema,risk_session}.py, migration 8801080869a6, application/{orchestration,live_decision,execution,paper_lite}.py, agent_gateway/decision_path.py
+Milestone: owner work order 2026-09-04, verbatim (Dutch) — "Dev 1 — Core / Market Universe / Risk & Policy... Maak Crumblr multi-market aan de Core-kant"
+Status before: single global market (EUR/USD), no per-market broker-symbol pin, no per-market risk/execution overrides, FX-only trading calendar, one global risk ledger row for the whole platform
+Status after:  config/persistence/risk/calendar/broker-mapping layer is multi-market-capable; exactly one market (EUR/USD) remains operationally enabled; order_send remains NO-GO throughout
+```
+
+**Not stacked on the dashboard branch** — separate branch,
+`dev1/market-universe`, off `origin/main` @ `1971d7a`, own worktree
+(`.claude/worktrees/market-universe-dev1`), own `crumblr_test_dev1`
+database. The dashboard branch (`dev1/dashboard-current-state`,
+`85edb0b`) was finished and pushed separately first, per the owner's own
+explicit ordering in the work order.
+
+**A real tension named, not silently resolved** (full reasoning in
+`review/adr/ADR-022-market-universe.md` §1, `review/DEVIATIONS.md` D-060):
+`build.md` §30 recommendation #12 says not to add markets until the
+EUR/USD lifecycle is "operationally boring," which by the spec's own
+definition it is not yet (`order_send` has never fired once). This branch
+proceeds anyway because the owner's own work order explicitly instructs
+it, on the owner's own spec — recorded as a deliberate, dated deviation
+rather than either silently overridden or silently blocked on. `order_send`
+stays globally NO-GO throughout, which is what keeps this safe.
+
+**Completed, four commits so far:**
+
+- **Slice 1** (`58975ce`) — `AssetClass` enum (`FX`/`CRYPTO`/`METAL`,
+  additive-only, drives calendar selection only); `MarketConfig` gained a
+  required `broker_symbol` (every market, including EUR/USD — the real,
+  already-known mapping, made explicit and reviewable instead of
+  runtime-guessed) and optional `risk_overrides`/`execution_overrides`
+  (`RiskOverrides`/`ExecutionOverrides`, field-for-field mirrors of
+  `RiskConfig`/`ExecutionConfig`, every field `| None = None`);
+  `PlatformConfig.risk_for()`/`.execution_for()` merge overrides onto the
+  platform default and re-validate as a real config object, so cross-field
+  ordering rules still apply to the merged result. `config/paper.yaml`
+  gained a `BTC/USD` entry, `enabled: false`, seeded from the work order's
+  own stated fixture ("BTC/USD -> BTCUSD op PepperstoneUK-Demo, gebaseerd
+  op de sanitized probe") — exhaustively searched and **not found anywhere
+  in this repository**; treated as owner-asserted, not repo-verified
+  (ADR-022 §3.2 has the full provenance note).
+- **Slice 2** (`eb910f3`) — Crumblr-owned, fail-closed broker-symbol
+  resolution. Before this, **every** market's mapping, including EUR/USD's,
+  was runtime-discovered by fuzzy prefix match — never pinned.
+  `ReadOnlyMt5Gateway.resolve_symbol()` now reads `MarketConfig
+  .broker_symbol`: if set, requires an **exact** match in the broker's real
+  symbol table, fails closed (`SymbolNotFoundError`) if absent, no fuzzy
+  fallback. The old heuristic survives as `discover_candidate_symbols()`,
+  an explicitly separate onboarding helper, structurally proven
+  (`inspect.getsource()`) never to be called from the pinned path. Zero
+  behaviour change for EUR/USD (`EURUSD` still resolves the same way).
+  Investigated a flaky, differently-failing `test_execution_reconciliation
+  .py` across 3 runs; reproduced identically against the clean slice-1-only
+  base via `git stash` — pre-existing test-isolation flakiness, not caused
+  by this slice, documented in the commit rather than silently ignored.
+- **Slice 3** (`55a4d16`) — asset-class-aware trading calendars.
+  `risk/calendars.py` (new): `TradingCalendar` Protocol, `FxWeekdayCalendar`
+  (thin wrapper, zero behaviour change, regression-guarded byte-for-byte
+  against `trading_agent.sessions` on every existing fixture moment), and
+  `AlwaysOpenCalendar` (`weekly_close()` returns `None` — not "far away," an
+  actual absence of the concept, for a 24/7 asset class with no
+  owner-approved session policy yet). `risk/trading_window.py`'s five
+  public functions gained an optional, default-preserving `calendar`
+  parameter; when `weekly_close()` is `None`, `phase_at` resolves to `OPEN`
+  without ever evaluating `IntradayPolicy`'s offsets — same "a stated
+  choice, not a default" discipline `IntradayPolicy.disabled()` already
+  uses. This is the one genuine owner-policy gap left open on purpose
+  (ADR-022 §4 item 1).
+- **Slice 4** (this entry, not yet committed as of writing — committing
+  immediately after this entry) — per-market risk ledger. Before this,
+  `risk_session_states` had no `canonical_symbol` column at all —
+  `load_latest()` read "the single latest row in the table," full stop. A
+  second enabled market would have silently shared EUR/USD's
+  equity/drawdown/loss ledger — the one genuine safety gap this closes.
+  Migration `8801080869a6` (`down_revision = e91f4a7c2b53`) adds the
+  column, backfills existing rows to `'EUR/USD'`, makes it `NOT NULL`,
+  replaces `ix_risk_session_order` with a composite
+  `(canonical_symbol, sequence)` index. `RiskSessionState` gained a
+  required `canonical_symbol` field; `RiskSessionStore.load_latest()`
+  gained a required `canonical_symbol` keyword parameter (`save()`
+  deliberately did not — it reads `state.canonical_symbol` directly rather
+  than risk the two disagreeing, a small deviation from the ADR's own
+  original plan wording, noted in ADR-022 §3.5). Every Dev-1-owned call
+  site updated (`orchestration.py`, `live_decision.py`, `execution.py`);
+  two Dev-2/Dev-3-owned call sites (`agent_gateway/decision_path.py`,
+  `application/paper_lite.py`) got the minimal mechanical fix to keep
+  compiling, mirroring the AG-012/AG-024 precedent — coordination message
+  to Dev 2 sent same day (§ below).
+
+**Evidence:**
+- `uv run ruff check . && uv run ruff format --check .` — clean (216 files)
+- `uv run mypy` — clean, 199 source files (up from 196 at branch start)
+- `uv run pytest --ignore=tests/integration` — **1242 passed, 1 skipped**
+  (the 1 skip is pre-existing/unrelated — MetaTrader5 import availability)
+- `uv run pytest tests/integration` — real PostgreSQL against
+  `crumblr_test_dev1`; new tests added this branch:
+  `tests/unit/test_risk_calendars.py` (10 tests),
+  `tests/integration/test_risk_session_per_market.py` (3 tests, real
+  cross-contamination proof), `tests/integration/test_migrations.py
+  ::TestRiskSessionCanonicalSymbolBackfill` (3 tests) — all pass in
+  isolation; full-suite integration result pending at the time this entry
+  was written (background run in progress — see the next entry or this
+  branch's push report for the final count)
+- `uv run alembic heads` — single head, `8801080869a6`
+
+**New tests, this branch:** `tests/unit/test_risk_calendars.py`,
+`tests/unit/test_mt5_readonly_gateway.py::TestPinnedSymbolResolution` (5
+tests), `tests/integration/test_risk_session_per_market.py`,
+`tests/integration/test_migrations.py::TestRiskSessionCanonicalSymbolBackfill`,
+plus new cases added to `tests/unit/test_trading_window.py` and
+`tests/unit/test_config.py`.
+
+**Problems found:**
+- The flaky `test_execution_reconciliation.py` (slice 2) — investigated,
+  attributed to pre-existing test-isolation issues, not this branch's
+  changes (see slice 2 above).
+- A background integration-test run started before slice 4's edits landed
+  produced 4 failures that were purely an artifact of editing
+  `risk/session.py` while that run was still executing against the same
+  files on disk — re-ran clean once edits settled; not a real regression,
+  named here so a future reader does not mistake it for one if it
+  surfaces in raw logs.
+
+**Risk impact:** `order_send` unaffected — stays NO-GO
+(`ExecutionConfig.feedback_2_0_approved` still `false` everywhere).
+EUR/USD's own real behaviour is unchanged everywhere a regression test
+could prove it (symbol resolution, session calendar, risk-session
+recovery). The one new *capability* with real safety weight — per-market
+risk-ledger isolation — is the one gap this branch was asked to close, not
+a new risk introduced.
+
+**Decision:** proceed with the Market Universe build ahead of `build.md`
+§30 rec. #12's stated ordering, per the owner's own explicit work order on
+their own spec (D-060, `review/DEVIATIONS.md`). Do not silently treat this
+as though §30 never said it, and do not block on it either — record and
+proceed, as instructed.
+
+**Next:** slice 5 (`review/adr/ADR-022-market-universe.md` +
+`review/DEVIATIONS.md` D-060 — both written this entry), Dev-2
+coordination message about the registration-time Market Universe
+validation gap, final full verification, push to
+`origin/dev1/market-universe`. **Not merged, and not stacked on the
+dashboard branch** — stop for owner review before merge, matching this
+session's established review cadence.
+
 ---
 
 # 14. Update template

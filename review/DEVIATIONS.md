@@ -11,6 +11,12 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-06 — D-060 added: Market Universe
+(`review/adr/ADR-022-market-universe.md`) built ahead of build.md §30
+recommendation #12's own "EUR/USD boring first" ordering, per explicit
+owner work order on their own spec. `order_send` stays NO-GO throughout,
+which is what keeps this safe.
+
 Last updated 2026-09-04 — Phase B item B5 (`review/adr/ADR-020-real-flatten-close.md`)
 closes two of D-050's three original pieces: the flatten close itself,
 and retry-then-HALT on a failed close. D-050 narrows to just the
@@ -1488,6 +1494,53 @@ mean anything should start here.
   zero broker writes reachable); would block Phase F's first real DEMO
   canary readiness checklist item 7 ("genuine external Supervisor
   binding") if attempted as-is.
+
+### D-060 — Market Universe built ahead of build.md §30 rec. #12's own "EUR/USD boring first" ordering
+- **Status:** deliberate — explicit owner work order, on their own spec
+- **Spec:** `build.md` §30 recommendation #12: "Do not add more markets
+  until the EUR/USD lifecycle is operationally boring" — by the spec's
+  own definition ("reconnects, restarts, rejected orders, stale data and
+  reconciliation should all have predictable outcomes"), EUR/USD is not
+  fully there yet: real `order_send` has never fired once in this
+  codebase's history.
+- **Code:** `domain/enums.py::AssetClass`, `config.py`
+  (`RiskOverrides`/`ExecutionOverrides`, enriched `MarketConfig`),
+  `mt5_gateway/readonly.py::resolve_symbol`, `risk/calendars.py` (new),
+  `risk/trading_window.py`, `persistence/schema.py` + migration
+  `8801080869a6`, `risk/session.py`, `persistence/risk_session.py` — full
+  design in `review/adr/ADR-022-market-universe.md`.
+- **Why:** owner work order 2026-09-04 explicitly instructs building
+  Market Universe support now ("Maak Crumblr multi-market aan de
+  Core-kant..."), on the owner's own specification. `build.md` §24
+  ("Multi-market expansion design") is the spec's own forward-looking
+  blueprint for this exact work, naming the right seams and requiring a
+  Market Capability Matrix before a new market trades — this branch does
+  not attempt to satisfy that matrix or bring any market closer to live
+  execution; it makes the config/persistence/risk/calendar/broker-mapping
+  layer capable of eventually being evaluated against one honestly.
+  `order_send` remains globally NO-GO throughout this branch and every
+  branch before it, which is what keeps this safe despite landing ahead
+  of §30 rec. #12's stated ordering.
+- **Current state:** config/persistence/risk/calendar/broker-mapping
+  layer is multi-market-capable (per-market `broker_symbol` pin,
+  `risk_overrides`/`execution_overrides`, asset-class calendar,
+  per-market risk ledger). Exactly one market (EUR/USD) is
+  operationally enabled in any shipped config; a second (`BTC/USD`) is
+  seeded `enabled: false` from an owner-asserted, not repo-verified,
+  fixture (see the ADR §3.2). No process orchestrates more than one
+  market concurrently.
+- **Watch for:** before enabling any second market, (1) real-terminal
+  confirmation of its broker-symbol pin (`scripts/mt5_probe.py`), (2) an
+  owner decision on that asset class's session/weekly-close policy if it
+  is not FX/METAL (`risk/calendars.py`'s own module docstring — no
+  calendar invents one), (3) the Market Capability Matrix build.md §24
+  itself calls for, not skipped here. Registration-time Universe
+  validation (`TradingAssignmentStore.register()`, Dev-2-owned) remains
+  an open coordination item — see the ADR §4 item 2.
+- **Gate affected:** blocks nothing today (`order_send` NO-GO, no
+  process trades concurrently on multiple markets); would block any
+  future attempt to enable a second market without first closing the
+  three watch-for items above.
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap
