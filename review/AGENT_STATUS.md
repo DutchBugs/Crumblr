@@ -2437,6 +2437,60 @@ pending.
 
 ---
 
+## 0ag. Registration-time Market Universe gate (AG-026) — done 2026-09-06, prompted by Dev 1's cross-session message
+
+Dev 1 (crumblr-59), building the owner's Market Universe work order
+(ADR-022) on their own branch `dev1/market-universe` (not stacked on
+mine, not merged), messaged directly with two items touching this
+track's files.
+
+**Item 1 — verified, not just trusted.** Two mechanical fixes Dev 1 had
+already applied to keep `agent_gateway/decision_path.py`/
+`application/paper_lite.py` compiling against `RiskSessionStore
+.load_latest()`'s new required `canonical_symbol` parameter (ADR-022 —
+closes a real gap: `risk_session_states` had no `canonical_symbol` column
+at all before this, so a second enabled market would have silently
+shared EUR/USD's equity/drawdown/loss ledger). Read the actual diff on
+Dev 1's own worktree (`market-universe-dev1`, locally present, not
+fetched from origin since it isn't pushed yet) rather than trusting the
+message's description alone: both call sites pass exactly the value
+already locked via `risk_ledger_lock.held(...)` immediately above them
+(`snapshot.symbol` in `decision_path.py`, `self._assignment
+.canonical_symbol` in `paper_lite.py`) — confirmed semantically correct,
+replied to Dev 1 accordingly.
+
+**Item 2 — AG-026, closed same day.** Dev 1 flagged, did not fix
+themselves (out of their branch's file scope, correctly deferred to this
+track): `TradingAssignmentStore.register()` never checked a proposed
+`canonical_symbol` against `PlatformConfig.enabled_symbols()`/
+`.market_for()` — the only real enforcement was late, at intent-time
+(`risk/policies.py`'s `SYMBOL_NOT_ALLOWED`, unchanged, still correct as a
+second, independent gate). Fixed at the Gateway layer, not the store —
+matches where every other assignment-scope rule (ownership, validity
+window, risk-fraction band, rate limit) already lives:
+`AgentGateway.issue_assignment()` now refuses (new
+`MarketNotApprovedError`) a `canonical_symbol` `PlatformConfig
+.market_for()` doesn't resolve, or resolves to a disabled market, before
+the assignment is ever durably registered. `AgentGateway.__init__` now
+requires `platform_config: PlatformConfig` — updated all 8 real
+construction sites (6 test files, `scripts/paper_lite.py`,
+`scripts/setup_paper_lite_agent.py`; most already had a `PlatformConfig`
+in scope already, `setup_paper_lite_agent.py` now loads real config
+where it constructed none before).
+
+**Evidence:** 3 new tests
+(`tests/unit/test_agent_gateway.py::TestMarketUniverseRegistrationGate`).
+Full gate: unit **1235 passed** (+3 exactly), integration **261 passed**,
+2 pre-existing skips, ruff/format/mypy clean. (The unit run this pass
+took ~32 minutes instead of the usual ~1 — heavy system contention from
+the confirmed-active peer session `crumblr-59`, not a defect; zero
+failures regardless.)
+
+Committed/pushed: `7b15c48` on `agent/contracts`, on top of `ae7adfa`.
+`order_send` unchanged: NO-GO.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
