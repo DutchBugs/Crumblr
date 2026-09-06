@@ -623,7 +623,9 @@ class LiveDecisionOrchestrator:
         calling this every cycle needs no separate manual day-rollover
         branch at the call site."""
         recovery = session.recover_session(
-            self._session_store.load_latest(connection=connection),
+            self._session_store.load_latest(
+                canonical_symbol=self._canonical_symbol, connection=connection
+            ),
             live_equity=account_snapshot.equity,
             live_open_positions=len(self._broker_state.positions_for(account_snapshot.snapshot_id)),
             market_day=market_day,
@@ -745,6 +747,7 @@ class LiveDecisionOrchestrator:
             return
         state = session.snapshot(
             self._ledger,
+            canonical_symbol=self._canonical_symbol,
             trading_day=self._current_trading_day,
             realized_pnl=self._ledger.current_equity - self._ledger.starting_equity,
             open_risk_fraction=open_risk.fraction,

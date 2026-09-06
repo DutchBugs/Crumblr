@@ -473,7 +473,9 @@ class ExecutionOrchestrator:
         try:
             with self._risk_ledger_lock.held(self._canonical_symbol) as connection:
                 session_recovery = recover_session(
-                    self._session_store.load_latest(connection=connection),
+                    self._session_store.load_latest(
+                        canonical_symbol=self._canonical_symbol, connection=connection
+                    ),
                     live_equity=observation.account_state.equity,
                     live_open_positions=len(observation.position_states),
                     market_day=trading_day(final_now),

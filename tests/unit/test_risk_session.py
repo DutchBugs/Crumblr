@@ -37,6 +37,7 @@ RECORDED_AT = datetime(2026, 8, 17, 15, 30, tzinfo=UTC)
 def make_state(**overrides: Any) -> RiskSessionState:
     """A session that has spent 1.5% of its day: 10,000 down to 9,850."""
     fields: dict[str, Any] = {
+        "canonical_symbol": "EUR/USD",
         "trading_day": TODAY,
         "session_start_equity": Decimal("10000"),
         "current_equity": Decimal("9850"),
@@ -309,7 +310,7 @@ class TestRoundTrip:
         store = InMemoryRiskSessionStore(make_state())
 
         first = recover_session(
-            store.load_latest(),
+            store.load_latest(canonical_symbol="EUR/USD"),
             live_equity=Decimal("9850"),
             live_open_positions=0,
             market_day=TODAY,
@@ -319,6 +320,7 @@ class TestRoundTrip:
         store.save(
             snapshot(
                 first.ledger,
+                canonical_symbol="EUR/USD",
                 trading_day=TODAY,
                 realized_pnl=Decimal("-150"),
                 open_risk_fraction=Decimal("0"),
@@ -327,7 +329,7 @@ class TestRoundTrip:
             )
         )
         second = recover_session(
-            store.load_latest(),
+            store.load_latest(canonical_symbol="EUR/USD"),
             live_equity=Decimal("9850"),
             live_open_positions=0,
             market_day=TODAY,
@@ -346,7 +348,7 @@ class TestRoundTrip:
 
         for _ in range(restarts):
             recovery = recover_session(
-                store.load_latest(),
+                store.load_latest(canonical_symbol="EUR/USD"),
                 live_equity=Decimal("9850"),
                 live_open_positions=0,
                 market_day=TODAY,
@@ -357,6 +359,7 @@ class TestRoundTrip:
             store.save(
                 snapshot(
                     recovery.ledger,
+                    canonical_symbol="EUR/USD",
                     trading_day=TODAY,
                     realized_pnl=Decimal("-150"),
                     open_risk_fraction=Decimal("0"),

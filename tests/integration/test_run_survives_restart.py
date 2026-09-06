@@ -206,7 +206,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
         first = run_in_a_separate_process(tmp_path / "safety.json", slice_=FIRST_HALF)
 
         assert first["session_resumed"] is False, "there was nothing yet to resume"
-        record = PostgresRiskSessionStore(engine).load_latest()
+        record = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD")
         assert record.is_known and record.state is not None
 
     def test_a_restart_inside_the_same_session_keeps_its_baseline(
@@ -220,7 +220,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
         """
         state_file = tmp_path / "safety.json"
         first = run_in_a_separate_process(state_file, slice_=FIRST_HALF)
-        before = PostgresRiskSessionStore(engine).load_latest().state
+        before = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD").state
         assert before is not None
 
         second = run_in_a_separate_process(
@@ -240,7 +240,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
         """The daily allowance is meant to renew. The drawdown record is not."""
         state_file = tmp_path / "safety.json"
         first = run_in_a_separate_process(state_file, slice_=FIRST_HALF)
-        before = PostgresRiskSessionStore(engine).load_latest().state
+        before = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD").state
         assert before is not None
 
         second = run_in_a_separate_process(
@@ -252,7 +252,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
         assert second["session_resumed"] is True
         assert Decimal(str(second["session_start_equity"])) == Decimal(str(first["final_equity"]))
 
-        after = PostgresRiskSessionStore(engine).load_latest().state
+        after = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD").state
         assert after is not None
         assert after.trading_day > before.trading_day
         assert after.peak_equity >= before.peak_equity, "the high-water mark was lowered"
@@ -262,7 +262,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
     ) -> None:
         state_file = tmp_path / "safety.json"
         first = run_in_a_separate_process(state_file, slice_=FIRST_HALF)
-        before = PostgresRiskSessionStore(engine).load_latest().state
+        before = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD").state
         assert before is not None
 
         run_in_a_separate_process(
@@ -271,7 +271,7 @@ class TestTheRiskSessionIsPickedUpNotReset:
             balance=Decimal(str(first["final_equity"])),
         )
 
-        after = PostgresRiskSessionStore(engine).load_latest().state
+        after = PostgresRiskSessionStore(engine).load_latest(canonical_symbol="EUR/USD").state
         assert after is not None
         assert after.max_drawdown_fraction >= before.max_drawdown_fraction
         assert after.max_session_loss_fraction >= before.max_session_loss_fraction

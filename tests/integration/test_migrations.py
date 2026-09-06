@@ -22,15 +22,17 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import uuid
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from scripts.run_replay import build_instrument_spec
-from sqlalchemy import Engine, inspect
+from sqlalchemy import Engine, inspect, text
 from sqlalchemy.engine import make_url
 
 from crumblr.application.bootstrap import build_durable_runtime
@@ -51,6 +53,7 @@ from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.market_data import MarketDataStore
 from crumblr.persistence.migrations import (
     VERSION_TABLE,
+    alembic_config,
     current_revision,
     downgrade_to_base,
     head_revision,
@@ -193,6 +196,68 @@ class TestTheBaselineBuildsWhatTheCodeExpects:
             }
 
         assert from_create_all == from_migration
+
+
+class TestRiskSessionCanonicalSymbolBackfill:
+    """`8801080869a6` (Market Universe, ADR-022): `risk_session_states`
+
+    gains `canonical_symbol`. A row written before this revision has none —
+    the migration must backfill it to 'EUR/USD', the only symbol any row
+    could have been written under, then make the column NOT NULL. Also the
+    new revision's own upgrade/downgrade round-trip, matching this file's
+    existing per-migration pattern.
+    """
+
+    _PRE_MIGRATION_REVISION = "e91f4a7c2b53"
+    _THIS_REVISION = "8801080869a6"
+
+    def test_a_pre_migration_row_is_backfilled_to_eur_usd(self, empty_database: Engine) -> None:
+        config = alembic_config(TEST_URL)
+        command.upgrade(config, self._PRE_MIGRATION_REVISION)
+
+        legacy_event_id = uuid.uuid4()
+        with empty_database.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO risk_session_states ("
+                    "event_id, trading_day, session_start_equity, current_equity, "
+                    "peak_equity, realized_pnl, max_drawdown_fraction, "
+                    "max_session_loss_fraction, open_risk_fraction, open_position_count, "
+                    "occurred_at_utc, schema_version"
+                    ") VALUES ("
+                    ":event_id, :trading_day, 10000, 10000, 10000, 0, 0, 0, 0, 0, now(), 1"
+                    ")"
+                ),
+                {"event_id": legacy_event_id, "trading_day": "2026-01-06"},
+            )
+
+        command.upgrade(config, self._THIS_REVISION)
+
+        with empty_database.connect() as connection:
+            row = connection.execute(
+                text("SELECT canonical_symbol FROM risk_session_states WHERE event_id = :id"),
+                {"id": legacy_event_id},
+            ).one()
+        assert row.canonical_symbol == "EUR/USD"
+
+    def test_the_column_is_not_null_after_upgrade(self, empty_database: Engine) -> None:
+        upgrade_to_head(TEST_URL)
+
+        columns = {c["name"]: c for c in inspect(empty_database).get_columns("risk_session_states")}
+        assert columns["canonical_symbol"]["nullable"] is False
+
+    def test_downgrade_drops_the_column_and_restores_the_old_index(
+        self, empty_database: Engine
+    ) -> None:
+        config = alembic_config(TEST_URL)
+        command.upgrade(config, self._THIS_REVISION)
+
+        command.downgrade(config, self._PRE_MIGRATION_REVISION)
+
+        columns = {c["name"] for c in inspect(empty_database).get_columns("risk_session_states")}
+        assert "canonical_symbol" not in columns
+        indexes = {ix["name"] for ix in inspect(empty_database).get_indexes("risk_session_states")}
+        assert "ix_risk_session_order" in indexes
 
 
 class TestTheRuntimeUsesTheMigrations:

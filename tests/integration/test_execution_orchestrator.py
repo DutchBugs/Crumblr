@@ -758,6 +758,7 @@ class TestEndToEnd:
 
         PostgresRiskSessionStore(engine).save(
             RiskSessionState(
+                canonical_symbol="EUR/USD",
                 trading_day=trading_day(late),
                 session_start_equity=Decimal("10000"),
                 current_equity=Decimal("10000"),

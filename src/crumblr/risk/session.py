@@ -53,6 +53,11 @@ class RiskSessionState:
     Every field is something a restart must not silently improve on.
     """
 
+    canonical_symbol: str
+    """Market Universe (ADR-022): each market's ledger is independent —
+
+    a restart for one symbol must never read or seed from another's
+    recorded state. See `RiskSessionStore.load_latest()`/`.save()`."""
     trading_day: date
     session_start_equity: Decimal
     current_equity: Decimal
@@ -74,6 +79,7 @@ class RiskSessionState:
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
+            "canonical_symbol": self.canonical_symbol,
             "trading_day": self.trading_day.isoformat(),
             "session_start_equity": str(self.session_start_equity),
             "current_equity": str(self.current_equity),
@@ -120,9 +126,16 @@ class RiskSessionStore(Protocol):
     participate in that caller's already-open transaction instead of
     opening a second one, so the read/write and the advisory lock share
     one atomic scope.
+
+    `canonical_symbol` (Market Universe, ADR-022): required, not optional —
+    every ledger read/write is scoped to exactly one market, the same key
+    `RiskLedgerLock.held()` already locks on. There is no "the" risk
+    session any more, only "the risk session for this symbol."
     """
 
-    def load_latest(self, *, connection: Connection | None = None) -> SessionRecord: ...
+    def load_latest(
+        self, *, canonical_symbol: str, connection: Connection | None = None
+    ) -> SessionRecord: ...
 
     def save(self, state: RiskSessionState, *, connection: Connection | None = None) -> None: ...
 
@@ -132,18 +145,25 @@ class InMemoryRiskSessionStore:
 
     `connection` is accepted (Protocol conformance, ADR-021) and always
     ignored — there is no real transaction for an in-memory store to
-    participate in.
+    participate in. Keeps one state per `canonical_symbol` (a plain dict),
+    matching the real store's per-symbol scoping (Market Universe,
+    ADR-022) — a test seeding two markets must not have one overwrite the
+    other.
     """
 
     def __init__(self, initial: RiskSessionState | None = None) -> None:
-        self._state = initial
+        self._states: dict[str, RiskSessionState] = (
+            {} if initial is None else {initial.canonical_symbol: initial}
+        )
         self.saves = 0
 
-    def load_latest(self, *, connection: Connection | None = None) -> SessionRecord:
-        return SessionRecord(state=self._state)
+    def load_latest(
+        self, *, canonical_symbol: str, connection: Connection | None = None
+    ) -> SessionRecord:
+        return SessionRecord(state=self._states.get(canonical_symbol))
 
     def save(self, state: RiskSessionState, *, connection: Connection | None = None) -> None:
-        self._state = state
+        self._states[state.canonical_symbol] = state
         self.saves += 1
 
 
@@ -364,6 +384,7 @@ def _halt(
 def snapshot(
     ledger: EquityLedger,
     *,
+    canonical_symbol: str,
     trading_day: date,
     realized_pnl: Decimal,
     open_risk_fraction: Decimal | None,
@@ -372,6 +393,7 @@ def snapshot(
 ) -> RiskSessionState:
     """Capture the ledger as a record that a later process can resume from."""
     return RiskSessionState(
+        canonical_symbol=canonical_symbol,
         trading_day=trading_day,
         session_start_equity=ledger.session_start_equity,
         current_equity=ledger.current_equity,

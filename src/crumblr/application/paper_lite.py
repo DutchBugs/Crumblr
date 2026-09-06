@@ -708,7 +708,9 @@ class PaperLiteOrchestrator:
         # `record.is_known`/`recover_session()`).
         try:
             with self._risk_ledger_lock.held(self._assignment.canonical_symbol) as connection:
-                record = self._session_store.load_latest(connection=connection)
+                record = self._session_store.load_latest(
+                    canonical_symbol=self._assignment.canonical_symbol, connection=connection
+                )
         except Exception as error:
             _log.error("paper_lite.risk_ledger_lock_failed", error=str(error))
             self._risk_ledger = EquityLedger(starting_equity=account.equity)
@@ -798,6 +800,7 @@ class PaperLiteOrchestrator:
         self._risk_ledger.update(account.equity)
         state = session.snapshot(
             self._risk_ledger,
+            canonical_symbol=self._assignment.canonical_symbol,
             trading_day=self._risk_trading_day,
             realized_pnl=self._broker.portfolio_view().realized_profit,
             open_risk_fraction=open_risk.fraction,

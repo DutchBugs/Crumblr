@@ -560,7 +560,7 @@ class ReplayOrchestrator:
         the record it read — and halts outright when it cannot tell.
         """
         recovery = session.recover_session(
-            self._session_store.load_latest(),
+            self._session_store.load_latest(canonical_symbol=self._spec.canonical_symbol),
             live_equity=self._broker.equity,
             live_open_positions=len(self._broker.positions()),
             market_day=trading_day(first.event_time_utc),
@@ -600,6 +600,7 @@ class ReplayOrchestrator:
         )
         state = session.snapshot(
             self._ledger,
+            canonical_symbol=self._spec.canonical_symbol,
             trading_day=self._current_trading_day,
             realized_pnl=self._broker.balance - self._ledger.starting_equity,
             open_risk_fraction=open_risk.fraction,

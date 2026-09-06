@@ -262,7 +262,7 @@ class TestNoTrade:
         breach a loss gate, so recovering one would be a pointless read."""
 
         class ExplodingSessionStore(InMemoryRiskSessionStore):
-            def load_latest(self, *, connection: Any = None) -> Any:
+            def load_latest(self, *, canonical_symbol: str, connection: Any = None) -> Any:
                 raise AssertionError("must not be called for a NO_TRADE evaluation")
 
         fixture = Fixture(session_store=ExplodingSessionStore())
@@ -485,6 +485,7 @@ class TestAG012FreshSessionRecoveryEveryCall:
         session_start = equity_now / (Decimal("1") - risk.max_daily_loss - Decimal("0.01"))
         session_store = InMemoryRiskSessionStore(
             initial=RiskSessionState(
+                canonical_symbol="EUR/USD",
                 trading_day=trading_day(FIXED_NOW),
                 session_start_equity=session_start,
                 current_equity=session_start,
@@ -518,6 +519,7 @@ class TestAG012FreshSessionRecoveryEveryCall:
 
         stale_store = InMemoryRiskSessionStore(
             initial=RiskSessionState(
+                canonical_symbol="EUR/USD",
                 trading_day=trading_day(FIXED_NOW),
                 session_start_equity=Decimal("100000"),
                 current_equity=Decimal("50000"),
@@ -573,9 +575,9 @@ class ConnectionCapturingSessionStore(InMemoryRiskSessionStore):
         super().__init__()
         self.load_latest_connections: list[Any] = []
 
-    def load_latest(self, *, connection: Any = None) -> Any:
+    def load_latest(self, *, canonical_symbol: str, connection: Any = None) -> Any:
         self.load_latest_connections.append(connection)
-        return super().load_latest(connection=connection)
+        return super().load_latest(canonical_symbol=canonical_symbol, connection=connection)
 
 
 class TestAG012RiskLedgerLockAcquired:

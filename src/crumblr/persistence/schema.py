@@ -195,6 +195,7 @@ risk_session_states = Table(
     metadata,
     Column("event_id", UUID(as_uuid=True), primary_key=True),
     Column("sequence", BigInteger, Identity(always=False), nullable=False, unique=True),
+    Column("canonical_symbol", String(64), nullable=False),
     Column("trading_day", Date, nullable=False),
     # Every money column is NUMERIC. A daily-loss budget held as a float is a
     # budget that disagrees with itself by the eighth decimal, which is the
@@ -210,12 +211,14 @@ risk_session_states = Table(
     _utc_column("occurred_at_utc", nullable=False),
     _utc_column("recorded_at_utc", nullable=False, server_default=text("now()")),
     Column("schema_version", Integer, nullable=False),
-    Index("ix_risk_session_order", "sequence"),
+    Index("ix_risk_session_order", "canonical_symbol", "sequence"),
     Index("ix_risk_session_day", "trading_day", "sequence"),
 )
 """Risk-session snapshots (review F-019). Append-only, like every other record
 of something the system must not be able to forget in the permissive
-direction."""
+direction. `canonical_symbol` (Market Universe, ADR-022): each market's
+ledger is independent — `load_latest`/`save` are always scoped to one
+symbol, the same key `RiskLedgerLock.held()` already locks on."""
 
 
 config_versions = Table(

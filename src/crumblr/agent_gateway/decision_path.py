@@ -380,7 +380,7 @@ def evaluate_agent_trade_intent(
     try:
         with risk_ledger_lock.held(snapshot.symbol) as connection:
             recovery = recover_session(
-                session_store.load_latest(connection=connection),
+                session_store.load_latest(canonical_symbol=snapshot.symbol, connection=connection),
                 live_equity=portfolio.account.equity,
                 live_open_positions=len(portfolio.open_positions),
                 market_day=trading_day(now),

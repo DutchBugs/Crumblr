@@ -63,14 +63,23 @@ class PostgresRiskSessionStore:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
-    def load_latest(self, *, connection: Connection | None = None) -> SessionRecord:
+    def load_latest(
+        self, *, canonical_symbol: str, connection: Connection | None = None
+    ) -> SessionRecord:
         """`connection` (ADR-021): when given, runs inside the caller's
 
         already-open transaction (`RiskLedgerLock.held()`'s block) instead
-        of opening a second one — every other behaviour is unchanged."""
+        of opening a second one — every other behaviour is unchanged.
+
+        `canonical_symbol` (Market Universe, ADR-022): scopes the read to
+        one market's ledger — a second market's rows are invisible here,
+        by construction, not merely by convention."""
         try:
             statement = (
-                select(risk_session_states).order_by(desc(risk_session_states.c.sequence)).limit(1)
+                select(risk_session_states)
+                .where(risk_session_states.c.canonical_symbol == canonical_symbol)
+                .order_by(desc(risk_session_states.c.sequence))
+                .limit(1)
             )
             if connection is not None:
                 row = connection.execute(statement).mappings().first()
@@ -93,6 +102,7 @@ class PostgresRiskSessionStore:
         try:
             return SessionRecord(
                 state=RiskSessionState(
+                    canonical_symbol=row["canonical_symbol"],
                     trading_day=row["trading_day"],
                     session_start_equity=row["session_start_equity"],
                     current_equity=row["current_equity"],
@@ -115,6 +125,7 @@ class PostgresRiskSessionStore:
         of opening a second one."""
         statement = pg_insert(risk_session_states).values(
             event_id=uuid4(),
+            canonical_symbol=state.canonical_symbol,
             trading_day=state.trading_day,
             session_start_equity=state.session_start_equity,
             current_equity=state.current_equity,

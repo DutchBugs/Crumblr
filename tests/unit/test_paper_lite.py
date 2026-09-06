@@ -528,6 +528,7 @@ class TestPaperLiteFlow:
         expected_reason: ReasonCode,
     ) -> None:
         state = RiskSessionState(
+            canonical_symbol="EUR/USD",
             trading_day=trading_day(FIXED_NOW),
             session_start_equity=Decimal("10000"),
             current_equity=Decimal("10000"),
@@ -586,7 +587,7 @@ class TestPaperLiteFlow:
             and entry.payload["fact"] == SUPERVISOR_SKIPPED_PAPER_MODE
             for entry in broker.audit_entries
         )
-        risk_state = fixture.session_store.load_latest().state
+        risk_state = fixture.session_store.load_latest(canonical_symbol="EUR/USD").state
         assert risk_state is not None
         assert risk_state.open_position_count == 1
         assert risk_state.open_risk_fraction == broker.open_risk_assessment().fraction
