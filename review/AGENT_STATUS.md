@@ -2294,6 +2294,110 @@ here to be genuinely filter-free.
 
 ---
 
+## 0af. Multi-market Agent/Assignment scope — done 2026-09-06
+
+Owner direction: "Crumblr bepaalt de toegestane markten. De Agent kiest
+binnen die toegestane universe waar hij wil handelen." Made the
+external-Agent route multi-market-capable without making Core
+strategy-specific, without touching `crumblr-static-agent-host` at all
+(StrategyArtifact 6.0's EUR/USD/M5 scoping stays exactly as-is — a new
+market is a new StrategyArtifact version's job, never a silent change to
+this one's hash).
+
+**Found already mostly in place, not built from scratch:**
+`TradingAssignment` (`agent_gateway/contracts.py`) already names one
+`canonical_symbol`/`timeframe` pair per assignment, and both
+`InMemoryTradingAssignmentStore`/`PostgresTradingAssignmentStore` were
+already keyed purely by `assignment_id` — nothing structurally prevented
+one agent holding several assignments across different markets. What was
+actually missing: (1) no enforced uniqueness invariant — two different
+`assignment_id`s could silently cover the same
+`(agent, symbol, timeframe)` with overlapping validity, making "which
+assignment currently governs this market for this agent" ambiguous; (2)
+no way to enumerate an agent's own approved-market universe at all —
+`current(assignment_id)` requires the caller to already know every id in
+advance, `for_agent(agent_id)` did not exist.
+
+**Built:**
+- New `AssignmentScopeConflictError` (`agent_gateway/errors.py`),
+  distinct from the existing `AssignmentConflictError` (same id,
+  different content) — this one is a *different* id colliding with an
+  existing one's `(agent, symbol, timeframe, validity window)` scope.
+- `TradingAssignmentStore.for_agent(agent_id) -> tuple[TradingAssignment,
+  ...]` on both implementations — the enumeration Crumblr's own
+  orchestration needs to know "what markets is this agent approved for"
+  before building one `AgentMarketContextV1` per approved market and
+  calling the Agent once per market (nothing about *that* dispatch loop
+  needed building — `build_agent_market_context_v1`/`HttpNeutralAgentClient
+  .decide()` already take one assignment/context at a time; multi-market
+  is "call it once per active assignment," a caller-side loop, not a new
+  contract shape).
+- Uniqueness enforced in `InMemoryTradingAssignmentStore.register()`
+  (in-process) and `PostgresTradingAssignmentStore.register()` (reads
+  back candidate rows by the already-indexed `(allowed_agent_id,
+  canonical_symbol)` columns inside the same transaction as the insert,
+  deserializes and checks `timeframe`/validity-window overlap in Python —
+  `timeframe` lives only in the JSONB `payload` today, no migration added
+  for a rare, operator-driven table). Disclosed, not fully race-free
+  under concurrent registration of the same market (no advisory lock
+  here, unlike the proposal-claim path) — acceptable for an
+  operator-driven action, not a high-frequency hot path.
+- Confirmed the *same* agent registering assignments for different
+  markets, or different timeframes of the same market, never conflicts;
+  confirmed a different agent may hold an assignment for the identical
+  market/timeframe (scope is per-agent); confirmed a non-overlapping
+  hand-off (old assignment expires, new one starts exactly then) is not
+  a conflict — the invariant is about simultaneity, not exclusivity over
+  all time.
+
+**Found and disclosed, not fixed (AG-025, `review/AGENT_FEEDBACK.md`,
+new, OPEN):** `decision_path.py::evaluate_agent_trade_intent()`'s own
+`assess_open_risk(..., specs={spec.broker_symbol: spec}, ...)` passes
+only the *current call's* single instrument spec — documented at the
+time as "correct today because the platform is single-instrument."
+`risk/portfolio_risk.py::assess_open_risk()` itself already handles
+multiple instruments safely (a position with no matching spec becomes
+`untrusted`, never silently skipped — Dev-1-owned, needs no change), but
+with two markets now assignable to one agent, a position open in a
+*different* symbol than the one being evaluated has no spec in that
+dict and falls into the `untrusted` bucket, likely tripping Risk's
+existing `OPEN_RISK_UNKNOWN` fail-closed handling. Safe failure mode —
+under-permits, never under-counts risk — but blocks genuine concurrent
+multi-market trading until fixed. Not fixed this pass: the real fix needs
+this function's caller to source specs for *every* open instrument, not
+only the one being evaluated, which is a broader question moot today (no
+second `StrategyArtifact`/Agent runtime exists yet to actually open a
+second-market position).
+
+**Instrument-neutral pip/price normalization — explicitly out of scope
+this pass, by design.** The owner's own example (BTCUSD's 2-digit
+quoting must not be forced through the EUR/USD 4/5-digit
+`pip_size_for_digits()` in `crumblr-static-agent-host`) is a warning for
+whenever a real second-market `StrategyArtifact` gets built, not an
+instruction to build one now — "verwijder EUR/USD/M5-hardcoding alleen
+via een nieuwe StrategyArtifact-versie" is explicit that StrategyArtifact
+6.0 keeps its EUR/USD/M5 scoping unchanged. Nothing in the external repo
+was touched this pass.
+
+**Evidence:** 7 new unit tests
+(`tests/unit/test_agent_gateway.py::TestTradingAssignmentStoreMultiMarket`)
++ 3 new integration tests against real PostgreSQL
+(`tests/integration/test_agent_gateway_store.py
+::TestTradingAssignmentStoreMultiMarketAgainstRealPostgres`), all
+passing. Full non-integration suite: **1231 passed, 1 pre-existing skip**
+(was 1224 before this slice — net +7, matching the new unit tests
+exactly, zero regressions). Full integration suite run in progress at
+write time; ruff/ruff format/mypy all clean on every changed file.
+
+**Not yet done, still open:** AG-025 above; the actual orchestration loop
+that calls `for_agent()` and dispatches one `AgentMarketContextV1` per
+approved market does not exist yet (no real second-market Agent runtime
+to dispatch to) — the store-level capability this pass built is what
+such a loop would need, not the loop itself. `order_send` unchanged:
+NO-GO.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |

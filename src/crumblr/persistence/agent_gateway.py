@@ -38,12 +38,17 @@ from crumblr.agent_gateway.contracts import (
 )
 from crumblr.agent_gateway.errors import (
     AssignmentConflictError,
+    AssignmentScopeConflictError,
     ContextConflictError,
     DecisionConflictError,
     EventConflictError,
 )
 from crumblr.agent_gateway.events import AgentDecisionEventType, AgentOutcomeType
-from crumblr.agent_gateway.stores import AgentDecisionEventRecord, OutcomeClaimResult
+from crumblr.agent_gateway.stores import (
+    AgentDecisionEventRecord,
+    OutcomeClaimResult,
+    validity_windows_overlap,
+)
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.persistence.schema import (
@@ -141,6 +146,38 @@ class PostgresTradingAssignmentStore:
             .returning(agent_trading_assignments.c.assignment_id)
         )
         with self._engine.begin() as connection:
+            # One immutable assignment per (agent, symbol, timeframe) at a
+            # time (owner direction 2026-09-06) -- checked inside the same
+            # transaction as the insert. `canonical_symbol`/`allowed_agent_id`
+            # are indexed columns; `timeframe` lives only in `payload` today
+            # (no migration for a rarely-written, operator-driven table),
+            # so the narrow candidate set from those two columns is
+            # deserialized and filtered in Python, reusing the exact same
+            # overlap check `InMemoryTradingAssignmentStore` uses. Not
+            # fully race-free under concurrent registration of the same
+            # market (no advisory lock here, unlike the proposal-claim
+            # path) -- acceptable for a rare, operator-driven action, not a
+            # high-frequency hot path.
+            candidates = connection.execute(
+                select(agent_trading_assignments.c.payload).where(
+                    agent_trading_assignments.c.allowed_agent_id == assignment.allowed_agent_id,
+                    agent_trading_assignments.c.canonical_symbol == assignment.canonical_symbol,
+                    agent_trading_assignments.c.assignment_id != assignment.assignment_id,
+                )
+            ).scalars()
+            for candidate_payload in candidates:
+                other = TradingAssignment.model_validate(candidate_payload)
+                if other.timeframe == assignment.timeframe and validity_windows_overlap(
+                    other, assignment
+                ):
+                    raise AssignmentScopeConflictError(
+                        f"assignment_id {assignment.assignment_id} conflicts with "
+                        f"already-registered assignment_id {other.assignment_id}: both "
+                        f"cover agent {assignment.allowed_agent_id}, "
+                        f"{assignment.canonical_symbol} {assignment.timeframe}, with "
+                        "overlapping validity windows"
+                    )
+
             won = connection.execute(statement).first() is not None
             if won:
                 return
@@ -164,6 +201,14 @@ class PostgresTradingAssignmentStore:
         if row is None:
             return None
         return TradingAssignment.model_validate(row[0])
+
+    def for_agent(self, agent_id: UUID) -> tuple[TradingAssignment, ...]:
+        statement = select(agent_trading_assignments.c.payload).where(
+            agent_trading_assignments.c.allowed_agent_id == agent_id
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).scalars().all()
+        return tuple(TradingAssignment.model_validate(row) for row in rows)
 
 
 class PostgresDecisionContextBundleStore:

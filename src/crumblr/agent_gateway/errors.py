@@ -61,6 +61,21 @@ class AssignmentConflictError(AgentGatewayError):
     """The same `assignment_id` was already registered with different content."""
 
 
+class AssignmentScopeConflictError(AgentGatewayError):
+    """A *different* `assignment_id` already covers this
+    `(allowed_agent_id, canonical_symbol, timeframe)` triple with an
+    overlapping validity window.
+
+    One immutable assignment per agent/market/timeframe is the invariant
+    that makes "which assignment currently governs this agent's proposals
+    for this market" unambiguous — the same agent may hold many
+    assignments across *different* markets/timeframes (multi-market by
+    design), but never two simultaneously-valid assignments for the same
+    one. Distinct from `AssignmentConflictError`, which is about
+    re-registering one `assignment_id` with different content, not a
+    second `assignment_id` colliding with the first one's scope."""
+
+
 class ContextConflictError(AgentGatewayError):
     """The same `context_id` was already issued with different content."""
 

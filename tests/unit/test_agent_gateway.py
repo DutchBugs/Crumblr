@@ -34,6 +34,8 @@ from crumblr.agent_gateway.contracts import (
 from crumblr.agent_gateway.errors import (
     AgentNotActiveError,
     AgentRejectionReason,
+    AssignmentConflictError,
+    AssignmentScopeConflictError,
     AuthenticationError,
     DecisionConflictError,
     ImpersonationError,
@@ -331,6 +333,120 @@ class TestAssignmentScope:
         events = outcomes.events_for(rejected.outcome_id)
         assert any(event.event_type is AgentDecisionEventType.REJECTED for event in events)
         assert any(event.event_type is AgentDecisionEventType.RECEIVED for event in events)
+
+
+class TestTradingAssignmentStoreMultiMarket:
+    """Owner direction 2026-09-06: "Crumblr bepaalt de toegestane markten,
+    de Agent kiest binnen die toegestane universe waar hij wil handelen."
+    One agent may hold many simultaneously-valid assignments across
+    *different* markets/timeframes; never two for the same one."""
+
+    def test_the_same_agent_may_hold_assignments_for_different_markets(self) -> None:
+        store = InMemoryTradingAssignmentStore()
+        eurusd = assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+        gbpusd = assignment(assignment_id=uuid4(), canonical_symbol="GBP/USD", timeframe="M5")
+        same_symbol_different_timeframe = assignment(
+            assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M15"
+        )
+
+        store.register(eurusd)
+        store.register(gbpusd)
+        store.register(same_symbol_different_timeframe)
+
+        held = {a.assignment_id for a in store.for_agent(AGENT_ID)}
+        assert held == {
+            eurusd.assignment_id,
+            gbpusd.assignment_id,
+            same_symbol_different_timeframe.assignment_id,
+        }
+
+    def test_a_second_assignment_for_the_same_agent_market_and_timeframe_is_refused(
+        self,
+    ) -> None:
+        store = InMemoryTradingAssignmentStore()
+        store.register(
+            assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+        )
+
+        with pytest.raises(AssignmentScopeConflictError):
+            store.register(
+                assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+            )
+
+    def test_a_replacement_assignment_starting_only_after_the_old_one_expires_is_not_a_conflict(
+        self,
+    ) -> None:
+        """Non-overlapping validity windows for the same market are a
+        legitimate hand-off, not ambiguity about "which assignment applies
+        right now" -- the invariant is about simultaneity, not exclusivity
+        over all time."""
+        store = InMemoryTradingAssignmentStore()
+        first = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW - timedelta(days=30),
+            valid_until_utc=FIXED_NOW,
+        )
+        second = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW,
+            valid_until_utc=FIXED_NOW + timedelta(days=30),
+        )
+        store.register(first)
+        store.register(second)  # must not raise
+
+        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
+            first.assignment_id,
+            second.assignment_id,
+        }
+
+    def test_re_registering_the_identical_assignment_is_a_safe_no_op_not_a_scope_conflict(
+        self,
+    ) -> None:
+        store = InMemoryTradingAssignmentStore()
+        one = assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+        store.register(one)
+        store.register(one)  # identical retry -- must not raise either error
+
+        assert store.for_agent(AGENT_ID) == (one,)
+
+    def test_re_registering_the_same_assignment_id_with_different_content_is_a_content_conflict(
+        self,
+    ) -> None:
+        """Distinct from AssignmentScopeConflictError: this is the same
+        assignment_id being redefined, not a second id colliding with the
+        first one's scope."""
+        store = InMemoryTradingAssignmentStore()
+        assignment_id = uuid4()
+        store.register(assignment(assignment_id=assignment_id, canonical_symbol="EUR/USD"))
+
+        with pytest.raises(AssignmentConflictError):
+            store.register(assignment(assignment_id=assignment_id, canonical_symbol="GBP/USD"))
+
+    def test_a_different_agent_may_hold_an_assignment_for_the_same_market_and_timeframe(
+        self,
+    ) -> None:
+        store = InMemoryTradingAssignmentStore()
+        store.register(
+            assignment(assignment_id=uuid4(), allowed_agent_id=AGENT_ID, canonical_symbol="EUR/USD")
+        )
+        other_agent = uuid4()
+
+        store.register(  # must not raise -- scope is per-agent
+            assignment(
+                assignment_id=uuid4(), allowed_agent_id=other_agent, canonical_symbol="EUR/USD"
+            )
+        )
+
+        assert len(store.for_agent(AGENT_ID)) == 1
+        assert len(store.for_agent(other_agent)) == 1
+
+    def test_for_agent_is_empty_for_an_agent_with_no_assignments(self) -> None:
+        store = InMemoryTradingAssignmentStore()
+        assert store.for_agent(uuid4()) == ()
 
 
 class TestStrategyArtifactBinding:

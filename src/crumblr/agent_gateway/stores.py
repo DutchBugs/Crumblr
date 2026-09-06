@@ -42,6 +42,7 @@ from crumblr.agent_gateway.contracts import (
 )
 from crumblr.agent_gateway.errors import (
     AssignmentConflictError,
+    AssignmentScopeConflictError,
     ContextConflictError,
     DecisionConflictError,
     EventConflictError,
@@ -109,6 +110,39 @@ class InMemoryAgentCredentialStore:
 class TradingAssignmentStore(Protocol):
     def register(self, assignment: TradingAssignment) -> None: ...
     def current(self, assignment_id: UUID) -> TradingAssignment | None: ...
+    def for_agent(self, agent_id: UUID) -> tuple[TradingAssignment, ...]: ...
+
+
+def validity_windows_overlap(a: TradingAssignment, b: TradingAssignment) -> bool:
+    return a.valid_from_utc < b.valid_until_utc and b.valid_from_utc < a.valid_until_utc
+
+
+def _check_scope_conflict(
+    new: TradingAssignment, others: Iterator[TradingAssignment]
+) -> None:
+    """One immutable assignment per `(allowed_agent_id, canonical_symbol,
+    timeframe)` at any moment — the invariant that makes "which assignment
+    currently governs this agent's proposals for this market" unambiguous.
+    The same agent may hold many assignments across *different* markets or
+    timeframes (multi-market by design, owner direction 2026-09-06:
+    "Crumblr bepaalt de toegestane markten, de Agent kiest binnen die
+    toegestane universe") — never two simultaneously-valid ones for the
+    same market."""
+    for other in others:
+        if other.assignment_id == new.assignment_id:
+            continue
+        if (
+            other.allowed_agent_id == new.allowed_agent_id
+            and other.canonical_symbol == new.canonical_symbol
+            and other.timeframe == new.timeframe
+            and validity_windows_overlap(other, new)
+        ):
+            raise AssignmentScopeConflictError(
+                f"assignment_id {new.assignment_id} conflicts with already-registered "
+                f"assignment_id {other.assignment_id}: both cover agent "
+                f"{new.allowed_agent_id}, {new.canonical_symbol} {new.timeframe}, "
+                "with overlapping validity windows"
+            )
 
 
 class InMemoryTradingAssignmentStore:
@@ -126,10 +160,14 @@ class InMemoryTradingAssignmentStore:
                     "with different content"
                 )
             return
+        _check_scope_conflict(assignment, iter(self._by_id.values()))
         self._by_id[assignment.assignment_id] = assignment
 
     def current(self, assignment_id: UUID) -> TradingAssignment | None:
         return self._by_id.get(assignment_id)
+
+    def for_agent(self, agent_id: UUID) -> tuple[TradingAssignment, ...]:
+        return tuple(a for a in self._by_id.values() if a.allowed_agent_id == agent_id)
 
 
 # --------------------------------------------------------------------------- #

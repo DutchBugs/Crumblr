@@ -35,6 +35,7 @@ from crumblr.agent_gateway.contracts import (
 )
 from crumblr.agent_gateway.errors import (
     AgentRejectionReason,
+    AssignmentScopeConflictError,
     DecisionConflictError,
     EventConflictError,
     UnknownFeatureSnapshotError,
@@ -259,6 +260,64 @@ class TestBasicRoundTrip:
         # is a real durable row, not process-local state.
         events = PostgresAgentDecisionOutcomeStore(engine).events_for(result.outcome_id)
         assert len(events) == 2  # RECEIVED, then REJECTED
+
+
+class TestTradingAssignmentStoreMultiMarketAgainstRealPostgres:
+    """`PostgresTradingAssignmentStore`'s scope-conflict check (owner
+    direction 2026-09-06) reads back existing rows to catch a conflict --
+    proving that reasoning against a real database, not only in-memory."""
+
+    def test_the_same_agent_may_hold_assignments_for_different_markets(
+        self, engine: Engine
+    ) -> None:
+        store = PostgresTradingAssignmentStore(engine)
+        eurusd = assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+        gbpusd = assignment(assignment_id=uuid4(), canonical_symbol="GBP/USD", timeframe="M5")
+
+        store.register(eurusd)
+        store.register(gbpusd)
+
+        held = {a.assignment_id for a in store.for_agent(AGENT_ID)}
+        assert held == {eurusd.assignment_id, gbpusd.assignment_id}
+
+    def test_a_second_assignment_for_the_same_agent_market_and_timeframe_is_refused(
+        self, engine: Engine
+    ) -> None:
+        store = PostgresTradingAssignmentStore(engine)
+        store.register(
+            assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+        )
+
+        with pytest.raises(AssignmentScopeConflictError):
+            store.register(
+                assignment(assignment_id=uuid4(), canonical_symbol="EUR/USD", timeframe="M5")
+            )
+
+    def test_a_replacement_assignment_after_the_old_one_expires_is_not_a_conflict(
+        self, engine: Engine
+    ) -> None:
+        store = PostgresTradingAssignmentStore(engine)
+        first = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW - timedelta(days=30),
+            valid_until_utc=FIXED_NOW,
+        )
+        second = assignment(
+            assignment_id=uuid4(),
+            canonical_symbol="EUR/USD",
+            timeframe="M5",
+            valid_from_utc=FIXED_NOW,
+            valid_until_utc=FIXED_NOW + timedelta(days=30),
+        )
+        store.register(first)
+        store.register(second)  # must not raise
+
+        assert {a.assignment_id for a in store.for_agent(AGENT_ID)} == {
+            first.assignment_id,
+            second.assignment_id,
+        }
 
 
 class TestRestartSafety:
