@@ -27,7 +27,7 @@ from crumblr.agent_gateway.contracts import (
     ChampionShadowStatus,
     TradingAssignment,
 )
-from crumblr.config import AccountGuardConfig, RiskConfig
+from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
 from crumblr.dashboard.app import create_app
 from crumblr.domain.enums import (
     BarOrigin,
@@ -75,6 +75,15 @@ RISK_CONFIG = RiskConfig.model_validate(
         "min_stop_distance_points": 50,
     }
 )
+# All four named execution gates default `False` -- matches every shipped config.
+EXECUTION_CONFIG = ExecutionConfig.model_validate(
+    {
+        "max_spread_points": 30,
+        "max_market_data_age_ms": 5000,
+        "order_timeout_ms": 5000,
+        "max_slippage_points": 20,
+    }
+)
 SYMBOL = "EUR/USD"
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -85,11 +94,15 @@ def client(
     *,
     agent_assignment_id: UUID | None = None,
     paper_lite_journal_path: Path | None = None,
+    execution_config: ExecutionConfig = EXECUTION_CONFIG,
+    live_trading_acknowledged: bool = False,
 ) -> TestClient:
     app = create_app(
         engine=engine,
         guard=GUARD,
         risk_config=RISK_CONFIG,
+        execution_config=execution_config,
+        live_trading_acknowledged=live_trading_acknowledged,
         environment=Environment.PAPER,
         canonical_symbol=SYMBOL,
         timeframe="M5",
@@ -108,6 +121,8 @@ class TestReadOnlyBoundary:
             engine=engine,
             guard=GUARD,
             risk_config=RISK_CONFIG,
+            execution_config=EXECUTION_CONFIG,
+            live_trading_acknowledged=False,
             environment=Environment.PAPER,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -398,6 +413,8 @@ class TestF043PresentationStates:
             engine=unreachable,
             guard=GUARD,
             risk_config=RISK_CONFIG,
+            execution_config=EXECUTION_CONFIG,
+            live_trading_acknowledged=False,
             environment=Environment.PAPER,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -455,6 +472,8 @@ class TestF045EnvironmentBadgeIsNotMisreadAsACampaign:
             engine=engine,
             guard=GUARD,
             risk_config=RISK_CONFIG,
+            execution_config=EXECUTION_CONFIG,
+            live_trading_acknowledged=False,
             environment=Environment.SHADOW,
             canonical_symbol=SYMBOL,
             timeframe="M5",
@@ -680,14 +699,55 @@ class TestRiskPanelRendersInTheUi:
         assert body["risk_panel"]["current_drawdown"] == "—"
 
 
-class TestExecutionIsAlwaysDisabled:
-    def test_the_header_card_and_pipeline_say_disabled(
+class TestExecutionGateIsReallyDerivedNotHardcoded:
+    """Review feedback, second pass: the Execution card must be derived
+
+    from the real execution-gate config, not a fixed template literal."""
+
+    def test_default_config_shows_disabled_with_the_real_closed_gates(
         self, engine: Engine, tmp_path: Path
     ) -> None:
         response = client(engine, tmp_path / "health.json").get("/")
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
 
-        assert "real order_send is globally unreachable" in response.text
         assert "no order_send path exists in this build" in response.text
+        assert body["execution_gate"]["disabled"] is True
+        assert set(body["execution_gate"]["closed_gates"]) == {
+            "submission_enabled",
+            "feedback_2_0_approved",
+            "flatten_submission_enabled",
+            "live_trading_acknowledged",
+        }
+        assert "DISABLED" in response.text
+
+    def test_all_four_gates_open_no_longer_says_disabled(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        all_open = ExecutionConfig.model_validate(
+            {
+                "max_spread_points": 30,
+                "max_market_data_age_ms": 5000,
+                "order_timeout_ms": 5000,
+                "max_slippage_points": 20,
+                "submission_enabled": True,
+                "feedback_2_0_approved": True,
+                "flatten_submission_enabled": True,
+            }
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                execution_config=all_open,
+                live_trading_acknowledged=True,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["execution_gate"]["disabled"] is False
+        assert body["execution_gate"]["closed_gates"] == []
 
 
 class TestPaperLiteJournalActivity:
@@ -729,6 +789,40 @@ class TestPaperLiteJournalActivity:
         assert len(body["paper_lite_activity"]) == 1
         assert body["paper_lite_activity"][0]["event_type"] == "PAPER_LITE_SESSION_BLOCKED"
         assert body["paper_lite_activity"][0]["detail"] == "CLOSED"
+
+
+class TestCorruptJournalDegradesVisibly:
+    """Review feedback, second pass: an unreadable PAPER_LITE journal line
+
+    must never be silently skipped and then presented as a confident
+    outcome — it must render `DEGRADED`, visibly, even when a real,
+    otherwise-complete outcome exists underneath it."""
+
+    def test_a_corrupt_line_reports_degraded_even_with_a_real_outcome_present(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        assignment_id = _register_active_assignment(engine)
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        journal_path.write_text(
+            '{"sequence": 0, "event_type": "PORTFOLIO_CREATED", "payload": {}}\n'
+            '{"sequence": 1, "event_type": "AUDIT_FACT", "payl',
+            encoding="utf-8",
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                agent_assignment_id=assignment_id,
+                paper_lite_journal_path=journal_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["last_decision"] is not None
+        assert body["last_decision"]["platform_outcome"] == "DEGRADED"
+        assert body["agent_health"] == "UNKNOWN"
 
 
 class TestNoSecretsAnywhereInTheResponse:

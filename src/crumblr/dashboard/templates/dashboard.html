@@ -189,7 +189,6 @@
   /* ---- Last decision card ---- */
   .last-decision-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
   .last-decision-outcome { font-size: 1.5em; font-weight: 700; }
-  .last-decision-inferred { font-size: 0.75em; color: var(--text-faint); font-weight: 400; }
   .proposal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
   @media (max-width: 700px) { .proposal-grid { grid-template-columns: 1fr 1fr; } }
 
@@ -302,11 +301,17 @@
 
       <div class="card status-card">
         <div class="label">Execution</div>
-        <div class="state bad">
-          <span class="dot bad"></span>
-          DISABLED
+        <div class="state {{ ('DISABLED' if state.execution_gate.disabled else 'ACTIVE') | state_class }}">
+          <span class="dot {{ ('DISABLED' if state.execution_gate.disabled else 'ACTIVE') | state_class }}"></span>
+          {{ "DISABLED" if state.execution_gate.disabled else "GATES OPEN" }}
         </div>
-        <div class="sub">real order_send is globally unreachable</div>
+        <div class="sub">
+          {% if state.execution_gate.disabled %}
+            closed: {{ state.execution_gate.closed_gates | join(", ") }}
+          {% else %}
+            all four submission gates read `True` — real order_send path wiring is a separate, structural fact this card does not assert
+          {% endif %}
+        </div>
       </div>
     </div>
   </div>
@@ -438,7 +443,7 @@
         {% if state.last_decision and state.last_decision.proposal %}
         <div class="stage-verdict good">TRADE_PROPOSAL</div>
         <div class="stage-detail">{{ state.last_decision.proposal.side }}</div>
-        {% elif state.last_decision %}
+        {% elif state.last_decision and state.last_decision.platform_outcome == "NO_TRADE" %}
         <div class="stage-verdict neutral">NO_TRADE</div>
         <div class="stage-detail">normal strategy result</div>
         {% else %}
@@ -449,7 +454,10 @@
       <div class="pipeline-card">
         <div class="stage-name">Agent Gateway</div>
         {% if state.last_decision and state.last_decision.platform_outcome == "GATEWAY_REJECTED" %}
-        <div class="stage-verdict bad">REJECTED{% if state.last_decision.inferred %} (inferred){% endif %}</div>
+        <div class="stage-verdict bad">REJECTED</div>
+        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
+        {% elif state.last_decision and state.last_decision.platform_outcome in ("DEGRADED", "AWAITING_EVIDENCE") %}
+        <div class="stage-verdict {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</div>
         <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
         {% elif state.last_decision %}
         <div class="stage-verdict good">ACCEPTED</div>
@@ -517,9 +525,6 @@
       <div class="last-decision-head">
         <div>
           <span class="last-decision-outcome {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</span>
-          {% if state.last_decision.inferred %}
-          <span class="last-decision-inferred">(inferred — {{ state.last_decision.platform_outcome_detail }})</span>
-          {% endif %}
         </div>
         <div class="muted">{{ state.last_decision.occurred_at_utc or "—" }}</div>
       </div>
@@ -677,7 +682,7 @@
   // Mirrors app.py's state_class() — kept intentionally tiny and duplicated
   // rather than fetched, so a refresh never depends on a second request.
   var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1 };
-  var WARN = { STALE: 1, UNCALIBRATED: 1, DEGRADED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1 };
+  var WARN = { STALE: 1, UNCALIBRATED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1, AWAITING_EVIDENCE: 1 };
   function stateClass(value) {
     var v = (value || "").toUpperCase();
     if (GOOD[v]) return "good";

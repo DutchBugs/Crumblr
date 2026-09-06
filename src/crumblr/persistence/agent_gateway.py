@@ -488,3 +488,17 @@ class PostgresAgentDecisionOutcomeStore:
             reason_codes=tuple(row["reason_codes"]),
             detail=row["detail"],
         )
+
+    def latest_outcome_id_for(self, assignment_id: UUID) -> UUID | None:
+        statement = (
+            select(agent_decision_outcomes.c.outcome_id)
+            .where(agent_decision_outcomes.c.assignment_id == assignment_id)
+            .order_by(
+                desc(agent_decision_outcomes.c.claimed_at_utc),
+                desc(agent_decision_outcomes.c.sequence),
+            )
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).first()
+        return None if row is None else row[0]

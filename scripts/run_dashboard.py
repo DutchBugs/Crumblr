@@ -69,6 +69,8 @@ def main() -> int:
         engine=engine,
         guard=config.account_guard,
         risk_config=config.risk,
+        execution_config=config.execution,
+        live_trading_acknowledged=config.live_trading_acknowledged,
         environment=Environment(args.environment),
         canonical_symbol=args.canonical_symbol,
         timeframe=args.timeframe,
