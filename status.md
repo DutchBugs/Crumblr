@@ -11213,6 +11213,70 @@ Next: owner re-review of the corrective commit.
 
 ---
 
+## Update 2026-09-06 (third corrective commit) — SUSPENDED/RETIRED read UNKNOWN, a recent GATEWAY_REJECTED never HEALTHY, Execution "gates open" renders neutral
+
+Owner reviewed `78f42c5`: **"inhoudelijk sterk, de zes oorspronkelijke
+findings zijn opgelost"** — the six findings from the second review are
+confirmed closed, unchanged here. Three small, precise findings remained
+before merge, all addressed:
+
+1. **`SUSPENDED`/`RETIRED` no longer read `NOT PROVISIONED`.**
+   `NOT PROVISIONED` falsely implies "nothing is configured" — the
+   assignment *is* active here; the agent itself was deliberately
+   suspended or retired. `build_agent_health` now returns `UNKNOWN` for
+   both, reusing the fixed four-value vocabulary rather than inventing a
+   fifth state — the Agent panel's own `agent_status` field already
+   carries the precise `SUSPENDED`/`RETIRED` distinction for anyone who
+   needs it.
+2. **A recent `GATEWAY_REJECTED` can no longer read `HEALTHY`.** The
+   previous version only checked recency, not what the recent decision
+   actually was — a real, current rejection is not evidence the Agent is
+   operating normally. New `_NEVER_HEALTHY_OUTCOMES = {"DEGRADED",
+   "GATEWAY_REJECTED"}` short-circuits to `UNKNOWN` before the staleness
+   check runs. Deliberately narrow: `RISK_BLOCKED`/`POLICY_BLOCKED`/
+   `SESSION_BLOCKED`/`PAPER_ORDER_CHECK_BLOCKED` are *not* added to this
+   set — those mean the platform's own downstream gates correctly
+   evaluated and vetoed a proposal, which is evidence the pipeline is
+   working, not that the Agent integration itself is broken (the specific
+   distinction `GATEWAY_REJECTED` names: rejected before Risk/Policy ever
+   saw it).
+3. **Execution card no longer renders green when all four config gates
+   are open.** The label already correctly said something other than
+   `DISABLED`; the *colour* was piggybacking on the literal string
+   `"ACTIVE"` purely to get `good`/green styling, which visually implied
+   "safe" when open config gates alone are not proof real `order_send` is
+   reachable (the adapter's own orchestrator wiring is a separate,
+   structural fact — still true regardless of these four flags). Now
+   renders the literal outcome `"CONFIG GATES OPEN"`, added to `app.py`'s
+   `_WARN_STATES` (neutral/amber), never `_GOOD_STATES`.
+
+New regression tests: `SUSPENDED`/`RETIRED` assert `== "UNKNOWN"`
+(previously asserted `== "NOT PROVISIONED"`, updated in place rather than
+left contradicting the fix); a recent real `GATEWAY_REJECTED` settlement
+asserts `build_agent_health(...) != "HEALTHY"`; the all-gates-open HTML
+response asserts the Execution card's classes contain `warn`, never
+`good`; a direct `state_class("CONFIG GATES OPEN") == "warn"` /
+`state_class("DISABLED") == "bad"` check.
+
+No change to `PAPER_FILLED` scope — the owner explicitly confirmed
+`AWAITING_OUTCOME` stays correct until PAPER_LITE persists a real
+outcome_id/correlation_id on the fill event itself (Dev-2/Dev-3 owned,
+still out of this branch's scope).
+
+Evidence: `uv run ruff check .`/`ruff format --check .` clean, `uv run
+mypy` clean (203 source files, no new modules — this pass is behavioural
+fixes only, no new files). Dashboard-specific subset: **72 passed, 0
+failed**. Full suite, isolated run: **1529 passed, 3 skipped, 0 failed**,
+real PostgreSQL against `crumblr_test_dev1`.
+
+Decision: new commit on the same branch, pushed to
+`origin/dev1/dashboard-current-state`, **still not merged** — stopping for
+owner re-review per the same standing instruction.
+
+Next: owner re-review of the third corrective commit.
+
+---
+
 # 14. Update template
 
 Copy this block whenever meaningful progress occurs.

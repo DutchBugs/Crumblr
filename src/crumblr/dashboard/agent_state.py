@@ -343,6 +343,20 @@ def build_last_decision(
     )
 
 
+_NEVER_HEALTHY_OUTCOMES = frozenset({"DEGRADED", "GATEWAY_REJECTED"})
+"""Recent evidence of either of these must never read as `HEALTHY` — a
+
+`DEGRADED` read means the evidence itself cannot be trusted, and a recent
+`GATEWAY_REJECTED` means the Agent's own proposal/no-trade claim was
+rejected before Risk/Policy ever saw it (stale context, unknown
+assignment, rate limit, malformed evidence) — a real integration problem
+with the Agent side specifically, unlike `RISK_BLOCKED`/`POLICY_BLOCKED`/
+etc., which mean the platform's own downstream gates correctly evaluated
+and vetoed a proposal — evidence the pipeline *is* working, not that it
+isn't. Review feedback (third pass): the first version of this function
+only checked recency, so a recent rejection could still read `HEALTHY`."""
+
+
 def build_agent_health(
     *,
     agent_panel: AgentPanelState | None,
@@ -357,11 +371,15 @@ def build_agent_health(
         # for -- a real inconsistency, not merely "no evidence yet".
         return "UNKNOWN"
     if agent_panel.agent_status != "ACTIVE":
-        # SUSPENDED / RETIRED -- a known, deliberate non-active state.
-        # Never green, and distinct from "identity missing entirely".
-        return "NOT PROVISIONED"
-    if last_decision is not None and last_decision.platform_outcome == "DEGRADED":
-        # Cannot trust the evidence used to judge recency below.
+        # SUSPENDED / RETIRED -- a known, deliberate non-active state, but
+        # still reported as UNKNOWN rather than a bespoke label (review
+        # feedback, third pass: "NOT PROVISIONED" reads as "nothing is
+        # configured," which is false here — an assignment *is* active,
+        # the agent itself is the one deliberately disabled). Never green
+        # either way; the Agent panel's own `agent_status` field carries
+        # the precise SUSPENDED/RETIRED distinction for anyone who needs it.
+        return "UNKNOWN"
+    if last_decision is not None and last_decision.platform_outcome in _NEVER_HEALTHY_OUTCOMES:
         return "UNKNOWN"
     if last_decision is None or last_decision.occurred_at_utc is None:
         return "WAITING"

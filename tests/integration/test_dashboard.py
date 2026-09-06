@@ -749,6 +749,47 @@ class TestExecutionGateIsReallyDerivedNotHardcoded:
         assert body["execution_gate"]["disabled"] is False
         assert body["execution_gate"]["closed_gates"] == []
 
+    def test_all_four_gates_open_renders_neutral_not_green(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """Review feedback (third pass): all four config gates reading
+
+        `True` is not proof real `order_send` is reachable (the execution
+        adapter's own wiring is a separate, structural fact) — the card
+        must render as `warn`, never `good`/green."""
+        all_open = ExecutionConfig.model_validate(
+            {
+                "max_spread_points": 30,
+                "max_market_data_age_ms": 5000,
+                "order_timeout_ms": 5000,
+                "max_slippage_points": 20,
+                "submission_enabled": True,
+                "feedback_2_0_approved": True,
+                "flatten_submission_enabled": True,
+            }
+        )
+
+        response = client(
+            engine,
+            tmp_path / "health.json",
+            execution_config=all_open,
+            live_trading_acknowledged=True,
+        ).get("/")
+
+        assert "CONFIG GATES OPEN" in response.text
+        card_start = response.text.index('<div class="label">Execution</div>')
+        card = response.text[card_start : card_start + 300]
+        assert "state good" not in card
+        assert "dot good" not in card
+        assert "state warn" in card
+        assert "dot warn" in card
+
+    def test_state_class_never_maps_config_gates_open_to_good(self) -> None:
+        from crumblr.dashboard.app import state_class
+
+        assert state_class("CONFIG GATES OPEN") == "warn"
+        assert state_class("DISABLED") == "bad"
+
 
 class TestPaperLiteJournalActivity:
     def test_no_journal_path_configured_shows_empty_not_an_error(

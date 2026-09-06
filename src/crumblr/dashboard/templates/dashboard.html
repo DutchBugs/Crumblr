@@ -301,15 +301,15 @@
 
       <div class="card status-card">
         <div class="label">Execution</div>
-        <div class="state {{ ('DISABLED' if state.execution_gate.disabled else 'ACTIVE') | state_class }}">
-          <span class="dot {{ ('DISABLED' if state.execution_gate.disabled else 'ACTIVE') | state_class }}"></span>
-          {{ "DISABLED" if state.execution_gate.disabled else "GATES OPEN" }}
+        <div class="state {{ ('DISABLED' if state.execution_gate.disabled else 'CONFIG GATES OPEN') | state_class }}">
+          <span class="dot {{ ('DISABLED' if state.execution_gate.disabled else 'CONFIG GATES OPEN') | state_class }}"></span>
+          {{ "DISABLED" if state.execution_gate.disabled else "CONFIG GATES OPEN" }}
         </div>
         <div class="sub">
           {% if state.execution_gate.disabled %}
             closed: {{ state.execution_gate.closed_gates | join(", ") }}
           {% else %}
-            all four submission gates read `True` — real order_send path wiring is a separate, structural fact this card does not assert
+            all four config gates read `True` — not proof real order_send is reachable; that wiring is a separate, structural fact this card does not assert
           {% endif %}
         </div>
       </div>

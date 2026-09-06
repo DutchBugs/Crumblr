@@ -316,6 +316,12 @@ class TestAgentHealth:
         )
 
     def test_suspended_agent_is_never_healthy(self, engine: Engine) -> None:
+        """Review feedback (third pass): `NOT PROVISIONED` would falsely
+
+        read as "nothing is configured" — an assignment *is* active here;
+        the agent itself was deliberately suspended. `UNKNOWN` is the
+        correct fixed-vocabulary label; the Agent panel's own `agent_status`
+        field still carries the precise `SUSPENDED` distinction."""
         panel = _panel_for(engine, agent_status=AgentStatus.SUSPENDED)
 
         result = build_agent_health(
@@ -323,7 +329,8 @@ class TestAgentHealth:
         )
 
         assert result != "HEALTHY"
-        assert result == "NOT PROVISIONED"
+        assert result != "NOT PROVISIONED"
+        assert result == "UNKNOWN"
 
     def test_retired_agent_is_never_healthy(self, engine: Engine) -> None:
         panel = _panel_for(engine, agent_status=AgentStatus.RETIRED)
@@ -333,7 +340,8 @@ class TestAgentHealth:
         )
 
         assert result != "HEALTHY"
-        assert result == "NOT PROVISIONED"
+        assert result != "NOT PROVISIONED"
+        assert result == "UNKNOWN"
 
     def test_active_assignment_with_no_evidence_yet_is_waiting(self, engine: Engine) -> None:
         panel = _panel_for(engine)
@@ -400,6 +408,38 @@ class TestAgentHealth:
                 agent_panel=panel, last_decision=last_decision, now=FIXED_NOW, timeframe="M5"
             )
             == "UNKNOWN"
+        )
+
+    def test_a_recent_gateway_rejected_decision_is_never_healthy(self, engine: Engine) -> None:
+        """Review feedback (third pass): the previous version only checked
+
+        recency, so a recent, real `GATEWAY_REJECTED` settlement could still
+        read `HEALTHY` — a rejection is not evidence the Agent is operating
+        normally, even though it is genuinely recent evidence."""
+        panel = _panel_for(engine)
+        outcome_id = uuid4()
+        settlement = AgentDecisionEventRecord(
+            outcome_id=outcome_id,
+            event_type=AgentDecisionEventType.REJECTED,
+            occurred_at_utc=FIXED_NOW,
+            reason_codes=("RATE_LIMIT_EXCEEDED",),
+            detail="rate limit exceeded",
+        )
+        last_decision = build_last_decision(
+            outcome_store=_FakeOutcomeStore(outcome_id=outcome_id, settlement=settlement),
+            capsule_store=CapsuleStore(engine),
+            assignment_id=_ASSIGNMENT_ID,
+            journal_entries=(),
+            journal_had_corruption=False,
+        )
+
+        assert last_decision is not None
+        assert last_decision.platform_outcome == "GATEWAY_REJECTED"
+        assert (
+            build_agent_health(
+                agent_panel=panel, last_decision=last_decision, now=FIXED_NOW, timeframe="M5"
+            )
+            != "HEALTHY"
         )
 
 
