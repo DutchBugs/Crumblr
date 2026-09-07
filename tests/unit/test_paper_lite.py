@@ -19,12 +19,19 @@ from crumblr.agent_gateway.contracts import (
     AgentRole,
     AgentStatus,
     ChampionShadowStatus,
+    ExternalSupervisorVerdict,
     NoTradeDecision,
+    SupervisorReview,
     TradeProposal,
     TradingAssignment,
 )
+from crumblr.agent_gateway.decision_path import ExternalSupervisorProvider
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.agent_gateway.market_context import AgentMarketContextV1
+from crumblr.agent_gateway.reference_supervisor import (
+    ReferenceSupervisor,
+    ReferenceSupervisorConfig,
+)
 from crumblr.agent_gateway.stores import (
     InMemoryAgentCredentialStore,
     InMemoryAgentDecisionOutcomeStore,
@@ -52,8 +59,9 @@ from crumblr.domain.enums import (
     RiskVerdict,
     Side,
 )
-from crumblr.domain.models import InstrumentSpec, MarketSnapshot
+from crumblr.domain.models import InstrumentSpec, MarketSnapshot, TradeIntent
 from crumblr.persistence.paper_lite import (
+    PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED,
     PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
     DurablePaperBroker,
@@ -120,6 +128,7 @@ class ToyAgent:
     credential_secret: str = CREDENTIAL
     directional: bool = True
     requested_risk_fraction: Decimal = Decimal("0.02")
+    confidence: float = 1.0
 
     def decide(self, context: AgentMarketContextV1) -> TradeProposal | NoTradeDecision:
         decision_id = uuid5(NAMESPACE_URL, f"toy:{context.provenance.content_hash}")
@@ -143,7 +152,7 @@ class ToyAgent:
             reference_price=context.market.ask,
             stop_loss_price=context.market.ask - Decimal("0.00200"),
             take_profit_price=context.market.ask + Decimal("0.00400"),
-            confidence=1.0,
+            confidence=self.confidence,
             requested_risk_fraction=self.requested_risk_fraction,
             reason_codes=("TOY_BREAKOUT_VOCABULARY",),
             evidence_refs=(),
@@ -157,15 +166,19 @@ class Fixture:
     path: Path
     directional: bool = True
     requested_risk_fraction: Decimal = Decimal("0.02")
+    confidence: float = 1.0
     session_store: InMemoryRiskSessionStore = field(default_factory=InMemoryRiskSessionStore)
     risk_ledger_lock: RiskLedgerLock = field(default_factory=InMemoryRiskLedgerLock)
+    external_supervisor: ExternalSupervisorProvider | None = None
 
     def build(self) -> tuple[PaperLiteOrchestrator, DurablePaperBroker]:
         lite_settings = settings(self.path)
         base = PlatformConfig.model_validate(paper_config_payload())
         config = lite_settings.platform_config(base)
         agent = ToyAgent(
-            directional=self.directional, requested_risk_fraction=self.requested_risk_fraction
+            directional=self.directional,
+            requested_risk_fraction=self.requested_risk_fraction,
+            confidence=self.confidence,
         )
         gateway = AgentGateway(
             identities=InMemoryAgentIdentityStore(),
@@ -211,6 +224,7 @@ class Fixture:
                 note="unit-test assertion for the isolated paper path",
                 asserted_at_utc=FIXED_NOW,
             ),
+            external_supervisor=self.external_supervisor,
             clock=lambda: FIXED_NOW,
         )
         return orchestrator, broker
@@ -786,3 +800,229 @@ class TestPaperLiteFlow:
 
         assert second.outcome_type is PaperLiteOutcomeType.ALREADY_PROCESSED
         assert len(broker.positions()) == 1
+
+
+class RecordingSupervisor:
+    """Wraps a real `ReferenceSupervisor` (or any provider) and records
+
+    every `review()` call it was actually given -- used to prove the
+    orchestrator passes it the exact, unmutated proposal/intent, and to
+    prove it is never consulted at all when Risk/Policy already refused.
+    """
+
+    def __init__(self, inner: ExternalSupervisorProvider) -> None:
+        self._inner = inner
+        self.calls: list[TradeIntent] = []
+
+    def review(
+        self,
+        *,
+        proposal: TradeProposal,
+        intent: TradeIntent,
+        risk_decision_id: UUID,
+        policy_gate_decision_id: UUID,
+        now: Any,
+    ) -> SupervisorReview | None:
+        self.calls.append(intent)
+        return self._inner.review(
+            proposal=proposal,
+            intent=intent,
+            risk_decision_id=risk_decision_id,
+            policy_gate_decision_id=policy_gate_decision_id,
+            now=now,
+        )
+
+
+class AlwaysUnknownSupervisor:
+    """Stands in for a genuine timeout/transport failure -- returns `None`,
+
+    exactly what `ExternalSupervisorProvider`'s own docstring says a
+    future transport-backed implementation may do."""
+
+    def review(
+        self,
+        *,
+        proposal: TradeProposal,
+        intent: TradeIntent,
+        risk_decision_id: UUID,
+        policy_gate_decision_id: UUID,
+        now: Any,
+    ) -> SupervisorReview | None:
+        return None
+
+
+def _reference_supervisor(*, min_confidence: float = 0.5) -> ReferenceSupervisor:
+    return ReferenceSupervisor(
+        ReferenceSupervisorConfig(
+            supervisor_agent_id=uuid4(),
+            min_confidence=min_confidence,
+        )
+    )
+
+
+class TestExternalSupervisorIntegration:
+    """Agent MVP Slice A: a real `external_supervisor` provider must be a
+
+    genuine gate on the paper fill, separate from and never overriding
+    Core Risk/Policy, auditable on its own terms."""
+
+    def test_default_none_stays_the_original_explicit_skip_behaviour(self, tmp_path: Path) -> None:
+        """Backwards compatibility: omitting `external_supervisor` (the
+
+        default) must behave byte-identically to before this slice."""
+        orchestrator, broker = Fixture(tmp_path / "paper.jsonl").build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+        assert outcome.decision_path is not None
+        assert outcome.decision_path.external_supervisor_outcome is None
+        assert any(
+            entry.event_type is PaperJournalEventType.AUDIT_FACT
+            and entry.payload["fact"] == SUPERVISOR_SKIPPED_PAPER_MODE
+            for entry in broker.audit_entries
+        )
+        assert not any(
+            entry.event_type is PaperJournalEventType.AUDIT_FACT
+            and entry.payload["fact"] == PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED
+            for entry in broker.audit_entries
+        )
+
+    def test_a_real_approve_reaches_a_paper_fill(self, tmp_path: Path) -> None:
+        supervisor = RecordingSupervisor(_reference_supervisor(min_confidence=0.5))
+        fixture = Fixture(tmp_path / "paper.jsonl", external_supervisor=supervisor)
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+        assert outcome.decision_path is not None
+        review = outcome.decision_path.external_supervisor_outcome
+        assert review is not None
+        assert review.verdict is ExternalSupervisorVerdict.APPROVE
+        assert len(broker.positions()) == 1
+        assert len(supervisor.calls) == 1
+        assert any(
+            entry.event_type is PaperJournalEventType.AUDIT_FACT
+            and entry.payload["fact"] == PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED
+            and "APPROVE" in entry.payload["detail"]
+            for entry in broker.audit_entries
+        )
+        assert not any(
+            entry.event_type is PaperJournalEventType.AUDIT_FACT
+            and entry.payload["fact"] == SUPERVISOR_SKIPPED_PAPER_MODE
+            for entry in broker.audit_entries
+        )
+
+    def test_a_real_veto_blocks_the_fill(self, tmp_path: Path) -> None:
+        """`ReferenceSupervisor` vetoes on low confidence -- a genuine,
+
+        deterministic VETO, not a stub standing in for one."""
+        supervisor = _reference_supervisor(min_confidence=0.9)
+        fixture = Fixture(
+            tmp_path / "paper.jsonl",
+            confidence=0.1,
+            external_supervisor=supervisor,
+        )
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.EXTERNAL_SUPERVISOR_BLOCKED
+        assert outcome.decision_path is not None
+        review = outcome.decision_path.external_supervisor_outcome
+        assert review is not None
+        assert review.verdict is ExternalSupervisorVerdict.VETO
+        assert broker.positions() == ()
+        assert any(
+            entry.event_type is PaperJournalEventType.AUDIT_FACT
+            and entry.payload["fact"] == PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED
+            and "VETO" in entry.payload["detail"]
+            for entry in broker.audit_entries
+        )
+
+    def test_unknown_no_response_blocks_the_fill_not_a_silent_approval(
+        self, tmp_path: Path
+    ) -> None:
+        """A genuine timeout/no-response (`review() -> None`) must never
+
+        be treated as approval -- the same `UNKNOWN` verdict
+        `evaluate_supervisor_review()` already gives it."""
+        fixture = Fixture(tmp_path / "paper.jsonl", external_supervisor=AlwaysUnknownSupervisor())
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.EXTERNAL_SUPERVISOR_BLOCKED
+        assert outcome.decision_path is not None
+        review = outcome.decision_path.external_supervisor_outcome
+        assert review is not None
+        assert review.verdict is ExternalSupervisorVerdict.UNKNOWN
+        assert broker.positions() == ()
+
+    def test_the_supervisor_cannot_change_side_sl_tp_or_volume(self, tmp_path: Path) -> None:
+        """`SupervisorReview` has no side/price/SL/TP/volume field at all
+
+        (contracts.py's own docstring: "Cannot change side, price, SL,
+        TP or risk") -- this proves the *filled* order still matches the
+        original intent exactly, not merely that the type disallows it."""
+        supervisor = _reference_supervisor(min_confidence=0.5)
+        fixture = Fixture(tmp_path / "paper.jsonl", external_supervisor=supervisor)
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.PAPER_FILLED
+        assert outcome.decision_path is not None
+        intent = outcome.decision_path.capsule.trade_intent
+        assert intent is not None
+        (position,) = broker.positions()
+        assert position.side is intent.side
+        assert position.stop_loss_price == intent.stop_loss_price
+        assert position.take_profit_price == intent.take_profit_price
+        assert position.volume == outcome.decision_path.risk_decision.approved_volume
+
+    def test_a_risk_block_never_consults_the_external_supervisor(self, tmp_path: Path) -> None:
+        supervisor = RecordingSupervisor(_reference_supervisor(min_confidence=0.5))
+        fixture = Fixture(tmp_path / "paper.jsonl", external_supervisor=supervisor)
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot(spread_points=100)
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.RISK_BLOCKED
+        assert supervisor.calls == []
+        assert broker.positions() == ()
+
+    def test_a_platform_policy_veto_never_consults_the_external_supervisor(
+        self, tmp_path: Path
+    ) -> None:
+        supervisor = RecordingSupervisor(_reference_supervisor(min_confidence=0.5))
+        fixture = Fixture(tmp_path / "paper.jsonl", external_supervisor=supervisor)
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = orchestrator.process(snapshot, spec, incident_status=IncidentStatus.ACTIVE)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.POLICY_BLOCKED
+        assert supervisor.calls == []
+        assert broker.positions() == ()
+
+    def test_no_trade_never_consults_the_external_supervisor(self, tmp_path: Path) -> None:
+        supervisor = RecordingSupervisor(_reference_supervisor(min_confidence=0.5))
+        fixture = Fixture(
+            tmp_path / "paper.jsonl", directional=False, external_supervisor=supervisor
+        )
+        orchestrator, broker = fixture.build()
+        snapshot, spec = compatible_snapshot()
+
+        outcome = process_clear(orchestrator, snapshot, spec)
+
+        assert outcome.outcome_type is PaperLiteOutcomeType.NO_TRADE
+        assert supervisor.calls == []
+        assert broker.positions() == ()

@@ -2087,6 +2087,225 @@ Not merged. No shared-contract/Core change requested or needed this pass.
 
 ---
 
+## 0ac. Agent MVP — Slice A (external Supervisor into PAPER_LITE), Slice B (real directional full-chain fill), Slice C (artifact-mismatch re-confirmed), Slice D (dashboard 8-stage proof) — 2026-09-08
+
+Continuation of §0ab, after "Checkpoint ontvangen. GO om door te gaan." Crumblr:
+`agent/neutral-static-mvp` (still on top of `c3f70c3`, this pass not yet
+committed at the time of writing — see "Commits" below for the actual SHA
+once pushed). `crumblr-static-agent-host`: `agent/neutral-static-mvp` @
+`395e7b1`, plus one new commit this pass (see below) — still built on
+`agent/neutral-context-strategy-6.0`, not rebased onto old `main@f1e16b7`,
+per the owner's explicit acceptance in the previous checkpoint.
+
+### Slice A — external Supervisor wired into PAPER_LITE for real
+
+`PaperLiteOrchestrator` gained an `external_supervisor:
+ExternalSupervisorProvider | None = None` constructor parameter (default
+`None` = the original explicit-skip behaviour, fully backward compatible).
+When set, `process()` now passes `proposal=`/`external_supervisor=` into
+`evaluate_agent_trade_intent()` (Core's own plumbing for this was already
+complete — nothing changed on the Core/`decision_path.py` side). Only a
+real `APPROVE` verdict proceeds to `order_check`/fill; `VETO`/`UNKNOWN`
+(which already covers timeout, malformed response, no response, and a
+self-reported `UNKNOWN`) returns a new `PaperLiteOutcomeType
+.EXTERNAL_SUPERVISOR_BLOCKED` outcome instead. The review outcome itself is
+recorded via a new `PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED` audit fact in
+PAPER_LITE's own journal (`persistence/paper_lite.py`) — deliberately *not*
+in Core's event journal/`DecisionCapsule`, per the owner's instruction that
+`ExternalSupervisorReviewRecord` needs an agent-owned audit seam, not a
+Core-side contract change (no handshake to Dev 1 was needed as a result).
+`scripts/paper_lite.py` gained `--enable-external-supervisor` /
+`--external-supervisor-min-confidence`, wiring in the existing
+`ReferenceSupervisor` — so this is a genuinely runnable capability, not
+only a dormant library one. 8 new tests in `TestExternalSupervisorIntegration`
+(`tests/unit/test_paper_lite.py`): default-None unchanged behaviour, a real
+APPROVE reaches a fill, a real VETO blocks it, `UNKNOWN`/no-response blocks
+it (not a silent approval), the Supervisor cannot mutate side/SL/TP/volume,
+and a Risk block / Policy veto / NO_TRADE never even consults the external
+Supervisor.
+
+### Slice B — full directional chain, real fixture → real HTTP Agent → real PAPER_LITE fill
+
+Seeded the exact deterministic sweep/FVG/MSS/pivot-2.2 bar fixture
+(`crumblr-static-agent-host`'s own `_real_sweep_fvg_mss_bars()`, byte-
+identical) into `crumblr_test_dev3` via Crumblr's own `MarketDataStore`,
+then ran the real `scripts/paper_lite.py` end to end against the real
+running neutral Static Agent server, `--enable-external-supervisor` on.
+
+**Real, non-obvious blocker found and fixed, not routed around:** the
+first attempts did not reach a fill.
+1. `risk_session.recover_session()` refused with `SAFETY_STATE_UNKNOWN`
+   ("recorded trading day is after the market day") — the fixture's fixed
+   2026-09-03 timestamps vs. a risk-session row already recorded at real
+   wall-clock 2026-09-07 from the earlier NO_TRADE proof (§0ab), sharing
+   the same DB-wide, symbol-keyed `risk_session_states` row regardless of
+   assignment. Not a code defect — a genuine, correctly-refusing
+   consistency check; resolved by clearing the stale row for this
+   controlled fixture run.
+2. `risk_decision` still `BLOCK`/`STALE_MARKET_DATA` even after that:
+   `PaperLiteOrchestrator`'s `clock` defaults to real `utc_now()` (only the
+   unit-test harness's `Fixture.build()` overrides it), so evaluating a
+   2026-09-03-dated fixture at real 2026-09-07 wall-clock time is
+   genuinely ~4 days stale against `config/paper.yaml`'s
+   `max_market_data_age_ms: 2000` (2 seconds). Fixed by adding a
+   `--fixed-now` CLI flag to `scripts/paper_lite.py` (parses a tz-aware
+   ISO-8601 instant, threaded into `PaperLiteOrchestrator(clock=...)`) —
+   the same mechanism the unit tests already use, now available to the
+   real runnable script too. Pinned to `2026-09-03T14:49:31+00:00`, one
+   second after the fixture's own tick, well inside the 2000ms budget.
+
+With both fixed, the real chain produced a genuine fill:
+
+```text
+RiskDecisionMade:       PASS  approved_volume=1.41  risk_amount=199.60  stop_distance_points=165
+SupervisorDecisionMade: APPROVE (Platform Policy gate)
+PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED: verdict=APPROVE review_id=<real ReferenceSupervisor review>
+PAPER_ORDER_ACCEPTED:   BUY 1.41 @ 1.10015  SL 1.098500  TP 1.1034500
+outcome: PAPER_FILLED   open_positions: 1   simulated_fill: true
+```
+
+Side, SL/TP, and risk amount all trace back to the real `TradeIntent`/
+`RiskDecision` — nowhere is `order_send` reachable (`DurablePaperBroker`
+has no MT5-adapter constructor path at all). Requested-risk sizing (`1.41`
+lots) was computed by Core Risk from account equity/stop distance, not
+supplied by the Agent.
+
+### Slice C — Gateway-side artifact-mismatch: already covered, re-confirmed
+
+`TestStrategyArtifactBinding` (`tests/unit/test_agent_gateway.py`) calls
+`AgentGateway.submit_trade_proposal` directly with a mismatched
+`strategy_artifact_hash` — genuinely Gateway-side, not the Agent's own
+`ArtifactBindingError` (already proven in §0ab). Re-ran explicitly: 3/3
+pass (`wrong hash → STRATEGY_ARTIFACT_MISMATCH`, `accepted=False`,
+`trade_intent=None`; durably audited). This closes the one gap §0ab named
+as unconfirmed — no new test was needed.
+
+### Slice D — dashboard: real `PAPER_FILLED` reachability + real Supervisor verdict
+
+`dashboard/agent_state.py` had a **named, documented gap**: `submit()`
+never carried a `correlation_id`, so even a real fill could only ever read
+`AWAITING_OUTCOME` on the dashboard, forever. Closed it:
+- `DurablePaperBroker.submit()` gained an optional `correlation_id: UUID
+  | None` param, written into the `PAPER_ORDER_ACCEPTED` journal payload
+  the same way `record_audit_fact` already binds every other fact
+  (backward compatible — `None` when omitted).
+- `application/paper_lite.py`'s one `submit()` call site now passes
+  `correlation_id=gateway_result.outcome_id`.
+- `agent_state.py::build_last_decision` now looks for a matching
+  `PAPER_ORDER_ACCEPTED` entry (→ `PAPER_FILLED`) and for a
+  `PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED` fact's real verdict (→
+  `EXTERNAL_SUPERVISOR_BLOCKED` when non-APPROVE, or shown at the
+  SUPERVISOR stage otherwise). New `LastDecisionState.supervisor_verdict:
+  str | None` field, additive/default-`None`.
+- `dashboard/pipeline.py` gained explicit `PAPER_FILLED`/
+  `EXTERNAL_SUPERVISOR_BLOCKED` stage branches and stage-class entries
+  (`PAPER_FILLED` good; `VETO`/`EXTERNAL_SUPERVISOR_BLOCKED` bad).
+
+14 new tests across `test_paper_lite_broker.py` (correlation_id persisted/
+defaults `None`), `test_dashboard_agent_state.py` (4 new precedence-table
+rows: fill bound to this outcome_id, a fill bound to *another* outcome_id
+is correctly ignored, a VETO blocks, an APPROVE+fill is `PAPER_FILLED` not
+blocked), and `test_dashboard_pipeline.py` (6 new: `PAPER_FILLED` shows a
+real Supervisor verdict or `SKIPPED_PAPER_MODE`, `EXTERNAL_SUPERVISOR_
+BLOCKED` stops before PAPER RESULT, stage-class coverage for the two new
+outcomes).
+
+**Live-browser-equivalent proof** (no browser available in this
+environment; verified via the same `scripts/run_dashboard.py` process and
+its `/api/state` JSON + rendered HTML, per CLAUDE.md's "start the dev
+server and use the feature" instruction): re-ran the Slice B fixture chain
+once more against a fresh, isolated scratch portfolio (a temporary
+`config/paper_lite_dashboard_proof.yaml`, deleted afterward — the
+canonical Slice B fill in `var/paper_lite.journal.jsonl` predates the
+`correlation_id` fix and was left untouched) so the fill would carry the
+new correlation id, then started the real dashboard against
+`crumblr_test_dev3` with that assignment:
+
+```json
+"pipeline": {
+  "market": "OBSERVED", "context": "ISSUED", "agent": "TRADE_PROPOSAL",
+  "gateway": "ACCEPTED", "risk": "PASS", "policy": "APPROVE",
+  "supervisor": "APPROVE", "paper": "PAPER_FILLED"
+}
+```
+
+All 8 stages substantively filled, including SUPERVISOR (`APPROVE`, the
+real `ReferenceSupervisor` verdict, not a placeholder) and PAPER RESULT
+(`PAPER_FILLED`, a real correlation-bound fill). `GET /` returned 200 with
+the same values rendered in the HTML.
+
+### Real-market NO_TRADE re-confirmation
+
+The directional fixture work overwrote `crumblr_test_dev3`'s real EUR/USD
+rows from §0ab's original NO_TRADE proof. Re-seeded real (not fabricated)
+EUR/USD spec/bars/tick from `crumblr_soak` — the same real capture DB used
+before — registered a fresh assignment, and re-ran without `--fixed-now`
+(real wall clock, real data): genuine `DecisionCapsuleSealed` with
+`trade_intent: null` at the real tick's own timestamp. §0ab's original
+finding stands, now reconfirmed against fresh real data in this
+continuation too.
+
+### `crumblr-static-agent-host`: real dependency gap found and fixed
+
+Re-running the 71-test suite in a clean shell (not the one used earlier
+this session) surfaced a genuine, environment-independent defect, not a
+regression: `pyproject.toml` declares `dependencies = []`, but
+`pivot2_engine.py` calls `ZoneInfo("America/New_York")` for the NY_AM kill
+zone — `zoneinfo` ships no data of its own, so this fails on any host
+without an OS-level IANA tzdata (confirmed: fails on this machine's own
+Windows Python). Added `tzdata` as an explicit dependency (pure IANA data,
+no executable code — consistent with the package's own zero-third-party-
+code stance). `compute_strategy_artifact_hash()` reconfirmed unchanged
+(`81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5`) —
+this touches packaging only, not strategy source. **71/71 pass** with the
+fix, reproducibly via `uv run` (previously only verified in an
+environment/shell state no longer available this session).
+
+### Full gate
+
+Crumblr (`agent/neutral-static-mvp`): ruff clean, `ruff format --check`
+clean (239 files), mypy clean (221 source files), **1693 passed, 3
+skipped** (the 3 skips are pre-existing/unrelated: two filesystem-
+permission skips, one platform MT5-import skip) — up from the 1683-test
+baseline confirmed before this pass's Slice D work, by exactly the 10 new
+tests added. `crumblr-static-agent-host`: **71/71 passed**.
+
+### Mandatory negative proofs — Slice B additions
+
+`TestExternalSupervisorIntegration`'s 8 tests directly cover the 4 Slice-B-
+specific cases the owner asked for: external Supervisor VETO → no fill;
+UNKNOWN/no-response → no fill; Supervisor cannot mutate volume/side/SL/TP;
+a Risk block or Policy veto never even reaches the external Supervisor
+(also covered: NO_TRADE never reaches it either). No further duplication
+needed against the real HTTP path specifically — the real directional
+proof above exercises the same code the unit tests already cover.
+
+### `order_send`/MT5 mutation
+
+Zero, structurally: `DurablePaperBroker` has no MT5-adapter constructor
+path (see its own module docstring — "no generic `BrokerPort` constructor
+argument: a real MT5 adapter cannot be injected into the paper path by
+configuration"); the external Static Agent server's own `/health` still
+reports `mt5_capability: false`, `execution_capability: false`.
+
+### Open, next
+
+1. Decide whether the scratch verification scripts used this session
+   (fixture seeding, real-data reseeding, ad hoc assignment registration)
+   are worth promoting to a committed, reusable script — deliberately not
+   done yet per the owner's own "don't turn ad hoc seeding into a general
+   importer" instruction; flagged for a decision, not silently assumed.
+2. `crumblr-static-agent-host`'s `uv.lock`/`.egg-info`/`__pycache__`
+   byproducts from this pass's `uv sync` were deleted, not committed —
+   that repo has no `.gitignore` at all; worth the owner deciding whether
+   to add one (out of scope to add unprompted this pass).
+
+Not merged. No shared-contract/Core change requested or needed this pass
+(re-confirmed: Slice A's `evaluate_agent_trade_intent()` plumbing was
+already complete on the Core side before this session began).
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |

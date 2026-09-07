@@ -4,11 +4,36 @@ This is a deliberately narrow product/integration path:
 
     trusted read-only market snapshot -> neutral external-agent context
     -> AgentGateway -> Core Risk -> strategy-neutral platform Policy
-    -> explicit external-Supervisor skip -> DurablePaperBroker
+    -> external Supervisor (real review, or an explicit skip) -> DurablePaperBroker
 
 The module never imports the real MT5 execution adapter. The concrete paper
 broker constructs :class:`SimulatedBroker` internally, so changing a flag or
 passing a different adapter cannot turn this path into broker submission.
+
+**External Supervisor (Agent MVP, 2026-09-08).** `PaperLiteOrchestrator`
+accepts an optional `external_supervisor:
+decision_path.ExternalSupervisorProvider`. `None` (the default) is the
+original, backwards-compatible explicit-skip mode: Risk PASS + Policy
+APPROVE alone are enough to reach a paper fill, audited as
+`SUPERVISOR_SKIPPED_PAPER_MODE`. When a provider *is* supplied,
+`evaluate_agent_trade_intent()` is given both `proposal=` and
+`external_supervisor=`, and only a genuine external-Supervisor `APPROVE`
+may reach the fill -- `VETO`, `UNKNOWN` (which already covers a timeout,
+a missing/malformed response, and a self-reported `UNKNOWN`, per
+`supervisor_review.py::evaluate_supervisor_review`) all block it, audited
+separately from Risk/Policy so the three authorities' verdicts never
+collapse into one. Risk/Policy are evaluated and sealed into the capsule
+*before* the external Supervisor is ever consulted (`decision_path.py`'s
+own ordering) -- neither can be overridden by it.
+
+`ExternalSupervisorReviewRecord` is agent_gateway-owned, not a Core
+event/capsule payload type (`decision_path.py`'s own docstring explains
+why: Core's event registry is closed, and agent_gateway must not import
+into it in the reverse direction). This module never hands it to
+`RunRecorder`/`CapsuleStore` -- it is recorded through the same
+agent-owned audit seam every other PAPER_LITE-only fact already uses,
+`DurablePaperBroker.record_audit_fact()`, which writes into PAPER_LITE's
+own durable journal, never Core's.
 """
 
 from __future__ import annotations
@@ -28,6 +53,7 @@ from pydantic import Field, model_validator
 from sqlalchemy.engine import make_url
 
 from crumblr.agent_gateway.contracts import (
+    ExternalSupervisorVerdict,
     NoTradeDecision,
     PolicyHints,
     TradeProposal,
@@ -35,6 +61,7 @@ from crumblr.agent_gateway.contracts import (
 )
 from crumblr.agent_gateway.decision_path import (
     AgentDecisionPathResult,
+    ExternalSupervisorProvider,
     PortfolioSnapshot,
     evaluate_agent_trade_intent,
 )
@@ -69,6 +96,7 @@ from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.mt5_gateway.simulated import ClosedTrade
 from crumblr.observability.logging import get_logger
 from crumblr.persistence.paper_lite import (
+    PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED,
     PAPER_LITE_INCIDENT_CLEAR_ASSERTED,
     SUPERVISOR_SKIPPED_PAPER_MODE,
     DurablePaperBroker,
@@ -283,6 +311,13 @@ class PaperLiteOutcomeType(StrEnum):
     SESSION_BLOCKED = "SESSION_BLOCKED"
     RISK_BLOCKED = "RISK_BLOCKED"
     POLICY_BLOCKED = "POLICY_BLOCKED"
+    EXTERNAL_SUPERVISOR_BLOCKED = "EXTERNAL_SUPERVISOR_BLOCKED"
+    """Only reachable when an `external_supervisor` provider is actually
+
+    configured (see the module docstring) -- a genuine `VETO` or
+    `UNKNOWN` (which already covers a timeout, a missing/malformed
+    response, and a self-reported `UNKNOWN`) from the external Supervisor.
+    Never reached in the default explicit-skip mode."""
     PAPER_ORDER_CHECK_BLOCKED = "PAPER_ORDER_CHECK_BLOCKED"
     PAPER_FILLED = "PAPER_FILLED"
 
@@ -323,6 +358,7 @@ class PaperLiteOrchestrator:
         kill_switch: KillSwitch,
         code_commit: str,
         incident_clear_assertion: PaperLiteIncidentClearAssertion | None = None,
+        external_supervisor: ExternalSupervisorProvider | None = None,
         clock: Callable[[], UtcDatetime] = utc_now,
     ) -> None:
         _validate_paper_lite_platform_config(config, settings)
@@ -337,6 +373,7 @@ class PaperLiteOrchestrator:
         self._gateway = gateway
         self._broker = broker
         self._recorder = recorder
+        self._external_supervisor = external_supervisor
         self._session_store = session_store
         self._risk_ledger_lock = risk_ledger_lock
         self._kill_switch = kill_switch
@@ -571,6 +608,7 @@ class PaperLiteOrchestrator:
             )
 
         assert gateway_result.trade_intent is not None
+        assert isinstance(decision, TradeProposal)
         decision_path = evaluate_agent_trade_intent(
             gateway_result.trade_intent,
             outcome_id=gateway_result.outcome_id,
@@ -588,6 +626,8 @@ class PaperLiteOrchestrator:
             code_commit=self._code_commit,
             now=now,
             incident_status=incident_status,
+            proposal=decision,
+            external_supervisor=self._external_supervisor,
         )
         risk = decision_path.risk_decision
         if risk is None or risk.verdict is not RiskVerdict.PASS:
@@ -608,11 +648,39 @@ class PaperLiteOrchestrator:
                 closed_trades=closed_trades,
             )
 
-        self._broker.record_audit_fact(
-            SUPERVISOR_SKIPPED_PAPER_MODE,
-            correlation_id=gateway_result.outcome_id,
-            detail="external Supervisor omitted; Core Risk and platform Policy approved",
-        )
+        if self._external_supervisor is None:
+            self._broker.record_audit_fact(
+                SUPERVISOR_SKIPPED_PAPER_MODE,
+                correlation_id=gateway_result.outcome_id,
+                detail="external Supervisor omitted; Core Risk and platform Policy approved",
+            )
+        else:
+            outcome = decision_path.external_supervisor_outcome
+            # `evaluate_agent_trade_intent()` only ever leaves this `None`
+            # when it did not consult the provider at all (Risk/Policy
+            # already refused above `-- unreachable here, both already
+            # passed) -- asserted, not silently treated as an approval.
+            assert outcome is not None
+            review_id = outcome.review.review_id if outcome.review is not None else None
+            self._broker.record_audit_fact(
+                PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED,
+                correlation_id=gateway_result.outcome_id,
+                detail=(
+                    f"verdict={outcome.verdict.value} "
+                    f"reason_codes={','.join(outcome.reason_codes) or '-'} "
+                    f"review_id={review_id}"
+                ),
+            )
+            if outcome.verdict is not ExternalSupervisorVerdict.APPROVE:
+                return self._outcome(
+                    PaperLiteOutcomeType.EXTERNAL_SUPERVISOR_BLOCKED,
+                    context,
+                    gateway_result,
+                    decision_path=decision_path,
+                    closed_trades=closed_trades,
+                    detail=f"{outcome.verdict.value}: {','.join(outcome.reason_codes) or '-'}",
+                )
+
         intent = gateway_result.trade_intent
         assert risk.approved_volume is not None
         assert risk.risk_amount is not None
@@ -652,7 +720,11 @@ class PaperLiteOrchestrator:
                 closed_trades=closed_trades,
                 detail=check.comment,
             )
-        execution = self._broker.submit(order, authorized_risk_amount=risk.risk_amount)
+        execution = self._broker.submit(
+            order,
+            authorized_risk_amount=risk.risk_amount,
+            correlation_id=gateway_result.outcome_id,
+        )
         return self._outcome(
             PaperLiteOutcomeType.PAPER_FILLED,
             context,

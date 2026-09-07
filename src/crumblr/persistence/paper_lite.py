@@ -43,6 +43,14 @@ from crumblr.risk.portfolio_risk import OpenRiskAssessment, assess_open_risk
 
 PAPER_JOURNAL_SCHEMA_VERSION = "1.1"
 SUPERVISOR_SKIPPED_PAPER_MODE = "SUPERVISOR_SKIPPED_PAPER_MODE"
+PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED = "PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED"
+"""A real `external_supervisor` provider was consulted (Agent MVP,
+
+2026-09-08) -- recorded regardless of verdict (APPROVE/VETO/UNKNOWN), so
+the review outcome is separately auditable from Risk/Policy rather than
+silently folded into `PAPER_FILLED`/a generic block. See
+`application/paper_lite.py`'s own module docstring for why this fact,
+not `ExternalSupervisorReviewRecord` itself, is what gets persisted here."""
 PAPER_LITE_INCIDENT_CLEAR_ASSERTED = "PAPER_LITE_INCIDENT_CLEAR_ASSERTED"
 
 
@@ -222,8 +230,22 @@ class DurablePaperBroker:
         self._latest_tick = simulation_tick
         return self._broker.advance(simulation_tick)
 
-    def submit(self, order: ApprovedOrder, *, authorized_risk_amount: Decimal) -> ExecutionResult:
-        """Durably claim then simulate one order; retry-safe across restart."""
+    def submit(
+        self,
+        order: ApprovedOrder,
+        *,
+        authorized_risk_amount: Decimal,
+        correlation_id: UUID | None = None,
+    ) -> ExecutionResult:
+        """Durably claim then simulate one order; retry-safe across restart.
+
+        `correlation_id` (the Gateway's `outcome_id`) lets the dashboard bind
+        this fill back to the exact decision that produced it, the same way
+        `record_audit_fact` already does -- see `dashboard/agent_state.py`'s
+        "named, deliberate gap" note on why `PAPER_FILLED` was previously
+        unreachable there. Optional only so a caller with no outcome to bind
+        (there is none in this codebase) is not forced to invent one.
+        """
 
         if authorized_risk_amount < ZERO:
             raise ValueError("authorized_risk_amount must not be negative")
@@ -241,6 +263,7 @@ class DurablePaperBroker:
             "order": order.model_dump(mode="json"),
             "order_fingerprint": order_fingerprint,
             "authorized_risk_amount": str(authorized_risk_amount),
+            "correlation_id": str(correlation_id) if correlation_id is not None else None,
         }
         self._append(
             PaperJournalEventType.PAPER_ORDER_ACCEPTED,

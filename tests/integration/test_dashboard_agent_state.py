@@ -681,6 +681,145 @@ class TestLastDecisionPrecedenceTable:
         assert result.platform_outcome == "AWAITING_OUTCOME"
         assert result.supervisor_skipped is True
 
+    def test_a_paper_order_accepted_entry_bound_to_this_outcome_id_is_paper_filled(
+        self, engine: Engine
+    ) -> None:
+        """The Agent MVP fix (2026-09-08): `DurablePaperBroker.submit()` now
+
+        writes `correlation_id` into the `PAPER_ORDER_ACCEPTED` payload, so a
+        real fill is reachable here instead of being stuck at
+        `AWAITING_OUTCOME` forever."""
+        outcome_id = uuid4()
+        capsule_store = CapsuleStore(engine)
+        intent = make_intent()
+        risk = make_risk_decision(intent.intent_id, verdict=RiskVerdict.PASS)
+        policy = make_supervisor_decision(intent.intent_id, verdict=SupervisorVerdict.APPROVE)
+        capsule_store.seal(
+            _capsule(
+                outcome_id=outcome_id,
+                trade_intent=intent,
+                risk_decision=risk,
+                supervisor_decision=policy,
+            )
+        )
+        entries = (_entry(0, "PAPER_ORDER_ACCEPTED", correlation_id=str(outcome_id)),)
+
+        result = build_last_decision(
+            outcome_store=_FakeOutcomeStore(outcome_id=outcome_id),
+            capsule_store=capsule_store,
+            assignment_id=_ASSIGNMENT_ID,
+            journal_entries=entries,
+            journal_had_corruption=False,
+        )
+
+        assert result is not None
+        assert result.platform_outcome == "PAPER_FILLED"
+
+    def test_a_paper_order_accepted_entry_bound_to_another_outcome_id_is_ignored(
+        self, engine: Engine
+    ) -> None:
+        outcome_id = uuid4()
+        other_outcome_id = uuid4()
+        capsule_store = CapsuleStore(engine)
+        intent = make_intent()
+        risk = make_risk_decision(intent.intent_id, verdict=RiskVerdict.PASS)
+        policy = make_supervisor_decision(intent.intent_id, verdict=SupervisorVerdict.APPROVE)
+        capsule_store.seal(
+            _capsule(
+                outcome_id=outcome_id,
+                trade_intent=intent,
+                risk_decision=risk,
+                supervisor_decision=policy,
+            )
+        )
+        entries = (_entry(0, "PAPER_ORDER_ACCEPTED", correlation_id=str(other_outcome_id)),)
+
+        result = build_last_decision(
+            outcome_store=_FakeOutcomeStore(outcome_id=outcome_id),
+            capsule_store=capsule_store,
+            assignment_id=_ASSIGNMENT_ID,
+            journal_entries=entries,
+            journal_had_corruption=False,
+        )
+
+        assert result is not None
+        assert result.platform_outcome == "AWAITING_OUTCOME"
+
+    def test_an_external_supervisor_veto_bound_to_this_outcome_id_is_blocked(
+        self, engine: Engine
+    ) -> None:
+        outcome_id = uuid4()
+        capsule_store = CapsuleStore(engine)
+        intent = make_intent()
+        risk = make_risk_decision(intent.intent_id, verdict=RiskVerdict.PASS)
+        policy = make_supervisor_decision(intent.intent_id, verdict=SupervisorVerdict.APPROVE)
+        capsule_store.seal(
+            _capsule(
+                outcome_id=outcome_id,
+                trade_intent=intent,
+                risk_decision=risk,
+                supervisor_decision=policy,
+            )
+        )
+        entries = (
+            _fact_entry(
+                0,
+                "PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED",
+                outcome_id,
+                "verdict=VETO reason_codes=LOW_CONFIDENCE review_id=None",
+            ),
+        )
+
+        result = build_last_decision(
+            outcome_store=_FakeOutcomeStore(outcome_id=outcome_id),
+            capsule_store=capsule_store,
+            assignment_id=_ASSIGNMENT_ID,
+            journal_entries=entries,
+            journal_had_corruption=False,
+        )
+
+        assert result is not None
+        assert result.platform_outcome == "EXTERNAL_SUPERVISOR_BLOCKED"
+        assert result.supervisor_verdict == "VETO"
+
+    def test_an_external_supervisor_approve_with_a_fill_is_paper_filled_not_blocked(
+        self, engine: Engine
+    ) -> None:
+        outcome_id = uuid4()
+        capsule_store = CapsuleStore(engine)
+        intent = make_intent()
+        risk = make_risk_decision(intent.intent_id, verdict=RiskVerdict.PASS)
+        policy = make_supervisor_decision(intent.intent_id, verdict=SupervisorVerdict.APPROVE)
+        capsule_store.seal(
+            _capsule(
+                outcome_id=outcome_id,
+                trade_intent=intent,
+                risk_decision=risk,
+                supervisor_decision=policy,
+            )
+        )
+        entries = (
+            _fact_entry(
+                0,
+                "PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED",
+                outcome_id,
+                "verdict=APPROVE reason_codes=- review_id=None",
+            ),
+            _entry(1, "PAPER_ORDER_ACCEPTED", correlation_id=str(outcome_id)),
+        )
+
+        result = build_last_decision(
+            outcome_store=_FakeOutcomeStore(outcome_id=outcome_id),
+            capsule_store=capsule_store,
+            assignment_id=_ASSIGNMENT_ID,
+            journal_entries=entries,
+            journal_had_corruption=False,
+        )
+
+        assert result is not None
+        assert result.platform_outcome == "PAPER_FILLED"
+        assert result.supervisor_verdict == "APPROVE"
+
     def test_a_safety_halted_audit_fact_bound_to_this_outcome_id_is_risk_blocked(
         self, engine: Engine
     ) -> None:

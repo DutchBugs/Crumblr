@@ -31,19 +31,18 @@ journal line (surfaced by `paper_lite_journal.read_journal_entries`'s
 correlation is attempted — an incomplete read must not produce a confident
 answer.
 
-**Named, deliberate gap: `PAPER_FILLED` is not currently reachable through
-this precedence.** `persistence.paper_lite.py`'s `PAPER_ORDER_ACCEPTED`
-journal entry (the durable trace of a real fill) carries no `outcome_id`/
-`correlation_id` in its payload — confirmed by reading `DurablePaperBroker
-.submit()` directly. Every other audit fact this module reads
-(`PAPER_LITE_SAFETY_HALTED`/`_SESSION_BLOCKED`/`_ORDER_CHECK_BLOCKED`/
-`SUPERVISOR_SKIPPED_PAPER_MODE`) is written with `correlation_id=
-gateway_result.outcome_id`, so those bind cleanly; a fill does not. Rather
-than guess a fill from timing (exactly the kind of un-anchored inference
-this rewrite removes), a capsule with Risk `PASS` + Policy `APPROVE` and no
-further outcome_id-bound fact reports `AWAITING_OUTCOME` — correct even for
-a genuinely filled order, until `application/paper_lite.py` (Dev-2/Dev-3
-owned, out of this branch's scope) adds a correlation id to that payload.
+**`PAPER_FILLED` is now reachable (Agent MVP, 2026-09-08).** `persistence
+.paper_lite.py`'s `DurablePaperBroker.submit()` now accepts a `correlation_id`
+(the Gateway's `outcome_id`) and writes it into the `PAPER_ORDER_ACCEPTED`
+journal entry's payload, the same way `record_audit_fact` already does for
+every other outcome_id-bound fact. A capsule with Risk `PASS` + Policy
+`APPROVE` now reports `PAPER_FILLED` when a matching `PAPER_ORDER_ACCEPTED`
+entry exists, and `EXTERNAL_SUPERVISOR_BLOCKED` when the journal instead
+carries a `PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED` fact with a non-APPROVE
+verdict (see `application/paper_lite.py`'s own module docstring for why that
+review record — not `ExternalSupervisorReviewRecord` itself — is what gets
+persisted here). Absent either signal, `AWAITING_OUTCOME` remains the honest
+answer for the genuinely in-flight case.
 """
 
 from __future__ import annotations
@@ -66,6 +65,8 @@ _SAFETY_HALTED_FACT = "PAPER_LITE_SAFETY_HALTED"
 _SESSION_BLOCKED_FACT = "PAPER_LITE_SESSION_BLOCKED"
 _ORDER_CHECK_BLOCKED_FACT = "PAPER_LITE_ORDER_CHECK_BLOCKED"
 _SUPERVISOR_SKIPPED_FACT = "SUPERVISOR_SKIPPED_PAPER_MODE"
+_EXTERNAL_SUPERVISOR_REVIEWED_FACT = "PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED"
+_ORDER_ACCEPTED_EVENT_TYPE = "PAPER_ORDER_ACCEPTED"
 
 _AUDIT_FACT_OUTCOME = {
     _SAFETY_HALTED_FACT: "RISK_BLOCKED",
@@ -75,6 +76,17 @@ _AUDIT_FACT_OUTCOME = {
 
 _DEGRADED_DETAIL = "a PAPER_LITE journal line could not be read; evidence may be incomplete"
 _AWAITING_EVIDENCE_DETAIL = "the outcome was claimed but no further evidence has been recorded yet"
+
+
+def _parse_supervisor_verdict(detail: str | None) -> str | None:
+    """Extract the verdict word from `application/paper_lite.py`'s own
+
+    `f"verdict={outcome.verdict.value} reason_codes=... review_id=..."` audit
+    detail string. Returns `None` if the detail is missing or does not start
+    with the expected prefix, rather than guessing."""
+    if detail is None or not detail.startswith("verdict="):
+        return None
+    return detail.split(maxsplit=1)[0].removeprefix("verdict=") or None
 
 
 class _AssignmentStoreLike(Protocol):
@@ -133,9 +145,14 @@ class LastDecisionState:
 
     resolves to. `platform_outcome` is one of `NO_TRADE`, `GATEWAY_REJECTED`,
     `SESSION_BLOCKED`, `RISK_BLOCKED`, `POLICY_BLOCKED`,
-    `PAPER_ORDER_CHECK_BLOCKED`, `AWAITING_OUTCOME`, `AWAITING_EVIDENCE`,
-    `DEGRADED` — see the module docstring for what each of the last three
-    means and why `PAPER_FILLED` is not currently reachable here."""
+    `PAPER_ORDER_CHECK_BLOCKED`, `EXTERNAL_SUPERVISOR_BLOCKED`,
+    `PAPER_FILLED`, `AWAITING_OUTCOME`, `AWAITING_EVIDENCE`, `DEGRADED` — see
+    the module docstring for what each of the last three means.
+    `supervisor_verdict` is the real external Supervisor's own reported
+    verdict (`APPROVE`/`VETO`/`UNKNOWN`) when one was actually consulted;
+    `None` when no `PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED` fact is bound to
+    this outcome_id at all (distinct from `supervisor_skipped`, which is
+    specifically the explicit-skip/paper-mode-only case)."""
 
     occurred_at_utc: UtcDatetime | None
     platform_outcome: str
@@ -145,6 +162,7 @@ class LastDecisionState:
     risk_reason_codes: tuple[str, ...]
     policy_verdict: str | None
     supervisor_skipped: bool
+    supervisor_verdict: str | None = None
 
 
 def build_agent_panel(
@@ -215,7 +233,13 @@ def _proposal_summary(capsule: DecisionCapsule) -> TradeProposalSummary | None:
     )
 
 
-def _from_capsule(capsule: DecisionCapsule, *, supervisor_skipped: bool) -> LastDecisionState:
+def _from_capsule(
+    capsule: DecisionCapsule,
+    *,
+    supervisor_skipped: bool,
+    supervisor_verdict: str | None,
+    filled: bool,
+) -> LastDecisionState:
     risk = capsule.risk_decision
     policy = capsule.supervisor_decision
     risk_verdict = risk.verdict.value if risk is not None else None
@@ -227,10 +251,20 @@ def _from_capsule(capsule: DecisionCapsule, *, supervisor_skipped: bool) -> Last
         outcome = "RISK_BLOCKED"
     elif policy is None or policy.verdict is not SupervisorVerdict.APPROVE:
         outcome = "POLICY_BLOCKED"
+    elif filled:
+        # A real `PAPER_ORDER_ACCEPTED` entry bound to this exact outcome_id
+        # -- the durable trace of a real simulated fill, not an inference.
+        outcome = "PAPER_FILLED"
+    elif supervisor_verdict is not None and supervisor_verdict != "APPROVE":
+        # The external Supervisor was genuinely consulted and did not
+        # approve (VETO, or UNKNOWN from a timeout/malformed/no response) --
+        # Risk and Policy already passed, so this is the one stage that
+        # stopped the fill.
+        outcome = "EXTERNAL_SUPERVISOR_BLOCKED"
     else:
-        # Risk PASS + Policy APPROVE with no outcome_id-bound fact to say
-        # what happened at order-check/fill time -- see the module
-        # docstring's "named, deliberate gap" note on PAPER_FILLED.
+        # Risk PASS + Policy APPROVE, no fill fact and no non-APPROVE
+        # external-Supervisor verdict bound to this outcome_id yet -- the
+        # genuinely in-flight/explicit-skip case.
         outcome = "AWAITING_OUTCOME"
 
     return LastDecisionState(
@@ -242,6 +276,7 @@ def _from_capsule(capsule: DecisionCapsule, *, supervisor_skipped: bool) -> Last
         risk_reason_codes=(tuple(code.value for code in risk.reason_codes) if risk else ()),
         policy_verdict=policy_verdict,
         supervisor_skipped=supervisor_skipped,
+        supervisor_verdict=supervisor_verdict,
     )
 
 
@@ -304,6 +339,16 @@ def build_last_decision(
         and entry["payload"].get("fact") == _SUPERVISOR_SKIPPED_FACT
         for entry in matching
     )
+    supervisor_verdict = next(
+        (
+            _parse_supervisor_verdict(entry["payload"].get("detail"))
+            for entry in matching
+            if entry.get("event_type") == "AUDIT_FACT"
+            and entry["payload"].get("fact") == _EXTERNAL_SUPERVISOR_REVIEWED_FACT
+        ),
+        None,
+    )
+    filled = any(entry.get("event_type") == _ORDER_ACCEPTED_EVENT_TYPE for entry in matching)
     fact_entry = next(
         (
             entry
@@ -329,7 +374,12 @@ def build_last_decision(
     capsule_id = uuid5(NAMESPACE_URL, f"crumblr:agent-capsule:{outcome_id}")
     capsule = capsule_store.get(capsule_id)
     if capsule is not None:
-        return _from_capsule(capsule, supervisor_skipped=supervisor_skipped)
+        return _from_capsule(
+            capsule,
+            supervisor_skipped=supervisor_skipped,
+            supervisor_verdict=supervisor_verdict,
+            filled=filled,
+        )
 
     return LastDecisionState(
         occurred_at_utc=(settlement.occurred_at_utc if settlement is not None else None),

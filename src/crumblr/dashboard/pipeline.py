@@ -48,10 +48,19 @@ _RESPONSE_RECEIVED = "RESPONSE RECEIVED"
 # label was chosen specifically to avoid. CLAIMED is WARN, not GOOD, per
 # AWAITING_EVIDENCE's own "honestly ambiguous, not a guess" contract.
 PIPELINE_GOOD_STAGES = frozenset(
-    {"OBSERVED", "ISSUED", "ACCEPTED", "TRADE_PROPOSAL", "PASS", "APPROVE"}
+    {"OBSERVED", "ISSUED", "ACCEPTED", "TRADE_PROPOSAL", "PASS", "APPROVE", "PAPER_FILLED"}
 )
 PIPELINE_WARN_STAGES = frozenset({"AWAITING_OUTCOME", "SKIPPED_PAPER_MODE", "CLAIMED"})
-PIPELINE_BAD_STAGES = frozenset({"REJECTED", "BLOCK", "PAPER_ORDER_CHECK_BLOCKED", UNKNOWN})
+PIPELINE_BAD_STAGES = frozenset(
+    {
+        "REJECTED",
+        "BLOCK",
+        "VETO",
+        "PAPER_ORDER_CHECK_BLOCKED",
+        "EXTERNAL_SUPERVISOR_BLOCKED",
+        UNKNOWN,
+    }
+)
 
 
 def pipeline_stage_class(value: str | None) -> str:
@@ -77,8 +86,9 @@ def pipeline_stage_class(value: str | None) -> str:
 # outcome -> (agent, gateway, risk, policy, supervisor, paper), for every
 # platform_outcome value that does not need extra branching beyond the
 # outcome string itself (see build_pipeline_view for RISK_BLOCKED, which
-# has two different real origins, and POLICY_BLOCKED/AWAITING_OUTCOME,
-# which read the actual supervisor_skipped flag).
+# has two different real origins, and POLICY_BLOCKED/AWAITING_OUTCOME/
+# EXTERNAL_SUPERVISOR_BLOCKED/PAPER_FILLED, which read the real
+# supervisor_skipped/supervisor_verdict fields).
 _FIXED_STAGE_TABLE: dict[str, tuple[str, str, str, str, str, str]] = {
     "NO_TRADE": (
         "NO_TRADE",
@@ -238,7 +248,12 @@ def build_pipeline_view(
         )
 
     if outcome == "AWAITING_OUTCOME":
-        supervisor = "SKIPPED_PAPER_MODE" if last_decision.supervisor_skipped else NOT_REACHED
+        if last_decision.supervisor_verdict is not None:
+            supervisor = last_decision.supervisor_verdict
+        elif last_decision.supervisor_skipped:
+            supervisor = "SKIPPED_PAPER_MODE"
+        else:
+            supervisor = NOT_REACHED
         return PipelineView(
             market=market,
             context=context,
@@ -248,6 +263,36 @@ def build_pipeline_view(
             policy="APPROVE",
             supervisor=supervisor,
             paper="AWAITING_OUTCOME",
+        )
+
+    if outcome == "EXTERNAL_SUPERVISOR_BLOCKED":
+        return PipelineView(
+            market=market,
+            context=context,
+            agent="TRADE_PROPOSAL",
+            gateway="ACCEPTED",
+            risk="PASS",
+            policy="APPROVE",
+            supervisor=last_decision.supervisor_verdict or UNKNOWN,
+            paper=NOT_REACHED,
+        )
+
+    if outcome == "PAPER_FILLED":
+        if last_decision.supervisor_verdict is not None:
+            supervisor = last_decision.supervisor_verdict
+        elif last_decision.supervisor_skipped:
+            supervisor = "SKIPPED_PAPER_MODE"
+        else:
+            supervisor = NOT_REACHED
+        return PipelineView(
+            market=market,
+            context=context,
+            agent="TRADE_PROPOSAL",
+            gateway="ACCEPTED",
+            risk="PASS",
+            policy="APPROVE",
+            supervisor=supervisor,
+            paper="PAPER_FILLED",
         )
 
     fixed = _FIXED_STAGE_TABLE.get(outcome)

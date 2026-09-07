@@ -122,6 +122,39 @@ class TestDurablePaperBroker:
             == 1
         )
 
+    def test_submit_persists_the_correlation_id_for_the_dashboard_to_bind_a_fill_to(
+        self, tmp_path: Path
+    ) -> None:
+        broker = make_broker(tmp_path / "paper.jsonl")
+        broker.advance_snapshot(make_snapshot())
+        order = make_approved_order(environment=Environment.PAPER, final_risk_decision_id=None)
+        outcome_id = uuid4()
+
+        broker.submit(order, authorized_risk_amount=Decimal("100"), correlation_id=outcome_id)
+
+        accepted = next(
+            entry
+            for entry in broker.audit_entries
+            if entry.event_type is PaperJournalEventType.PAPER_ORDER_ACCEPTED
+        )
+        assert accepted.payload["correlation_id"] == str(outcome_id)
+
+    def test_submit_without_a_correlation_id_stays_backward_compatible(
+        self, tmp_path: Path
+    ) -> None:
+        broker = make_broker(tmp_path / "paper.jsonl")
+        broker.advance_snapshot(make_snapshot())
+        order = make_approved_order(environment=Environment.PAPER, final_risk_decision_id=None)
+
+        broker.submit(order, authorized_risk_amount=Decimal("100"))
+
+        accepted = next(
+            entry
+            for entry in broker.audit_entries
+            if entry.event_type is PaperJournalEventType.PAPER_ORDER_ACCEPTED
+        )
+        assert accepted.payload["correlation_id"] is None
+
     def test_same_request_id_with_different_order_content_fails_closed(
         self, tmp_path: Path
     ) -> None:

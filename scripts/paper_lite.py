@@ -6,11 +6,16 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.agent_gateway.neutral_agent_client import HttpNeutralAgentClient
+from crumblr.agent_gateway.reference_supervisor import (
+    ReferenceSupervisor,
+    ReferenceSupervisorConfig,
+)
 from crumblr.agent_gateway.static_agent_client import StaticAgentClientConfig
 from crumblr.application.paper_lite import (
     PaperLiteConfigurationError,
@@ -25,7 +30,7 @@ from crumblr.config import load_config
 from crumblr.domain.enums import Environment, IncidentStatus, SessionState
 from crumblr.domain.models import InstrumentSpec, MarketSnapshot
 from crumblr.domain.money import price_to_points
-from crumblr.domain.timeutils import utc_now
+from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
 from crumblr.persistence.agent_gateway import (
     PostgresAgentCredentialStore,
@@ -66,7 +71,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initialize-paper-safety", action="store_true")
     parser.add_argument("--operator")
     parser.add_argument("--incident-note")
+    parser.add_argument(
+        "--enable-external-supervisor",
+        action="store_true",
+        help=(
+            "gate the paper fill on a real external-Supervisor review (the "
+            "deterministic ReferenceSupervisor), not only Core Risk/Policy. "
+            "Default off: the original explicit-skip behaviour"
+        ),
+    )
+    parser.add_argument(
+        "--external-supervisor-min-confidence",
+        type=float,
+        default=0.5,
+        help="ReferenceSupervisor's VETO-below-this-confidence floor",
+    )
+    parser.add_argument(
+        "--fixed-now",
+        type=_parse_utc_timestamp,
+        default=None,
+        help=(
+            "pin the orchestrator's clock to this timezone-aware ISO-8601 instant instead "
+            "of real wall-clock time. For a deterministic fixture replay only: real market "
+            "data must never be evaluated against a clock other than the real one, since "
+            "Risk's own market-data-age/intent-expiry checks (STALE_MARKET_DATA/"
+            "INTENT_EXPIRED) depend on this matching the data's actual origin"
+        ),
+    )
     return parser.parse_args()
+
+
+def _parse_utc_timestamp(value: str) -> UtcDatetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("--fixed-now must be timezone-aware ISO-8601")
+    return parsed
 
 
 def main() -> None:
@@ -173,6 +212,16 @@ def main() -> None:
         ),
     )
     market_data = MarketDataStore(engine)
+    external_supervisor = (
+        ReferenceSupervisor(
+            ReferenceSupervisorConfig(
+                supervisor_agent_id=uuid5(NAMESPACE_URL, "crumblr:paper-lite:reference-supervisor"),
+                min_confidence=args.external_supervisor_min_confidence,
+            )
+        )
+        if args.enable_external_supervisor
+        else None
+    )
     orchestrator = PaperLiteOrchestrator(
         config,
         settings=settings,
@@ -186,6 +235,8 @@ def main() -> None:
         kill_switch=kill_switch,
         code_commit=args.code_commit,
         incident_clear_assertion=incident_clear_assertion,
+        external_supervisor=external_supervisor,
+        clock=(lambda: args.fixed_now) if args.fixed_now is not None else utc_now,
     )
 
     try:

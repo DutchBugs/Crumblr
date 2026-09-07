@@ -55,6 +55,7 @@ def _last_decision(**overrides: object) -> LastDecisionState:
         "risk_reason_codes": (),
         "policy_verdict": None,
         "supervisor_skipped": False,
+        "supervisor_verdict": None,
     }
     fields.update(overrides)
     return LastDecisionState(**fields)  # type: ignore[arg-type]
@@ -231,6 +232,80 @@ class TestAwaitingOutcomeCarriesTheSupervisorSkipFlag:
         assert view.supervisor == NOT_REACHED
 
 
+class TestPaperFilledShowsEveryStageSubstantively:
+    """The Agent MVP directional full-chain proof (2026-09-08): once
+
+    `PAPER_FILLED` is a real reachable outcome, every stage up to and
+    including PAPER RESULT must show a concrete value, not `AWAITING_OUTCOME`
+    forever."""
+
+    def test_a_real_external_supervisor_approve_is_shown_at_the_supervisor_stage(self) -> None:
+        view = build_pipeline_view(
+            agent_panel=_agent_panel(),
+            last_decision=_last_decision(
+                platform_outcome="PAPER_FILLED",
+                risk_verdict="PASS",
+                policy_verdict="APPROVE",
+                supervisor_verdict="APPROVE",
+            ),
+        )
+
+        assert view.agent == "TRADE_PROPOSAL"
+        assert view.gateway == "ACCEPTED"
+        assert view.risk == "PASS"
+        assert view.policy == "APPROVE"
+        assert view.supervisor == "APPROVE"
+        assert view.paper == "PAPER_FILLED"
+
+    def test_an_explicitly_skipped_supervisor_still_shows_a_real_fill(self) -> None:
+        view = build_pipeline_view(
+            agent_panel=_agent_panel(),
+            last_decision=_last_decision(
+                platform_outcome="PAPER_FILLED",
+                risk_verdict="PASS",
+                policy_verdict="APPROVE",
+                supervisor_skipped=True,
+            ),
+        )
+
+        assert view.supervisor == "SKIPPED_PAPER_MODE"
+        assert view.paper == "PAPER_FILLED"
+
+
+class TestExternalSupervisorBlocked:
+    def test_a_veto_stops_before_the_paper_stage(self) -> None:
+        view = build_pipeline_view(
+            agent_panel=_agent_panel(),
+            last_decision=_last_decision(
+                platform_outcome="EXTERNAL_SUPERVISOR_BLOCKED",
+                risk_verdict="PASS",
+                policy_verdict="APPROVE",
+                supervisor_verdict="VETO",
+            ),
+        )
+
+        assert view.agent == "TRADE_PROPOSAL"
+        assert view.gateway == "ACCEPTED"
+        assert view.risk == "PASS"
+        assert view.policy == "APPROVE"
+        assert view.supervisor == "VETO"
+        assert view.paper == NOT_REACHED
+
+    def test_an_unknown_verdict_still_reports_the_block_honestly(self) -> None:
+        view = build_pipeline_view(
+            agent_panel=_agent_panel(),
+            last_decision=_last_decision(
+                platform_outcome="EXTERNAL_SUPERVISOR_BLOCKED",
+                risk_verdict="PASS",
+                policy_verdict="APPROVE",
+                supervisor_verdict="UNKNOWN",
+            ),
+        )
+
+        assert view.supervisor == "UNKNOWN"
+        assert view.paper == NOT_REACHED
+
+
 def test_an_unrecognized_future_outcome_string_fails_closed_to_unknown() -> None:
     view = build_pipeline_view(
         agent_panel=_agent_panel(),
@@ -259,7 +334,15 @@ class TestPipelineStageClass:
     rather than assuming it lines up with the unrelated one."""
 
     def test_good_stages(self) -> None:
-        for value in ("OBSERVED", "ISSUED", "ACCEPTED", "TRADE_PROPOSAL", "PASS", "APPROVE"):
+        for value in (
+            "OBSERVED",
+            "ISSUED",
+            "ACCEPTED",
+            "TRADE_PROPOSAL",
+            "PASS",
+            "APPROVE",
+            "PAPER_FILLED",
+        ):
             assert pipeline_stage_class(value) == "good", value
 
     def test_warn_stages(self) -> None:
@@ -267,7 +350,14 @@ class TestPipelineStageClass:
             assert pipeline_stage_class(value) == "warn", value
 
     def test_bad_stages(self) -> None:
-        for value in ("REJECTED", "BLOCK", "PAPER_ORDER_CHECK_BLOCKED", "UNKNOWN"):
+        for value in (
+            "REJECTED",
+            "BLOCK",
+            "VETO",
+            "PAPER_ORDER_CHECK_BLOCKED",
+            "EXTERNAL_SUPERVISOR_BLOCKED",
+            "UNKNOWN",
+        ):
             assert pipeline_stage_class(value) == "bad", value
 
     def test_neutral_stages_include_response_received_despite_downstream_blocks(self) -> None:
