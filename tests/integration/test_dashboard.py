@@ -54,14 +54,19 @@ from crumblr.persistence.agent_gateway import (
     PostgresTradingAssignmentStore,
 )
 from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.market_data import MarketDataStore, bar_identity, tick_identity
+from crumblr.persistence.paper_lite import DurablePaperBroker
 from crumblr.persistence.safety_state import PostgresSafetyStateStore
 from crumblr.risk.safety_state import SafetyState
 from tests.conftest import (
+    make_approved_order,
     make_broker_account_snapshot,
     make_broker_pending_order_snapshot,
     make_broker_position_snapshot,
+    make_instrument_spec,
+    make_snapshot,
 )
 
 pytestmark = pytest.mark.integration
@@ -105,6 +110,8 @@ def client(
     *,
     agent_assignment_id: UUID | None = None,
     paper_lite_journal_path: Path | None = None,
+    paper_lite_settings_path: Path | None = None,
+    expected_spec_version: str | None = None,
     execution_config: ExecutionConfig = EXECUTION_CONFIG,
     live_trading_acknowledged: bool = False,
 ) -> TestClient:
@@ -120,6 +127,8 @@ def client(
         reader_health_path=health_path,
         agent_assignment_id=agent_assignment_id,
         paper_lite_journal_path=paper_lite_journal_path,
+        paper_lite_settings_path=paper_lite_settings_path,
+        expected_spec_version=expected_spec_version,
     )
     return TestClient(app)
 
@@ -1175,3 +1184,105 @@ class TestDecisionPipelineRestagingRendersRealEvidence:
         assert body["pipeline"]["market"] == "UNKNOWN"
         assert body["pipeline"]["context"] == "UNKNOWN"
         assert body["pipeline"]["agent"] == "UNKNOWN"
+
+
+def _write_paper_lite_settings(tmp_path: Path, journal_path: Path) -> Path:
+    settings_path = tmp_path / "paper_lite.yaml"
+    settings_path.write_text(
+        f"""
+mode: PAPER_LITE
+starting_balance: '10000'
+journal_path: {journal_path}
+safety_latch_path: {tmp_path / "paper_lite.safety_latch.json"}
+account_currency: EUR
+leverage: 30
+operational_max_open_positions: 5
+max_risk_per_trade: '0.02'
+max_open_risk: '0.03'
+max_daily_loss: '0.04'
+max_drawdown: '0.08'
+friday_last_entry_minutes_before_close: 15
+friday_flatten_minutes_before_close: 5
+""",
+        encoding="utf-8",
+    )
+    return settings_path
+
+
+class TestPaperPortfolioRendersRealEvidence:
+    """Work order: "paper portfolio reducer". `/api/state`'s `paper_portfolio`
+
+    must reflect a genuine replay of PAPER_LITE's own durable journal
+    through its real fill engine -- never a fabricated number, and never
+    confused with the real broker state shown in "Account & Broker State".
+    """
+
+    def test_no_journal_or_settings_configured_is_no_evidence(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert body["paper_portfolio"]["status"] == "NO EVIDENCE"
+        assert body["paper_portfolio"]["portfolio"] is None
+        assert "Paper Portfolio" in rendered_markup
+        assert "simulated, not the real broker" in rendered_markup
+
+    def test_a_real_replayed_journal_shows_real_numbers_and_a_real_position(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        spec = make_instrument_spec(canonical_symbol=SYMBOL, broker_symbol="EURUSD")
+        InstrumentSpecStore(engine).record(spec)
+
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        broker = DurablePaperBroker(journal_path, spec, starting_balance=Decimal("10000"))
+        broker.advance_snapshot(make_snapshot(symbol=SYMBOL))
+        broker.submit(
+            make_approved_order(final_risk_decision_id=None),
+            authorized_risk_amount=Decimal("50"),
+        )
+        settings_path = _write_paper_lite_settings(tmp_path, journal_path)
+
+        api_client = client(
+            engine,
+            tmp_path / "health.json",
+            paper_lite_journal_path=journal_path,
+            paper_lite_settings_path=settings_path,
+            expected_spec_version=spec.spec_version,
+        )
+        body = api_client.get("/api/state").json()
+        page = api_client.get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert body["paper_portfolio"]["status"] == "OK"
+        assert body["paper_portfolio"]["portfolio"]["balance"] == "10000"
+        assert body["paper_portfolio"]["portfolio"]["open_position_count"] == 1
+        assert len(body["paper_portfolio"]["positions"]) == 1
+        assert body["paper_portfolio"]["positions"][0]["broker_symbol"] == "EURUSD"
+        assert "EURUSD" in rendered_markup
+
+    def test_a_spec_pin_mismatch_is_degraded_never_a_guessed_number(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        spec = make_instrument_spec(canonical_symbol=SYMBOL, broker_symbol="EURUSD")
+        InstrumentSpecStore(engine).record(spec)
+
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        DurablePaperBroker(journal_path, spec, starting_balance=Decimal("10000"))
+        settings_path = _write_paper_lite_settings(tmp_path, journal_path)
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                paper_lite_journal_path=journal_path,
+                paper_lite_settings_path=settings_path,
+                expected_spec_version="a-different-pinned-hash",
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["paper_portfolio"]["status"] == "DEGRADED"
+        assert body["paper_portfolio"]["portfolio"] is None

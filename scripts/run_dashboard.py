@@ -53,6 +53,13 @@ def main() -> int:
         help="PAPER_LITE's own journal file (config/paper_lite.yaml's journal_path) — "
         "read-only, never created by this process",
     )
+    parser.add_argument(
+        "--paper-lite-settings-path",
+        type=Path,
+        default=REPO_ROOT / "config" / "paper_lite.yaml",
+        help="PAPER_LITE's own settings file — read-only, sources the paper portfolio "
+        "panel's starting_balance/account_currency/leverage",
+    )
     args = parser.parse_args()
 
     try:
@@ -77,6 +84,7 @@ def main() -> int:
         reader_health_path=args.reader_health,
         agent_assignment_id=args.agent_assignment_id,
         paper_lite_journal_path=args.paper_lite_journal_path,
+        paper_lite_settings_path=args.paper_lite_settings_path,
         expected_spec_version=market.expected_spec_version if market is not None else None,
     )
 

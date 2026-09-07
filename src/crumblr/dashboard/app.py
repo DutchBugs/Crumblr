@@ -160,6 +160,37 @@ def _last_decision_to_json(decision: Any) -> dict[str, Any] | None:
     return payload
 
 
+def _paper_portfolio_to_json(panel: Any) -> dict[str, Any]:
+    portfolio = None
+    if panel.portfolio is not None:
+        portfolio = {
+            "balance": str(panel.portfolio.balance),
+            "equity": str(panel.portfolio.equity),
+            "unrealised_profit": str(panel.portfolio.unrealised_profit),
+            "realized_profit": str(panel.portfolio.realized_profit),
+            "open_position_count": panel.portfolio.open_position_count,
+            "closed_trade_count": panel.portfolio.closed_trade_count,
+            "authorized_open_risk_amount": str(panel.portfolio.authorized_open_risk_amount),
+            "exact_open_risk_amount": (
+                str(panel.portfolio.exact_open_risk_amount)
+                if panel.portfolio.exact_open_risk_amount is not None
+                else None
+            ),
+            "exact_open_risk_fraction": (
+                str(panel.portfolio.exact_open_risk_fraction)
+                if panel.portfolio.exact_open_risk_fraction is not None
+                else None
+            ),
+            "latest_observation_time_utc": panel.portfolio.latest_observation_time_utc,
+        }
+    return {
+        "status": panel.status,
+        "detail": panel.detail,
+        "portfolio": portfolio,
+        "positions": [asdict(row) for row in panel.positions],
+    }
+
+
 def state_to_json(state: DashboardState) -> dict[str, Any]:
     """A JSON-safe rendering of `DashboardState`, for the polling refresh and the chart."""
     payload: dict[str, Any] = {
@@ -190,6 +221,7 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             "checked_at_utc": state.reconciliation.checked_at_utc.isoformat(),
         },
         "execution_gate": asdict(state.execution_gate),
+        "paper_portfolio": _paper_portfolio_to_json(state.paper_portfolio),
         "broker": {
             "account": (
                 {
@@ -254,6 +286,7 @@ def create_app(
     reader_health_path: Path,
     agent_assignment_id: UUID | None = None,
     paper_lite_journal_path: Path | None = None,
+    paper_lite_settings_path: Path | None = None,
     expected_spec_version: str | None = None,
 ) -> FastAPI:
     """Build the dashboard app against one already-open database engine.
@@ -261,9 +294,10 @@ def create_app(
     The caller owns the engine's lifecycle (disposal, connection pooling) —
     this function only reads through it, the same convention every other
     read path in this codebase (`MarketDataStore`, `EventJournal`, ...) uses.
-    `agent_assignment_id`/`paper_lite_journal_path` are both optional: with
-    neither supplied, the Agent panel renders `NOT PROVISIONED` and the Last
-    Decision card renders `NO EVIDENCE` — never an error.
+    `agent_assignment_id`/`paper_lite_journal_path`/`paper_lite_settings_path`
+    are all optional: with none supplied, the Agent panel renders `NOT
+    PROVISIONED`, the Last Decision card renders `NO EVIDENCE`, and the paper
+    portfolio panel renders `NO EVIDENCE` — never an error.
     """
     app = FastAPI(
         title="Crumblr — read-only",
@@ -289,6 +323,7 @@ def create_app(
             reader_health_path=reader_health_path,
             agent_assignment_id=agent_assignment_id,
             paper_lite_journal_path=paper_lite_journal_path,
+            paper_lite_settings_path=paper_lite_settings_path,
             expected_spec_version=expected_spec_version,
         )
 

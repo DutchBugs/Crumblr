@@ -49,6 +49,7 @@ from crumblr.dashboard.agent_state import (
 from crumblr.dashboard.broker_panel import BrokerReadModel, build_broker_read_model
 from crumblr.dashboard.execution_panel import ExecutionGateState, build_execution_gate_state
 from crumblr.dashboard.paper_lite_journal import JournalReadResult, read_journal_entries
+from crumblr.dashboard.paper_portfolio import PaperPortfolioPanelState, build_paper_portfolio_panel
 from crumblr.dashboard.pipeline import PipelineView, build_pipeline_view
 from crumblr.dashboard.reader_health import read_health_snapshot
 from crumblr.dashboard.reconciliation_panel import (
@@ -198,6 +199,14 @@ class DashboardState:
     """Renders the "Execution" header card — derived from real config gates,
 
     never hardcoded."""
+    paper_portfolio: PaperPortfolioPanelState
+    """PAPER_LITE's own simulated portfolio (balance/equity/P&L/open
+
+    positions), replayed read-only from its durable journal — see
+    `dashboard.paper_portfolio`. Explicitly paper-only; never implies real
+    broker/trading-authority state, and carries its own `NO EVIDENCE`/
+    `DEGRADED`/`OK` status rather than a fabricated zero when nothing (or
+    nothing trustworthy) has been recorded yet."""
 
     latest_signal: DecisionSummary | None
     latest_risk_decision: DecisionSummary | None
@@ -354,6 +363,7 @@ def build_state(
     reader_health_path: Path,
     agent_assignment_id: UUID | None = None,
     paper_lite_journal_path: Path | None = None,
+    paper_lite_settings_path: Path | None = None,
     expected_spec_version: str | None = None,
     clock: Callable[[], UtcDatetime] = utc_now,
 ) -> DashboardState:
@@ -418,9 +428,10 @@ def build_state(
         session_store=PostgresRiskSessionStore(engine),
         canonical_symbol=canonical_symbol,
     )
+    instrument_specs = InstrumentSpecStore(engine)
     reconciliation = build_reconciliation_panel(
         broker_state=BrokerStateStore(engine),
-        instrument_specs=InstrumentSpecStore(engine),
+        instrument_specs=instrument_specs,
         guard=guard,
         canonical_symbol=canonical_symbol,
         expected_spec_version=expected_spec_version,
@@ -431,6 +442,13 @@ def build_state(
         live_trading_acknowledged=live_trading_acknowledged,
     )
     broker = build_broker_read_model(broker_state=BrokerStateStore(engine))
+    paper_portfolio = build_paper_portfolio_panel(
+        journal_path=paper_lite_journal_path,
+        paper_lite_settings_path=paper_lite_settings_path,
+        instrument_specs=instrument_specs,
+        canonical_symbol=canonical_symbol,
+        expected_spec_version=expected_spec_version,
+    )
 
     return DashboardState(
         generated_at_utc=now,
@@ -460,6 +478,7 @@ def build_state(
         reconciliation=reconciliation,
         execution_gate=execution_gate,
         broker=broker,
+        paper_portfolio=paper_portfolio,
         latest_signal=(
             _decision_summary(
                 latest_signal,

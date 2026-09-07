@@ -485,6 +485,67 @@
     </div>
   </div>
 
+  <!-- Row 2.6: Paper Portfolio (PAPER_LITE's own simulated broker, replayed
+       read-only from its durable journal — never the real broker shown
+       above, and never a claim about real trading authority). -->
+  <div class="section">
+    <div class="section-title">Paper Portfolio <span class="muted" style="font-weight:400;">(PAPER_LITE — simulated, not the real broker)</span></div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="panel-title">Simulated account</div>
+        <div id="paper-portfolio-account-body">
+        {% if state.paper_portfolio.status == "OK" %}
+        <div class="kv"><span class="k">Balance</span><span class="v">{{ state.paper_portfolio.portfolio.balance }}</span></div>
+        <div class="kv"><span class="k">Equity</span><span class="v">{{ state.paper_portfolio.portfolio.equity }}</span></div>
+        <div class="kv"><span class="k">Unrealised P&amp;L</span><span class="v">{{ state.paper_portfolio.portfolio.unrealised_profit }}</span></div>
+        <div class="kv"><span class="k">Realized P&amp;L</span><span class="v">{{ state.paper_portfolio.portfolio.realized_profit }}</span></div>
+        <div class="kv"><span class="k">Open positions</span><span class="v">{{ state.paper_portfolio.portfolio.open_position_count }}</span></div>
+        <div class="kv"><span class="k">Closed trades</span><span class="v">{{ state.paper_portfolio.portfolio.closed_trade_count }}</span></div>
+        <div class="kv"><span class="k">Authorized open risk</span><span class="v">{{ state.paper_portfolio.portfolio.authorized_open_risk_amount }}</span></div>
+        <div class="kv"><span class="k">Exact open risk</span><span class="v">{{ state.paper_portfolio.portfolio.exact_open_risk_amount or "—" }}{% if state.paper_portfolio.portfolio.exact_open_risk_fraction %} ({{ state.paper_portfolio.portfolio.exact_open_risk_fraction }}){% endif %}</span></div>
+        <div class="kv"><span class="k">Latest observation</span><span class="v">{{ state.paper_portfolio.portfolio.latest_observation_time_utc or "—" }}</span></div>
+        {% elif state.paper_portfolio.status == "DEGRADED" %}
+        <div class="empty bad">DEGRADED — {{ state.paper_portfolio.detail }}</div>
+        {% else %}
+        <div class="empty">NO EVIDENCE — {{ state.paper_portfolio.detail }}</div>
+        {% endif %}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-title">Simulated open positions</div>
+        <div id="paper-portfolio-positions-body">
+        {% if state.paper_portfolio.status == "OK" and state.paper_portfolio.positions %}
+        <table class="timeline">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Vol</th><th>Open</th><th>Current</th><th>SL</th><th>TP</th><th>Profit</th><th>Swap</th></tr></thead>
+          <tbody>
+          {% for p in state.paper_portfolio.positions %}
+            <tr>
+              <td>{{ p.broker_symbol }}</td>
+              <td>{{ p.side }}</td>
+              <td>{{ p.volume }}</td>
+              <td>{{ p.open_price }}</td>
+              <td>{{ p.current_price or "—" }}</td>
+              <td>{{ p.stop_loss_price or "—" }}</td>
+              <td>{{ p.take_profit_price or "—" }}</td>
+              <td>{{ p.profit }}</td>
+              <td>{{ p.swap }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% elif state.paper_portfolio.status == "OK" %}
+        <div class="empty">0 open simulated positions</div>
+        {% elif state.paper_portfolio.status == "DEGRADED" %}
+        <div class="empty bad">DEGRADED — {{ state.paper_portfolio.detail }}</div>
+        {% else %}
+        <div class="empty">NO EVIDENCE — {{ state.paper_portfolio.detail }}</div>
+        {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Row 3: Agent / StrategyArtifact panel -->
   <div class="section">
     <div class="section-title">Agent / StrategyArtifact</div>
@@ -981,6 +1042,73 @@
     renderBrokerPendingOrders(state);
   }
 
+  // Mirrors the server-rendered Jinja markup for "Row 2.6: Paper Portfolio"
+  // exactly -- PAPER_LITE's own simulated account, never the real broker
+  // shown above. Same full-container rebuild per poll as
+  // renderBrokerAccount/Positions -- a later poll's numbers genuinely
+  // replace the previous ones rather than freezing on the first render.
+  function renderPaperPortfolioAccount(state) {
+    var el = document.getElementById("paper-portfolio-account-body");
+    if (!el) return;
+    var panel = (state && state.paper_portfolio) || { status: "NO EVIDENCE", detail: null };
+    if (panel.status !== "OK") {
+      var cls = panel.status === "DEGRADED" ? "empty bad" : "empty";
+      el.innerHTML = '<div class="' + cls + '">' + esc(panel.status) + " — " + esc(panel.detail) + "</div>";
+      return;
+    }
+    var p = panel.portfolio;
+    var html = "";
+    html += kv("Balance", esc(p.balance));
+    html += kv("Equity", esc(p.equity));
+    html += kv("Unrealised P&L", esc(p.unrealised_profit));
+    html += kv("Realized P&L", esc(p.realized_profit));
+    html += kv("Open positions", esc(p.open_position_count));
+    html += kv("Closed trades", esc(p.closed_trade_count));
+    html += kv("Authorized open risk", esc(p.authorized_open_risk_amount));
+    var exactRisk = p.exact_open_risk_amount != null ? p.exact_open_risk_amount : "—";
+    var exactFraction = p.exact_open_risk_fraction != null ? " (" + esc(p.exact_open_risk_fraction) + ")" : "";
+    html += kv("Exact open risk", esc(exactRisk) + exactFraction);
+    html += kv("Latest observation", esc(p.latest_observation_time_utc != null ? p.latest_observation_time_utc : "—"));
+    el.innerHTML = html;
+  }
+
+  function renderPaperPortfolioPositions(state) {
+    var el = document.getElementById("paper-portfolio-positions-body");
+    if (!el) return;
+    var panel = (state && state.paper_portfolio) || { status: "NO EVIDENCE", detail: null };
+    if (panel.status !== "OK") {
+      var cls = panel.status === "DEGRADED" ? "empty bad" : "empty";
+      el.innerHTML = '<div class="' + cls + '">' + esc(panel.status) + " — " + esc(panel.detail) + "</div>";
+      return;
+    }
+    var positions = panel.positions || [];
+    if (positions.length === 0) {
+      el.innerHTML = '<div class="empty">0 open simulated positions</div>';
+      return;
+    }
+    var rows = positions.map(function (p) {
+      return "<tr>"
+        + "<td>" + esc(p.broker_symbol) + "</td>"
+        + "<td>" + esc(p.side) + "</td>"
+        + "<td>" + esc(p.volume) + "</td>"
+        + "<td>" + esc(p.open_price) + "</td>"
+        + "<td>" + esc(p.current_price != null ? p.current_price : "—") + "</td>"
+        + "<td>" + esc(p.stop_loss_price != null ? p.stop_loss_price : "—") + "</td>"
+        + "<td>" + esc(p.take_profit_price != null ? p.take_profit_price : "—") + "</td>"
+        + "<td>" + esc(p.profit) + "</td>"
+        + "<td>" + esc(p.swap) + "</td>"
+        + "</tr>";
+    }).join("");
+    el.innerHTML = '<table class="timeline"><thead><tr>'
+      + "<th>Symbol</th><th>Side</th><th>Vol</th><th>Open</th><th>Current</th><th>SL</th><th>TP</th><th>Profit</th><th>Swap</th>"
+      + "</tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function renderPaperPortfolio(state) {
+    renderPaperPortfolioAccount(state);
+    renderPaperPortfolioPositions(state);
+  }
+
   // Mirrors app.py::pipeline_stage_class() exactly -- a different
   // vocabulary from stateClass()'s three sets, so it gets its own explicit
   // mapping rather than reusing stateClass and hoping the fallback lands
@@ -1132,6 +1260,7 @@
 
   function applyState(state) {
     renderBrokerPanels(state);
+    renderPaperPortfolio(state);
     renderActivityFeed(state, currentActivityFilter);
     renderPipeline(state);
 
@@ -1302,6 +1431,7 @@
       stateClass: stateClass,
       renderPipeline: renderPipeline,
       pipelineStageClass: pipelineStageClass,
+      renderPaperPortfolio: renderPaperPortfolio,
       applyState: applyState,
     };
   }
