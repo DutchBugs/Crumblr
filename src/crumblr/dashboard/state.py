@@ -49,6 +49,7 @@ from crumblr.dashboard.agent_state import (
 from crumblr.dashboard.broker_panel import BrokerReadModel, build_broker_read_model
 from crumblr.dashboard.execution_panel import ExecutionGateState, build_execution_gate_state
 from crumblr.dashboard.paper_lite_journal import JournalReadResult, read_journal_entries
+from crumblr.dashboard.pipeline import PipelineView, build_pipeline_view
 from crumblr.dashboard.reader_health import read_health_snapshot
 from crumblr.dashboard.reconciliation_panel import (
     ReconciliationPanelState,
@@ -183,6 +184,10 @@ class DashboardState:
     """`None` only when no PAPER_LITE evidence exists anywhere yet — the
 
     Last Decision card then renders `NO EVIDENCE`."""
+    pipeline: PipelineView
+    """The same `last_decision` evidence, restaged into the work order §16
+    8-stage view — see `dashboard.pipeline` for why this adds no new
+    evidence-gathering of its own."""
 
     risk_panel: RiskPanelState
     reconciliation: ReconciliationPanelState
@@ -407,6 +412,7 @@ def build_state(
         now=now,
         timeframe=timeframe,
     )
+    pipeline = build_pipeline_view(agent_panel=agent_panel, last_decision=last_decision)
     risk_panel = build_risk_panel(
         risk_config=risk_config,
         session_store=PostgresRiskSessionStore(engine),
@@ -448,6 +454,7 @@ def build_state(
         agent_health=agent_health,
         agent_panel=agent_panel,
         last_decision=last_decision,
+        pipeline=pipeline,
         risk_panel=risk_panel,
         reconciliation=reconciliation,
         execution_gate=execution_gate,

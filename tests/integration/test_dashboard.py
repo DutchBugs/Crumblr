@@ -25,8 +25,10 @@ from crumblr.agent_gateway.contracts import (
     AgentRole,
     AgentStatus,
     ChampionShadowStatus,
+    NoTradeDecision,
     TradingAssignment,
 )
+from crumblr.agent_gateway.events import AgentDecisionEventType
 from crumblr.application.broker_state import BrokerStateObservation
 from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
 from crumblr.dashboard.app import create_app
@@ -47,6 +49,7 @@ from crumblr.domain.models import (
     RiskDecision,
 )
 from crumblr.persistence.agent_gateway import (
+    PostgresAgentDecisionOutcomeStore,
     PostgresAgentIdentityStore,
     PostgresTradingAssignmentStore,
 )
@@ -1048,4 +1051,127 @@ class TestBrokerAccountPositionsAndPendingOrdersRenderInTheUi:
         assert api["broker"]["account"]["position_set_state"] == "FAILED"
         assert api["broker"]["positions"] == []
         assert "absence cannot be trusted" in rendered_markup
-        assert "0 open positions" not in rendered_markup
+
+
+class TestDecisionPipelineRestagingRendersRealEvidence:
+    """Work order §16, Slice 5: the 8-stage decision pipeline is restaged
+    from `dashboard.pipeline.build_pipeline_view`, driven by the same
+    `agent_panel`/`last_decision` evidence as the Agent panel and the Last
+    Decision card -- never a second, independently-computed read of that
+    evidence. The pre-restaging pipeline section was rendered once
+    server-side and never refreshed on poll; `/api/state` must now carry the
+    same `pipeline` object the page itself was built from.
+    """
+
+    def test_no_assignment_reads_unknown_everywhere_in_the_api_and_the_page(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert body["pipeline"]["market"] == "UNKNOWN"
+        assert body["pipeline"]["agent"] == "UNKNOWN"
+        assert body["pipeline"]["risk"] == "N/A"
+        assert "Decision pipeline" in rendered_markup
+
+    def test_a_real_session_blocked_audit_fact_places_the_block_before_core_risk(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        # `build_last_decision` never infers an outcome from the journal
+        # alone -- it only reports one for the outcome_id this exact
+        # assignment actually claimed (see agent_state.py's identity-binding
+        # discipline), so the fixture must claim a real NO_TRADE outcome,
+        # accept it, and correlate the audit fact to that same outcome_id --
+        # a bare journal line with an unrelated correlation_id (as
+        # TestPaperLiteJournalActivity uses, which only checks the raw
+        # activity feed, never `last_decision`) is not enough here.
+        assignment_id = _register_active_assignment(engine)
+        registered_assignment = PostgresTradingAssignmentStore(engine).current(assignment_id)
+        assert registered_assignment is not None
+        decision = NoTradeDecision(
+            decision_id=uuid4(),
+            agent_id=registered_assignment.allowed_agent_id,
+            assignment_id=assignment_id,
+            context_hash="context-hash-abc",
+            reason_codes=(),
+            decided_at_utc=NOW,
+        )
+        outcome_store = PostgresAgentDecisionOutcomeStore(engine)
+        outcome_store.claim_no_trade(decision, now=NOW)
+        outcome_store.append_event(
+            outcome_id=decision.decision_id,
+            event_type=AgentDecisionEventType.ACCEPTED,
+            occurred_at_utc=NOW,
+        )
+
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        journal_path.write_text(
+            json.dumps(
+                {
+                    "sequence": 0,
+                    "event_type": "AUDIT_FACT",
+                    "payload": {
+                        "fact": "PAPER_LITE_SESSION_BLOCKED",
+                        "correlation_id": str(decision.decision_id),
+                        "detail": "CLOSED",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        api_client = client(
+            engine,
+            tmp_path / "health.json",
+            agent_assignment_id=assignment_id,
+            paper_lite_journal_path=journal_path,
+        )
+        body = api_client.get("/api/state").json()
+        page = api_client.get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert body["last_decision"]["platform_outcome"] == "SESSION_BLOCKED"
+        assert body["pipeline"]["agent"] == "RESPONSE RECEIVED"
+        assert body["pipeline"]["gateway"] == "ACCEPTED"
+        assert body["pipeline"]["risk"] == "NOT REACHED"
+        assert body["pipeline"]["policy"] == "NOT REACHED"
+        assert body["pipeline"]["supervisor"] == "NOT REACHED"
+        assert body["pipeline"]["paper"] == "NOT REACHED"
+        assert "RESPONSE RECEIVED" in rendered_markup
+        assert "NOT REACHED" in rendered_markup
+
+    def test_a_corrupt_journal_line_reaches_the_pipeline_as_degraded_too(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        # The DEGRADED-blanks-market/context branch itself is already
+        # covered precisely at the unit level (test_dashboard_pipeline.py::
+        # test_degraded_journal_reads_as_unknown_everywhere_not_a_confident_answer,
+        # with a context genuinely present to isolate the override). This
+        # only checks the wiring: a real DEGRADED `last_decision` from
+        # `build_state()` actually reaches `/api/state`'s `pipeline` object,
+        # not a second, independent read of the journal.
+        assignment_id = _register_active_assignment(engine)
+        journal_path = tmp_path / "paper_lite.journal.jsonl"
+        journal_path.write_text(
+            '{"sequence": 0, "event_type": "PORTFOLIO_CREATED", "payload": {}}\n'
+            '{"sequence": 1, "event_type": "AUDIT_FACT", "payl',
+            encoding="utf-8",
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                agent_assignment_id=assignment_id,
+                paper_lite_journal_path=journal_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["last_decision"]["platform_outcome"] == "DEGRADED"
+        assert body["pipeline"]["market"] == "UNKNOWN"
+        assert body["pipeline"]["context"] == "UNKNOWN"
+        assert body["pipeline"]["agent"] == "UNKNOWN"

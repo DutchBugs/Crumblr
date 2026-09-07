@@ -22,6 +22,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
+from crumblr.dashboard.pipeline import pipeline_stage_class
 from crumblr.dashboard.state import DashboardState, build_state
 from crumblr.domain.enums import Environment
 from crumblr.observability.logging import get_logger
@@ -182,6 +183,7 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
         "agent_health": state.agent_health,
         "agent_panel": _agent_panel_to_json(state.agent_panel),
         "last_decision": _last_decision_to_json(state.last_decision),
+        "pipeline": asdict(state.pipeline),
         "risk_panel": asdict(state.risk_panel),
         "reconciliation": {
             **asdict(state.reconciliation),
@@ -271,6 +273,7 @@ def create_app(
     )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.filters["state_class"] = state_class
+    templates.env.filters["pipeline_stage_class"] = pipeline_stage_class
     templates.env.filters["age"] = format_age
 
     def _current_state() -> DashboardState:

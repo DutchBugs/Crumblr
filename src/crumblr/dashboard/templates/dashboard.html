@@ -333,7 +333,7 @@
         </div>
         <div class="sub">
           {% if state.execution_gate.disabled %}
-            closed: {{ state.execution_gate.closed_gates | join(", ") }}
+            closed: {{ state.execution_gate.closed_gates | join(", ") }} — no order_send path exists in this build
           {% else %}
             all four config gates read `True` — not proof real order_send is reachable; that wiring is a separate, structural fact this card does not assert
           {% endif %}
@@ -537,100 +537,47 @@
     </div>
   </div>
 
-  <!-- Row 4: decision pipeline -->
+  <!-- Row 4: decision pipeline (work order §16's 8-stage restaging of
+       state.pipeline / dashboard.pipeline.PipelineView -- never computed
+       ad hoc here, so the Jinja first paint and the JS poll refresh below
+       can never drift apart the way the old inline per-outcome branches
+       here once could). -->
   <div class="section">
     <div class="section-title">Decision pipeline</div>
-    <div class="pipeline">
-      <div class="pipeline-card">
-        <div class="stage-name">Market data</div>
-        <div class="stage-verdict {{ state.data_feed_state | state_class }}">{{ state.data_feed_state }}</div>
-        <div class="stage-detail">Pepperstone, read-only</div>
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">AgentMarketContextV1</div>
-        {% if state.agent_panel and state.agent_panel.latest_context_issued_at_utc %}
-        <div class="stage-verdict good">ISSUED</div>
-        <div class="stage-detail">{{ state.agent_panel.latest_context_issued_at_utc }}</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">Strategy Agent</div>
-        {% if state.last_decision and state.last_decision.proposal %}
-        <div class="stage-verdict good">TRADE_PROPOSAL</div>
-        <div class="stage-detail">{{ state.last_decision.proposal.side }}</div>
-        {% elif state.last_decision and state.last_decision.platform_outcome == "NO_TRADE" %}
-        <div class="stage-verdict neutral">NO_TRADE</div>
-        <div class="stage-detail">normal strategy result</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">Agent Gateway</div>
-        {% if state.last_decision and state.last_decision.platform_outcome == "GATEWAY_REJECTED" %}
-        <div class="stage-verdict bad">REJECTED</div>
-        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
-        {% elif state.last_decision and state.last_decision.platform_outcome in ("DEGRADED", "AWAITING_EVIDENCE") %}
-        <div class="stage-verdict {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</div>
-        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
-        {% elif state.last_decision %}
-        <div class="stage-verdict good">ACCEPTED</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">Core Risk</div>
-        {% if state.last_decision and state.last_decision.risk_verdict %}
-        <div class="stage-verdict {{ state.last_decision.risk_verdict | state_class }}">{{ state.last_decision.risk_verdict }}</div>
-        <div class="stage-detail">{{ state.last_decision.risk_reason_codes | join(", ") if state.last_decision.risk_reason_codes else "—" }}</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">Platform Policy</div>
-        {% if state.last_decision and state.last_decision.policy_verdict %}
-        <div class="stage-verdict {{ state.last_decision.policy_verdict | state_class }}">{{ state.last_decision.policy_verdict }}</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">External Supervisor</div>
-        {% if state.last_decision and state.last_decision.supervisor_skipped %}
-        <div class="stage-verdict neutral">SUPERVISOR_SKIPPED_PAPER_MODE</div>
-        <div class="stage-detail">not an approval — paper mode only</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-    </div>
-    <div class="pipeline" style="margin-top:10px;">
-      <div class="pipeline-card">
-        <div class="stage-name">Paper Broker</div>
-        {% if state.last_decision and state.last_decision.platform_outcome in ("PAPER_FILLED", "PAPER_ORDER_CHECK_BLOCKED") %}
-        <div class="stage-verdict {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</div>
-        <div class="stage-detail">{{ state.last_decision.platform_outcome_detail or "—" }}</div>
-        {% else %}
-        <div class="stage-verdict muted">NO EVIDENCE</div>
-        <div class="stage-detail">&nbsp;</div>
-        {% endif %}
-      </div>
-      <div class="pipeline-card">
-        <div class="stage-name">Real broker execution</div>
-        <div class="stage-verdict bad">DISABLED / UNREACHABLE</div>
-        <div class="stage-detail">no order_send path exists in this build</div>
+    <div id="pipeline-body">
+      <div class="pipeline">
+        <div class="pipeline-card">
+          <div class="stage-name">Market</div>
+          <div class="stage-verdict {{ state.pipeline.market | pipeline_stage_class }}">{{ state.pipeline.market }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Context</div>
+          <div class="stage-verdict {{ state.pipeline.context | pipeline_stage_class }}">{{ state.pipeline.context }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Agent</div>
+          <div class="stage-verdict {{ state.pipeline.agent | pipeline_stage_class }}">{{ state.pipeline.agent }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Gateway</div>
+          <div class="stage-verdict {{ state.pipeline.gateway | pipeline_stage_class }}">{{ state.pipeline.gateway }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Core Risk</div>
+          <div class="stage-verdict {{ state.pipeline.risk | pipeline_stage_class }}">{{ state.pipeline.risk }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Platform Policy</div>
+          <div class="stage-verdict {{ state.pipeline.policy | pipeline_stage_class }}">{{ state.pipeline.policy }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Supervisor</div>
+          <div class="stage-verdict {{ state.pipeline.supervisor | pipeline_stage_class }}">{{ state.pipeline.supervisor }}</div>
+        </div>
+        <div class="pipeline-card">
+          <div class="stage-name">Paper Result</div>
+          <div class="stage-verdict {{ state.pipeline.paper | pipeline_stage_class }}">{{ state.pipeline.paper }}</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1034,6 +981,52 @@
     renderBrokerPendingOrders(state);
   }
 
+  // Mirrors app.py::pipeline_stage_class() exactly -- a different
+  // vocabulary from stateClass()'s three sets, so it gets its own explicit
+  // mapping rather than reusing stateClass and hoping the fallback lands
+  // somewhere sane. See dashboard/pipeline.py::pipeline_stage_class for the
+  // rationale behind each bucket.
+  var PIPELINE_GOOD_STAGES = ["OBSERVED", "ISSUED", "ACCEPTED", "TRADE_PROPOSAL", "PASS", "APPROVE"];
+  var PIPELINE_WARN_STAGES = ["AWAITING_OUTCOME", "SKIPPED_PAPER_MODE", "CLAIMED"];
+  var PIPELINE_BAD_STAGES = ["REJECTED", "BLOCK", "PAPER_ORDER_CHECK_BLOCKED", "UNKNOWN"];
+
+  function pipelineStageClass(value) {
+    var upper = String(value == null ? "" : value).toUpperCase();
+    if (PIPELINE_GOOD_STAGES.indexOf(upper) !== -1) return "good";
+    if (PIPELINE_WARN_STAGES.indexOf(upper) !== -1) return "warn";
+    if (PIPELINE_BAD_STAGES.indexOf(upper) !== -1) return "bad";
+    return "neutral";
+  }
+
+  // Mirrors the server-rendered Jinja markup for "Row 4: decision pipeline"
+  // exactly -- same one-shot full-container rebuild per poll as
+  // renderBrokerPanels/renderActivityFeed, so a later poll's stage badges
+  // genuinely replace the previous ones rather than leaving stale text
+  // behind on a re-render skipped by a diffing approach that was never used.
+  function renderPipeline(state) {
+    var el = document.getElementById("pipeline-body");
+    if (!el) return;
+    var p = (state && state.pipeline) || {};
+    var stages = [
+      ["Market", p.market],
+      ["Context", p.context],
+      ["Agent", p.agent],
+      ["Gateway", p.gateway],
+      ["Core Risk", p.risk],
+      ["Platform Policy", p.policy],
+      ["Supervisor", p.supervisor],
+      ["Paper Result", p.paper],
+    ];
+    var cards = stages.map(function (stage) {
+      var name = stage[0], value = stage[1];
+      return '<div class="pipeline-card">'
+        + '<div class="stage-name">' + esc(name) + "</div>"
+        + '<div class="stage-verdict ' + pipelineStageClass(value) + '">' + esc(value) + "</div>"
+        + "</div>";
+    }).join("");
+    el.innerHTML = '<div class="pipeline">' + cards + "</div>";
+  }
+
   // ---- Unified Live Activity feed (work order §23) ----
   //
   // Two genuinely separate streams, never sort-merged by a fabricated
@@ -1140,6 +1133,7 @@
   function applyState(state) {
     renderBrokerPanels(state);
     renderActivityFeed(state, currentActivityFilter);
+    renderPipeline(state);
 
     setClass("mt5-state", "state", stateClass(state.mt5_connectivity));
     setClass("mt5-dot", "dot", stateClass(state.mt5_connectivity));
@@ -1306,6 +1300,8 @@
       renderActivityFeed: renderActivityFeed,
       activityCategory: activityCategory,
       stateClass: stateClass,
+      renderPipeline: renderPipeline,
+      pipelineStageClass: pipelineStageClass,
       applyState: applyState,
     };
   }
