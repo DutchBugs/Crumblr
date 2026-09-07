@@ -136,7 +136,10 @@ class CapsuleSource(Protocol):
     """The slice of `persistence.journal.CapsuleStore` this reads."""
 
     def read_all(
-        self, *, environment: Environment | None = None
+        self,
+        *,
+        environment: Environment | None = None,
+        canonical_symbol: str | None = None,
     ) -> tuple[DecisionCapsule, ...]: ...
 
 
@@ -293,7 +296,13 @@ class ExecutionOrchestrator:
 
         now = self._clock()
         outcomes: list[ExecutionAttemptOutcome] = []
-        for capsule in self._capsules.read_all(environment=self._config.environment):
+        # Market Universe (ADR-022): bounded at the read itself, not
+        # filtered in application code after the fact — a worker bound to
+        # one market must never even fetch, let alone claim, a capsule
+        # belonging to another (owner corrective review, 2026-09-07/08).
+        for capsule in self._capsules.read_all(
+            environment=self._config.environment, canonical_symbol=self._canonical_symbol
+        ):
             if not _is_intent_time_approved(capsule):
                 continue
             outcome = self._process(capsule, now)
@@ -323,6 +332,24 @@ class ExecutionOrchestrator:
         assert capsule.supervisor_decision is not None
         intent = capsule.trade_intent
         prior_decision = capsule.risk_decision
+
+        # Market Universe (ADR-022, owner corrective review 2026-09-07/08):
+        # a second, defensive invariant behind `run_once()`'s own
+        # `read_all(canonical_symbol=...)` filter — this worker must never
+        # process a capsule for another market, even if some future
+        # caller reaches `_process()` directly or the filter above is
+        # ever bypassed. Not a business refusal (no `ExecutionEventType`
+        # for it): a capsule reaching here for the wrong market is a
+        # routing bug, not a rejectable-but-ordinary outcome.
+        assert capsule.canonical_symbol == self._canonical_symbol, (
+            f"cross-market routing: capsule {capsule.capsule_id} is for "
+            f"{capsule.canonical_symbol!r}, this worker is bound to "
+            f"{self._canonical_symbol!r}"
+        )
+        assert intent.symbol == self._canonical_symbol, (
+            f"cross-market routing: intent {intent.intent_id} is for "
+            f"{intent.symbol!r}, this worker is bound to {self._canonical_symbol!r}"
+        )
 
         order_request_id = uuid5(NAMESPACE_URL, f"crumblr:order:{intent.decision_hash}")
 

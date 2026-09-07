@@ -254,12 +254,26 @@ class CapsuleStore:
         inserted = connection.execute(statement).first() is not None
         return AppendResult(event_id=capsule.capsule_id, inserted=inserted)
 
-    def read_all(self, *, environment: Environment | None = None) -> tuple[DecisionCapsule, ...]:
+    def read_all(
+        self,
+        *,
+        environment: Environment | None = None,
+        canonical_symbol: str | None = None,
+    ) -> tuple[DecisionCapsule, ...]:
+        """`canonical_symbol` (Market Universe, ADR-022): bounds the read
+
+        to one market at the database, not in application code — an
+        execution worker bound to one symbol must never even fetch a
+        capsule belonging to another. See `application/execution.py
+        ::ExecutionOrchestrator.run_once()`, the one real caller that
+        passes this."""
         statement = select(decision_capsules).order_by(
             decision_capsules.c.occurred_at_utc, decision_capsules.c.sequence
         )
         if environment is not None:
             statement = statement.where(decision_capsules.c.environment == environment.value)
+        if canonical_symbol is not None:
+            statement = statement.where(decision_capsules.c.canonical_symbol == canonical_symbol)
 
         with self._engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()

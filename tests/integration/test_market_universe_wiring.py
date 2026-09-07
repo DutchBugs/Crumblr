@@ -11,13 +11,15 @@ not a full `run_once()` cycle), a fake MT5 terminal for the adapter
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from sqlalchemy import Engine
 
-from crumblr.application.execution import ExecutionOrchestrator
+from crumblr.application.execution import ExecutionOrchestrator, _approval_chain_fingerprint
 from crumblr.config import (
     ExecutionConfig,
     ExecutionOverrides,
@@ -30,6 +32,7 @@ from crumblr.config import (
     TradingAgentConfig,
 )
 from crumblr.domain.enums import AssetClass, Environment
+from crumblr.domain.models import DecisionCapsule
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.persistence.broker_state import BrokerStateStore
@@ -40,7 +43,8 @@ from crumblr.persistence.journal import CapsuleStore
 from crumblr.persistence.risk_session import PostgresRiskLedgerLock, PostgresRiskSessionStore
 from crumblr.risk.calendars import AlwaysOpenCalendar, FxWeekdayCalendar
 from crumblr.risk.kill_switch import KillSwitch
-from tests.integration._execution_fixtures import LOGIN, SERVER, FakeMt5, guard
+from tests.conftest import FIXED_NOW, make_intent, make_risk_decision, make_supervisor_decision
+from tests.integration._execution_fixtures import LOGIN, SERVER, STRATEGY_VERSION, FakeMt5, guard
 
 pytestmark = pytest.mark.integration
 
@@ -135,6 +139,185 @@ def _orchestrator(engine: Engine, config: PlatformConfig, *, canonical_symbol: s
         canonical_symbol=canonical_symbol,
         worker_id="test-worker",
     )
+
+
+def _sealed_capsule(
+    engine: Engine, config: PlatformConfig, *, canonical_symbol: str, broker_symbol: str
+) -> DecisionCapsule:
+    """A minimal PASS/APPROVE-shaped capsule for `canonical_symbol`, sealed
+
+    into real PostgreSQL — enough for `run_once()`'s `_is_intent_time_approved`
+    check and the cross-market read/claim proofs below, not a claim that
+    it would reach `ORDER_CHECKED` (no `InstrumentSpec` is recorded for
+    BTC/USD in these tests).
+    """
+    intent = make_intent(
+        symbol=canonical_symbol,
+        created_at_utc=FIXED_NOW,
+        expires_at_utc=FIXED_NOW + timedelta(minutes=10),
+        reference_price="1.08500",
+        stop_loss_price="1.08000",
+        take_profit_price="1.09000",
+        requested_risk_fraction="0.005",
+    )
+    capsule = DecisionCapsule(
+        capsule_id=uuid4(),
+        occurred_at_utc=FIXED_NOW,
+        correlation_id=uuid4(),
+        canonical_symbol=canonical_symbol,
+        broker_symbol=broker_symbol,
+        market_snapshot_id=uuid4(),
+        feature_set_version="features-v1",
+        feature_values_hash="abc123",
+        strategy_version=STRATEGY_VERSION,
+        model_version=None,
+        trade_intent=intent,
+        risk_config_version=config.config_version,
+        risk_decision=make_risk_decision(
+            intent.intent_id,
+            risk_config_version=config.config_version,
+            approved_volume="0.05",
+            account_equity="10000",
+            stop_distance_points=500,
+            risk_amount="50",
+        ),
+        supervisor_decision=make_supervisor_decision(intent.intent_id),
+        code_commit="deadbeef",
+        environment=Environment.PAPER,
+    )
+    CapsuleStore(engine).seal(capsule)
+    return capsule
+
+
+def _order_request_id(capsule: DecisionCapsule) -> Any:
+    assert capsule.trade_intent is not None
+    return uuid5(NAMESPACE_URL, f"crumblr:order:{capsule.trade_intent.decision_hash}")
+
+
+class TestCapsuleStoreReadAllIsBoundedBySymbol:
+    def test_a_symbol_filter_excludes_every_other_markets_capsule(self, engine: Engine) -> None:
+        config = two_market_config()
+        eur_capsule = _sealed_capsule(
+            engine, config, canonical_symbol="EUR/USD", broker_symbol="EURUSD"
+        )
+        btc_capsule = _sealed_capsule(
+            engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD"
+        )
+
+        eur_only = CapsuleStore(engine).read_all(canonical_symbol="EUR/USD")
+        btc_only = CapsuleStore(engine).read_all(canonical_symbol="BTC/USD")
+
+        assert [c.capsule_id for c in eur_only] == [eur_capsule.capsule_id]
+        assert [c.capsule_id for c in btc_only] == [btc_capsule.capsule_id]
+
+    def test_no_filter_still_returns_every_market(self, engine: Engine) -> None:
+        """Regression guard: the new parameter must stay optional and
+
+        default-preserving — every existing caller that never passes it
+        keeps today's exact behaviour."""
+        config = two_market_config()
+        _sealed_capsule(engine, config, canonical_symbol="EUR/USD", broker_symbol="EURUSD")
+        _sealed_capsule(engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD")
+
+        assert len(CapsuleStore(engine).read_all()) == 2
+
+
+class TestExecutionOrchestratorNeverClaimsAnotherMarketsCapsule:
+    """The owner's core finding, 2026-09-07/08: `run_once()` read every
+
+    capsule for the environment and relied on nothing to stop a worker
+    from claiming/processing a capsule that belonged to a different
+    market. Proven both directions — a EUR/USD worker must never touch a
+    BTC/USD capsule, and vice versa — and proven at the persistence
+    layer, not just by inspecting `run_once()`'s return value: the wrong
+    capsule must leave no `execution_requests` claim and no
+    `execution_events` row at all.
+    """
+
+    def test_a_eur_usd_worker_never_claims_or_processes_a_btc_usd_capsule(
+        self, engine: Engine
+    ) -> None:
+        config = two_market_config()
+        eur_capsule = _sealed_capsule(
+            engine, config, canonical_symbol="EUR/USD", broker_symbol="EURUSD"
+        )
+        btc_capsule = _sealed_capsule(
+            engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD"
+        )
+
+        orchestrator = _orchestrator(engine, config, canonical_symbol="EUR/USD")
+        outcomes = orchestrator.run_once()
+
+        # The BTC/USD capsule was never even seen by this worker's pass.
+        assert all(outcome.capsule_id != btc_capsule.capsule_id for outcome in outcomes)
+
+        requests = ExecutionRequestStore(engine)
+        events = ExecutionEventStore(engine)
+
+        eur_order_request_id = _order_request_id(eur_capsule)
+        btc_order_request_id = _order_request_id(btc_capsule)
+
+        # The EUR/USD capsule *was* claimed by the real run above — a
+        # fresh claim attempt with the same id and the same real
+        # approval-chain fingerprint now loses the race (a mismatched
+        # fingerprint would raise `ExecutionRequestConflictError` instead
+        # of reporting `claimed=False` — not what this probe is testing).
+        eur_reclaim = requests.claim(
+            order_request_id=eur_order_request_id,
+            capsule_id=eur_capsule.capsule_id,
+            intent_id=eur_capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint=_approval_chain_fingerprint(eur_capsule),
+            claimed_by="test-probe",
+            now=FIXED_NOW,
+        )
+        assert eur_reclaim.claimed is False, "the real run must have claimed the EUR/USD capsule"
+
+        # The BTC/USD capsule was never claimed at all — this probe claim
+        # is the first and only one, so it wins.
+        btc_probe_claim = requests.claim(
+            order_request_id=btc_order_request_id,
+            capsule_id=btc_capsule.capsule_id,
+            intent_id=btc_capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="probe",
+            claimed_by="test-probe",
+            now=FIXED_NOW,
+        )
+        assert btc_probe_claim.claimed is True, (
+            "the BTC/USD capsule must never have been claimed by the EUR/USD worker"
+        )
+
+        # And no durable execution event exists for it either, from
+        # before this probe claim.
+        assert events.events_for(btc_order_request_id) == ()
+
+    def test_a_btc_usd_worker_never_claims_or_processes_a_eur_usd_capsule(
+        self, engine: Engine
+    ) -> None:
+        config = two_market_config()
+        eur_capsule = _sealed_capsule(
+            engine, config, canonical_symbol="EUR/USD", broker_symbol="EURUSD"
+        )
+        _sealed_capsule(engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD")
+
+        orchestrator = _orchestrator(engine, config, canonical_symbol="BTC/USD")
+        orchestrator.run_once()
+
+        requests = ExecutionRequestStore(engine)
+        events = ExecutionEventStore(engine)
+        eur_order_request_id = _order_request_id(eur_capsule)
+
+        eur_probe_claim = requests.claim(
+            order_request_id=eur_order_request_id,
+            capsule_id=eur_capsule.capsule_id,
+            intent_id=eur_capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="probe",
+            claimed_by="test-probe",
+            now=FIXED_NOW,
+        )
+        assert eur_probe_claim.claimed is True, (
+            "the EUR/USD capsule must never have been claimed by the BTC/USD worker"
+        )
+        assert events.events_for(eur_order_request_id) == ()
 
 
 class TestExecutionOrchestratorUsesTheMarketsOwnConfig:

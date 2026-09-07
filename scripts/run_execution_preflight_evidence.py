@@ -315,8 +315,15 @@ class _SingleCapsuleSource:
     def __init__(self, capsule: DecisionCapsule) -> None:
         self._capsule = capsule
 
-    def read_all(self, *, environment: Environment | None = None) -> tuple[DecisionCapsule, ...]:
+    def read_all(
+        self,
+        *,
+        environment: Environment | None = None,
+        canonical_symbol: str | None = None,
+    ) -> tuple[DecisionCapsule, ...]:
         if environment is not None and self._capsule.environment is not environment:
+            return ()
+        if canonical_symbol is not None and self._capsule.canonical_symbol != canonical_symbol:
             return ()
         return (self._capsule,)
 
