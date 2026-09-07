@@ -112,7 +112,30 @@ _log = get_logger("paper_lite")
 
 PAPER_LITE_MODE: Literal["PAPER_LITE"] = "PAPER_LITE"
 PAPER_LITE_POLICY_VERSION = "owner-risk-policy-v1-paper-lite"
-PAPER_LITE_DATABASE_NAME = "crumblr_test_dev3"
+
+PAPER_LITE_SOAK_DATABASE_NAME = "crumblr_soak"
+"""The canonical database for a real, continuous MT5-reader-driven PAPER_LITE
+
+run (Agent Shadow / PAPER_LITE Soak, 2026-09-08). Real-market evidence must
+never share a database with the disposable integration-test schema
+(`crumblr`, dropped and recreated per test) -- `.env.example` and
+`scripts/reset_soak_database.py` already established this name; PAPER_LITE
+now honours it too."""
+
+PAPER_LITE_LEGACY_TEST_DATABASE_NAME = "crumblr_test_dev3"
+"""Retained for existing isolated test/dev workflows already built around
+
+this exact name (PL-001 through PL-004). Not for real-market evidence --
+use `PAPER_LITE_SOAK_DATABASE_NAME` for that."""
+
+PAPER_LITE_ALLOWED_DATABASE_NAMES = frozenset(
+    {PAPER_LITE_SOAK_DATABASE_NAME, PAPER_LITE_LEGACY_TEST_DATABASE_NAME}
+)
+"""An explicit, named whitelist -- deliberately not "any name containing
+
+'soak'" or similar pattern matching. Each accepted name is enumerated and
+reasoned about on its own; adding a third would mean adding a third named
+constant here, not loosening the check."""
 
 OWNER_MAX_RISK_PER_TRADE = Decimal("0.02")
 OWNER_MAX_OPEN_RISK = Decimal("0.03")
@@ -129,11 +152,16 @@ class PaperLiteSafetyError(RuntimeError):
 
 
 def require_paper_lite_database_url(url: str) -> str:
-    """Refuse every database except the track-isolated PAPER_LITE database."""
+    """Refuse every database except the explicitly named, track-isolated
 
-    if make_url(url).database != PAPER_LITE_DATABASE_NAME:
+    PAPER_LITE databases -- never the shared `crumblr` integration-test
+    database, and never merely "any name that looks right"."""
+
+    database = make_url(url).database
+    if database not in PAPER_LITE_ALLOWED_DATABASE_NAMES:
+        allowed = ", ".join(sorted(PAPER_LITE_ALLOWED_DATABASE_NAMES))
         raise PaperLiteConfigurationError(
-            f"PAPER_LITE requires the dedicated {PAPER_LITE_DATABASE_NAME} database"
+            f"PAPER_LITE requires one of the dedicated databases ({allowed}); got {database!r}"
         )
     return url
 

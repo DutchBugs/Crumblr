@@ -422,6 +422,37 @@ class TestTypedPaperOnlyBoundary:
                 "postgresql+psycopg://user:secret@localhost:5432/crumblr"
             )
 
+
+class TestPaperLiteDatabaseWhitelist:
+    """Owner decision (Agent Shadow / PAPER_LITE Soak, 2026-09-08): the
+
+    real-market soak must use `crumblr_soak`, never `crumblr_test_dev3` --
+    but existing isolated test/dev workflows already depend on
+    `crumblr_test_dev3`, so both stay accepted, explicitly, by name. No
+    "name contains 'soak'" pattern match: an arbitrary other database
+    (including one that merely contains the substring) must still fail
+    closed."""
+
+    def test_crumblr_soak_is_accepted(self) -> None:
+        url = "postgresql+psycopg://user:secret@localhost:5432/crumblr_soak"
+        assert require_paper_lite_database_url(url) == url
+
+    def test_crumblr_test_dev3_remains_accepted_for_legacy_workflows(self) -> None:
+        url = "postgresql+psycopg://user:secret@localhost:5432/crumblr_test_dev3"
+        assert require_paper_lite_database_url(url) == url
+
+    def test_the_shared_integration_test_database_is_rejected(self) -> None:
+        with pytest.raises(PaperLiteConfigurationError, match="crumblr_soak"):
+            require_paper_lite_database_url(
+                "postgresql+psycopg://user:secret@localhost:5432/crumblr"
+            )
+
+    def test_an_arbitrary_other_database_is_rejected_even_if_it_contains_soak(self) -> None:
+        with pytest.raises(PaperLiteConfigurationError, match="crumblr_soak"):
+            require_paper_lite_database_url(
+                "postgresql+psycopg://user:secret@localhost:5432/some_other_soak_db"
+            )
+
     def test_clear_requires_operator_assertion_and_journals_it_durably(
         self, tmp_path: Path
     ) -> None:

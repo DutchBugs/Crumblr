@@ -15,8 +15,13 @@ runtime remain external dependencies. See the worklog PL-001 through PL-004.
 ## Prerequisites
 
 - Use branch `lite/paper-orchestrator` in `.claude/worktrees/paper-lite`.
-- PostgreSQL database `crumblr_test_dev3` exists and is reachable from both the
-  Windows MT5 reader and the PAPER_LITE process.
+- PostgreSQL database `crumblr_soak` exists and is reachable from both the
+  Windows MT5 reader and the PAPER_LITE process. This is the canonical
+  database for a real MT5 feed (Agent Shadow / PAPER_LITE Soak, 2026-09-08) --
+  `require_paper_lite_database_url()` also still accepts `crumblr_test_dev3`
+  for an isolated test/dev workflow with no real broker connection, but real
+  MT5 evidence must never land there. Never the shared `crumblr` integration-
+  test database either way — it is dropped and recreated per test.
 - Apply migrations to that database before starting any process.
 - A Windows host has the existing Pepperstone DEMO terminal and the normal MT5
   credentials available through the existing secret environment variables.
@@ -26,9 +31,13 @@ runtime remain external dependencies. See the worklog PL-001 through PL-004.
 Set the dedicated database explicitly in every shell:
 
 ```bash
-export CRUMBLR_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST:55432/crumblr_test_dev3'
+export CRUMBLR_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST:55432/crumblr_soak'
 uv run alembic upgrade head
 ```
+
+If the soak database ever needs a deliberate reset, use
+`scripts/reset_soak_database.py` (the coherent Alembic downgrade/upgrade
+round trip) — never manual table drops, never `create_all`.
 
 The URL is an example shape only. Keep the real value in the operator's secret
 store or shell environment; never commit it.
@@ -36,7 +45,7 @@ store or shell environment; never commit it.
 ## 1. Start the read-only Pepperstone feed
 
 Run this on the Windows MT5 host from the same code revision, pointing it at
-`crumblr_test_dev3`:
+`crumblr_soak`:
 
 ```bash
 uv run python scripts/mt5_live_reader.py \
