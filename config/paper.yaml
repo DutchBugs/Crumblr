@@ -102,21 +102,24 @@ account_guard:
 # made an explicit, reviewable field instead of a runtime guess — no new
 # information, no behaviour change to which symbol actually gets traded.
 #
-# BTC/USD is a second entry, `enabled: false`: the owner has stated its
-# broker symbol (BTCUSD on PepperstoneUK-Demo) from a sanitized probe run
-# outside this repository — that fixture has been searched for and does
-# NOT exist as a checked-in artifact here (no `var/*.sanitized.json` for
-# BTC/USD, unlike EUR/USD's own first-contact evidence above). Treated as
-# owner-asserted, not independently repo-verified: `expected_spec_version`
-# stays unset (deliberately unpinned, same F-055 discipline as EUR/USD's
-# own history — a baseline is pinned only after a human reviews a real
-# observation, never invented) and `enabled: false` until a real
-# `scripts/mt5_probe.py --canonical-symbol "BTC/USD" --sanitized-json ...`
-# run produces the same kind of checked-in evidence EUR/USD already has.
-# No risk/execution overrides are set: until an owner risk decision exists
-# for this asset class, it inherits the platform defaults below, same as
-# EUR/USD — see review/adr/ADR-022-market-universe.md for the full design
-# and the crypto session-policy gap this deliberately leaves open.
+# BTC/USD is a second entry, `enabled: false`: real-terminal validation
+# (BTC/USD Enablement Readiness, 2026-09-08, review/adr/ADR-023-btc-usd-
+# session-policy.md) confirmed `broker_symbol: BTCUSD` against the real
+# PepperstoneUK-Demo terminal — `scripts/mt5_probe.py --canonical-symbol
+# "BTC/USD" --sanitized-json ...` resolved exactly one candidate, `BTCUSD`
+# (path `Retail\Cryptocurrencies\Major\BTCUSD`), matching the pin already
+# recorded here. `session_policy_approved: true` records the owner's real
+# session-policy decision for this specific market (BTC/USD trades
+# continuously — no weekly close, no flatten deadline; every other
+# risk/execution gate still applies) — see `risk/calendars.py`. This is
+# a session-policy and terminal-validation decision only:
+# `expected_spec_version` stays unset (deliberately unpinned, F-055 —
+# a human has not yet reviewed and approved the real observed
+# InstrumentSpec fields, only confirmed the symbol resolves) and
+# `enabled: false` is unchanged — no trading authorization implied.
+# No risk/execution overrides are set: they inherit the platform
+# defaults below, same as EUR/USD — see
+# review/adr/ADR-022-market-universe.md and ADR-023 for the full design.
 markets:
   - canonical_symbol: EUR/USD
     enabled: true
@@ -128,3 +131,4 @@ markets:
     asset_class: CRYPTO
     broker_symbol: BTCUSD
     expected_spec_version: null
+    session_policy_approved: true

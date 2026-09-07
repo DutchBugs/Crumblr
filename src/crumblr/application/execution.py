@@ -280,7 +280,11 @@ class ExecutionOrchestrator:
         self._execution_config = config.execution_for(canonical_symbol)
         _market = config.market_for(canonical_symbol)
         self._calendar: TradingCalendar = (
-            calendar_for(_market.asset_class) if _market is not None else FxWeekdayCalendar()
+            calendar_for(
+                _market.asset_class, session_policy_approved=_market.session_policy_approved
+            )
+            if _market is not None
+            else FxWeekdayCalendar()
         )
 
     def run_once(self) -> tuple[ExecutionAttemptOutcome, ...]:

@@ -58,13 +58,15 @@ BTC_OVERRIDE_SLIPPAGE = 5
 """Deliberately different from the platform default (20)."""
 
 
-def two_market_payload() -> dict[str, Any]:
+def two_market_payload(*, btc_session_policy_approved: bool = False) -> dict[str, Any]:
     """The platform default (EUR/USD, unchanged) plus a second market,
 
     BTC/USD, `enabled: true` **for this test payload only** — the shipped
     `config/paper.yaml` keeps BTC/USD `enabled: false` per the owner's
     explicit instruction; this is a local, in-memory config object that
-    never touches disk.
+    never touches disk. `btc_session_policy_approved` defaults `False`
+    (fail-closed, unapproved) — pass `True` to model the real, owner-
+    approved BTC/USD session policy (ADR-023, 2026-09-08).
     """
     payload = paper_config_payload()
     payload["markets"].append(
@@ -73,6 +75,7 @@ def two_market_payload() -> dict[str, Any]:
             "enabled": True,
             "asset_class": "CRYPTO",
             "broker_symbol": "BTCUSD",
+            "session_policy_approved": btc_session_policy_approved,
             "risk_overrides": {"max_daily_loss": str(BTC_OVERRIDE_DAILY_LOSS)},
             "execution_overrides": {"max_slippage_points": BTC_OVERRIDE_SLIPPAGE},
         }
@@ -80,8 +83,10 @@ def two_market_payload() -> dict[str, Any]:
     return payload
 
 
-def two_market_config() -> PlatformConfig:
-    return PlatformConfig.model_validate(two_market_payload())
+def two_market_config(*, btc_session_policy_approved: bool = False) -> PlatformConfig:
+    return PlatformConfig.model_validate(
+        two_market_payload(btc_session_policy_approved=btc_session_policy_approved)
+    )
 
 
 def btc_spec() -> InstrumentSpec:
@@ -110,6 +115,26 @@ class TestReplayOrchestratorUsesTheMarketsOwnConfig:
             orchestrator._execution_config.max_slippage_points
             != config.execution.max_slippage_points
         )
+
+    def test_a_second_markets_session_policy_approval_reaches_the_orchestrator(self) -> None:
+        """ADR-023: the calendar's own `session_policy_approved` — not
+
+        just its type — must reach the constructed orchestrator, keyed to
+        this exact market's config, defaulting unapproved."""
+        spec = btc_spec()
+
+        def _replay_orchestrator(*, btc_session_policy_approved: bool) -> ReplayOrchestrator:
+            config = two_market_config(btc_session_policy_approved=btc_session_policy_approved)
+            broker = SimulatedBroker(
+                spec, starting_balance=Decimal("10000"), server="DemoBroker-Demo"
+            )
+            return ReplayOrchestrator(config, spec, broker, starting_equity=Decimal("10000"))
+
+        approved = _replay_orchestrator(btc_session_policy_approved=True)
+        unapproved = _replay_orchestrator(btc_session_policy_approved=False)
+
+        assert approved._calendar.session_policy_approved is True
+        assert unapproved._calendar.session_policy_approved is False
 
     def test_a_crypto_markets_calendar_is_not_the_fx_default(self) -> None:
         config = two_market_config()
@@ -244,17 +269,35 @@ class TestAgentDecisionPathUsesTheMarketsOwnConfig:
     style (`tests/unit/test_agent_decision_path.py`).
     """
 
-    def test_a_btc_intent_is_refused_for_session_blackout(self) -> None:
-        """BTC/USD has no owner-approved session policy
+    def test_a_btc_intent_is_refused_for_session_blackout_when_unapproved(self) -> None:
+        """`session_policy_approved=False` (this test's own config,
 
-        (`AlwaysOpenCalendar`), so every intent for it is refused with
-        `SESSION_BLACKOUT` regardless of anything else — proving the
-        calendar wiring reaches this module."""
-        config = two_market_config()
+        deliberately — the real shipped config now has it `True`, ADR-023
+        below): every intent is refused with `SESSION_BLACKOUT` regardless
+        of anything else — proving the calendar wiring reaches this
+        module, and that fail-closed remains the behaviour for any market
+        that has not had this exact approval made for it."""
+        config = two_market_config(btc_session_policy_approved=False)
         _, result = _evaluate_btc_with(config, prior_loss_session_store=False)
 
         assert result.risk_decision is not None
         assert ReasonCode.SESSION_BLACKOUT in result.risk_decision.reason_codes
+
+    def test_a_btc_intent_is_not_session_blackout_once_approved(self) -> None:
+        """Market Universe, ADR-023 (BTC/USD Enablement Readiness, owner
+
+        decision 2026-09-08): with `session_policy_approved=True` — the
+        real shipped `config/paper.yaml` state — the calendar wiring
+        reaches `SESSION_BLACKOUT`'s absence just as reliably as it
+        reached its presence above. `order_send`/`enabled` stay
+        completely separate: this proves only that the session-policy
+        gate itself opens, not that the intent is approved outright.
+        """
+        config = two_market_config(btc_session_policy_approved=True)
+        _, result = _evaluate_btc_with(config, prior_loss_session_store=False)
+
+        assert result.risk_decision is not None
+        assert ReasonCode.SESSION_BLACKOUT not in result.risk_decision.reason_codes
 
     def test_a_recorded_prior_loss_only_halts_against_the_markets_own_override(
         self,

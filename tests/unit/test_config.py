@@ -344,6 +344,55 @@ class TestMarkets:
         assert market is not None
         assert market.expected_spec_version == "a" * 64
 
+    def test_session_policy_approved_defaults_to_false(self) -> None:
+        """Market Universe, ADR-023: the same "explicit, git-visible act,
+
+        not inferred" discipline `expected_spec_version` uses — a market
+        that does not state an approval is unapproved, never assumed
+        approved because it's convenient."""
+        config = PlatformConfig.model_validate(paper_config_payload())
+        market = config.market_for("EUR/USD")
+        assert market is not None
+        assert market.session_policy_approved is False
+
+    def test_session_policy_approved_can_be_set(self) -> None:
+        payload = paper_config_payload()
+        payload["markets"] = [
+            {
+                "canonical_symbol": "BTC/USD",
+                "enabled": False,
+                "asset_class": "CRYPTO",
+                "broker_symbol": "BTCUSD",
+                "session_policy_approved": True,
+            }
+        ]
+        config = PlatformConfig.model_validate(payload)
+        market = config.market_for("BTC/USD")
+        assert market is not None
+        assert market.session_policy_approved is True
+
+    def test_session_policy_approval_does_not_imply_trading_authorization(self) -> None:
+        """ADR-023's own scope boundary: approving a session policy is not
+
+        an `enabled`/`order_send` decision — the two config flags must
+        vary independently."""
+        payload = paper_config_payload()
+        payload["markets"] = [
+            {
+                "canonical_symbol": "BTC/USD",
+                "enabled": False,
+                "asset_class": "CRYPTO",
+                "broker_symbol": "BTCUSD",
+                "session_policy_approved": True,
+            }
+        ]
+        config = PlatformConfig.model_validate(payload)
+        market = config.market_for("BTC/USD")
+        assert market is not None
+        assert market.session_policy_approved is True
+        assert market.enabled is False
+        assert "BTC/USD" not in config.enabled_symbols()
+
 
 class TestConfigVersioning:
     """build.md §17: configuration is versioned and immutable per decision."""

@@ -224,6 +224,26 @@ class MarketConfig(ConfigSection):
     baseline changes only through an explicit, git-visible act, not because
     a database happened to be recreated."""
 
+    session_policy_approved: bool = False
+    """Whether an owner has made a real session-policy decision for this
+
+    specific market's trading calendar (`risk/calendars.py`) — never
+    inferred from `asset_class` alone. Defaults to `False`: a calendar
+    with no weekly-close concept (`AlwaysOpenCalendar`, every `CRYPTO`
+    market today) fails closed — `risk/trading_window.py::phase_at`
+    refuses every entry — until this is explicitly set `True` for that
+    exact market. Approving one market (e.g. BTC/USD) does not approve
+    any other market sharing its `asset_class`; each is its own owner
+    decision, recorded here per-symbol, the same "explicit, git-visible
+    act, not inferred" discipline `expected_spec_version` already uses.
+
+    This flag alone grants no trading authority — it only says a session
+    *policy* exists (here: BTC/USD trades continuously, no weekly close
+    or flatten deadline, subject to every other risk/execution gate).
+    `MarketConfig.enabled`, `ExecutionConfig.submission_enabled`/
+    `feedback_2_0_approved` and `order_send` reachability are entirely
+    separate, unaffected gates. See `review/adr/ADR-023-btc-usd-session-policy.md`."""
+
     risk_overrides: RiskOverrides | None = None
     execution_overrides: ExecutionOverrides | None = None
 

@@ -58,6 +58,32 @@ class TestAlwaysOpenCalendarInventsNoBoundary:
         assert calendar.trading_day(WEEKEND_MIDNIGHT) == WEEKEND_MIDNIGHT.date()
 
 
+class TestAlwaysOpenCalendarSessionPolicyApproval:
+    """Market Universe, ADR-023 (BTC/USD Enablement Readiness,
+
+    2026-09-08) — the one real owner decision this calendar needs:
+    `session_policy_approved`, per instance, defaulting to unapproved.
+    """
+
+    def test_defaults_to_unapproved(self) -> None:
+        assert AlwaysOpenCalendar().session_policy_approved is False
+
+    def test_reports_exactly_what_it_was_constructed_with(self) -> None:
+        assert AlwaysOpenCalendar(session_policy_approved=True).session_policy_approved is True
+        assert AlwaysOpenCalendar(session_policy_approved=False).session_policy_approved is False
+
+
+class TestFxWeekdayCalendarIsAlwaysApproved:
+    def test_session_policy_approved_is_always_true(self) -> None:
+        """D1.5 is already a real, owner-approved policy — `phase_at`
+
+        never actually consults this for `FxWeekdayCalendar` (its
+        `weekly_close()` never returns `None`), but it must never report
+        `False` either, in case something downstream ever reads it
+        directly."""
+        assert FxWeekdayCalendar().session_policy_approved is True
+
+
 class TestCalendarFor:
     def test_fx_and_metal_use_the_fx_weekday_calendar(self) -> None:
         assert isinstance(calendar_for(AssetClass.FX), FxWeekdayCalendar)
@@ -65,3 +91,29 @@ class TestCalendarFor:
 
     def test_crypto_uses_the_always_open_calendar(self) -> None:
         assert isinstance(calendar_for(AssetClass.CRYPTO), AlwaysOpenCalendar)
+
+    def test_crypto_defaults_to_an_unapproved_calendar(self) -> None:
+        """A caller that does not pass `session_policy_approved` (every
+
+        call site before ADR-023) keeps the exact fail-closed behaviour
+        it always had."""
+        calendar = calendar_for(AssetClass.CRYPTO)
+        assert isinstance(calendar, AlwaysOpenCalendar)
+        assert calendar.session_policy_approved is False
+
+    def test_crypto_threads_the_approval_flag_through(self) -> None:
+        calendar = calendar_for(AssetClass.CRYPTO, session_policy_approved=True)
+        assert isinstance(calendar, AlwaysOpenCalendar)
+        assert calendar.session_policy_approved is True
+
+    def test_fx_and_metal_ignore_the_approval_flag(self) -> None:
+        """The flag only means something for a calendar with no
+
+        weekly-close concept — passing it for FX/METAL must not change
+        anything (there is nothing for it to approve)."""
+        assert isinstance(
+            calendar_for(AssetClass.FX, session_policy_approved=False), FxWeekdayCalendar
+        )
+        assert isinstance(
+            calendar_for(AssetClass.METAL, session_policy_approved=False), FxWeekdayCalendar
+        )

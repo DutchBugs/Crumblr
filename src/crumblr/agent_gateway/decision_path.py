@@ -669,7 +669,11 @@ def _risk_context(config: PlatformConfig, canonical_symbol: str) -> policies.Ris
     `execution_for()`/`calendar_for()` resolve the real per-market values.
     """
     market = config.market_for(canonical_symbol)
-    calendar = calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
+    calendar = (
+        calendar_for(market.asset_class, session_policy_approved=market.session_policy_approved)
+        if market is not None
+        else FxWeekdayCalendar()
+    )
     return policies.RiskContext(
         risk=config.risk_for(canonical_symbol),
         execution=config.execution_for(canonical_symbol),

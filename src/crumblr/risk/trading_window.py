@@ -158,22 +158,28 @@ def phase_at(
     **Owner correction, 2026-09-07** (`review/adr/ADR-022-market-universe.md`
     §4 item 1, `review/DEVIATIONS.md` D-060): `calendar.weekly_close(moment)`
     returning `None` (no weekly-close concept — e.g.
-    `risk.calendars.AlwaysOpenCalendar`) resolves to `SessionPhase.CLOSED`,
-    **unconditionally** — checked before `policy.enabled`, so a globally
-    enabled `IntradayPolicy` cannot accidentally permit entries on a
-    calendar with no approved session policy either. An earlier version
-    resolved this case to `OPEN` (treating "no calendar policy" the same
-    as a disabled `IntradayPolicy` — nothing to measure offsets against).
-    The owner rejected that: absence of an approved session policy must
-    fail closed, not permit entries by default. No asset class trades
-    until an owner makes a real session-policy decision for it and a new
-    `TradingCalendar` implementation encodes it.
+    `risk.calendars.AlwaysOpenCalendar`) resolves to `SessionPhase.CLOSED`
+    unless the calendar's own `session_policy_approved` says otherwise —
+    checked before `policy.enabled`, so a globally enabled `IntradayPolicy`
+    cannot accidentally permit entries on a calendar with no approved
+    session policy either. An earlier version resolved this case to
+    `OPEN` unconditionally (treating "no calendar policy" the same as a
+    disabled `IntradayPolicy` — nothing to measure offsets against). The
+    owner rejected that: absence of an approved session policy must fail
+    closed, not permit entries by default.
+
+    **Owner decision, 2026-09-08** (`review/adr/ADR-023-btc-usd-session-
+    policy.md`): the first real per-market approval —
+    `calendar.session_policy_approved` (from `config.MarketConfig
+    .session_policy_approved`, `False` by default) resolves `OPEN` when
+    `True`, `CLOSED` otherwise. No asset class or market trades until an
+    owner makes a real session-policy decision for it specifically.
     """
     if not calendar.is_market_open(moment):
         return SessionPhase.CLOSED
     close = calendar.weekly_close(moment)
     if close is None:
-        return SessionPhase.CLOSED
+        return SessionPhase.OPEN if calendar.session_policy_approved else SessionPhase.CLOSED
     if not policy.enabled:
         return SessionPhase.OPEN
 

@@ -441,6 +441,36 @@ class TestMarketUniverseCalendarFailsClosed:
         assert decision.verdict is RiskVerdict.PASS
         assert ReasonCode.SESSION_BLACKOUT not in decision.reason_codes
 
+    def test_an_approved_always_open_calendar_no_longer_hits_session_blackout(self) -> None:
+        """Market Universe, ADR-023 (BTC/USD Enablement Readiness, owner
+
+        decision 2026-09-08): the fail-closed default above is per
+        calendar *instance*, not a blanket rule against
+        `AlwaysOpenCalendar` as a type — once a market's own
+        `session_policy_approved` is `True`, `evaluate()` no longer
+        refuses it for `SESSION_BLACKOUT`, at this exact enforcement
+        point every real orchestrator funnels through."""
+        decision = evaluate(
+            risk_context=context(calendar=AlwaysOpenCalendar(session_policy_approved=True))
+        )
+        assert ReasonCode.SESSION_BLACKOUT not in decision.reason_codes
+
+    def test_approving_one_calendar_instance_does_not_approve_another(self) -> None:
+        """The approval is per-market (per `AlwaysOpenCalendar` instance,
+
+        constructed from that market's own config), never global to the
+        `AlwaysOpenCalendar` class or the `CRYPTO` asset class as a
+        whole — a second, unapproved instance still fails closed even
+        though an approved one exists elsewhere in the same process."""
+        approved_decision = evaluate(
+            risk_context=context(calendar=AlwaysOpenCalendar(session_policy_approved=True))
+        )
+        unapproved_decision = evaluate(
+            risk_context=context(calendar=AlwaysOpenCalendar(session_policy_approved=False))
+        )
+        assert ReasonCode.SESSION_BLACKOUT not in approved_decision.reason_codes
+        assert ReasonCode.SESSION_BLACKOUT in unapproved_decision.reason_codes
+
 
 class TestIntentValidity:
     def test_an_expired_intent_is_blocked(self) -> None:

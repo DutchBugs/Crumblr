@@ -22,6 +22,19 @@ asset class trades until an owner makes a real session-policy decision
 for it and a new `TradingCalendar` implementation encodes it. See
 `review/adr/ADR-022-market-universe.md` §4 item 1 and
 `review/DEVIATIONS.md` D-060 for the correction record.
+
+**Owner decision, 2026-09-08 (BTC/USD Enablement Readiness,
+`review/adr/ADR-023-btc-usd-session-policy.md`):** the first real
+session-policy decision for a 24/7 asset class — BTC/USD trades
+continuously, no weekly close or flatten deadline. `AlwaysOpenCalendar`
+now carries a `session_policy_approved` flag, set per-market from
+`config.MarketConfig.session_policy_approved` (`False` by default, the
+same "explicit, git-visible act, not inferred" discipline
+`expected_spec_version` uses) — approving BTC/USD does not approve any
+other `CRYPTO` market sharing this calendar class; each is its own owner
+decision. `phase_at` resolves `OPEN` only when this flag is `True`; it
+stays fail-closed for every market that has not had this exact decision
+made for it, exactly as before.
 """
 
 from __future__ import annotations
@@ -56,9 +69,21 @@ class TradingCalendar(Protocol):
 
         if this calendar has no weekly-close concept at all — not "the
         close is far away," an actual absence of the concept. `phase_at`
-        treats `None` as "no owner-approved session policy exists for this
-        calendar yet" and fails closed (`SessionPhase.CLOSED`) — never as
-        permission to trade by default.
+        treats `None` as "consult `session_policy_approved` instead of an
+        `IntradayPolicy`" — never as permission to trade by default.
+        """
+        ...
+
+    @property
+    def session_policy_approved(self) -> bool:
+        """Whether an owner has made a real session-policy decision that
+
+        applies when `weekly_close()` is `None` — irrelevant otherwise
+        (a calendar with a real weekly close, like `FxWeekdayCalendar`,
+        already has its own owner-approved policy, D1.5). `phase_at`
+        resolves `OPEN` only when this is `True`; every calendar with no
+        weekly-close concept and no approval stays `SessionPhase.CLOSED`
+        unconditionally.
         """
         ...
 
@@ -81,21 +106,34 @@ class FxWeekdayCalendar:
     def weekly_close(self, moment: UtcDatetime) -> datetime:
         return sessions.weekly_close(moment)
 
+    @property
+    def session_policy_approved(self) -> bool:
+        """Always `True` — D1.5 is already a real, owner-approved policy;
+
+        `weekly_close()` never returns `None` here, so `phase_at` never
+        actually consults this for `FxWeekdayCalendar`. Reported `True`
+        rather than `False` so nothing downstream could ever misread an
+        already-approved calendar as unapproved."""
+        return True
+
 
 class AlwaysOpenCalendar:
-    """A 24/7 market with no owner-approved session policy yet.
+    """A 24/7 market. `session_policy_approved` (Market Universe, ADR-023)
 
-    `trading_day` buckets by the plain UTC calendar day — a simple, honest
-    default for a market that has no other stated boundary, not a
-    disguised claim about what the *right* trading-day definition for this
-    asset class should be. `weekly_close` returns `None`: there is no
-    weekly-close concept here at all, by construction, until a real owner
-    decision exists and gets its own `TradingCalendar` implementation.
-    `is_market_open` still reports the physical truth (a 24/7 market is
-    always open) — it is `phase_at`'s job, not this calendar's, to turn
-    "no approved policy" into "no entries" (`SessionPhase.CLOSED`,
-    unconditionally, regardless of `is_market_open`).
+    is the one real owner decision this calendar needs: whether the
+    "no weekly-close concept" `weekly_close()` reports is a genuine,
+    owner-approved "trades continuously, no restriction," or still an
+    unapproved gap that must fail closed. `trading_day` buckets by the
+    plain UTC calendar day — a simple, honest default for a market that
+    has no other stated boundary, not a disguised claim about what the
+    *right* trading-day definition for this asset class should be.
+    `is_market_open` reports the physical truth (a 24/7 market is always
+    open) regardless of approval — it is `phase_at`'s job, not this
+    calendar's, to turn "no approved policy" into "no entries."
     """
+
+    def __init__(self, *, session_policy_approved: bool = False) -> None:
+        self._session_policy_approved = session_policy_approved
 
     def is_market_open(self, moment: UtcDatetime) -> bool:
         del moment
@@ -108,21 +146,31 @@ class AlwaysOpenCalendar:
         del moment
         return None
 
-
-_CALENDARS_BY_ASSET_CLASS: dict[AssetClass, TradingCalendar] = {
-    AssetClass.FX: FxWeekdayCalendar(),
-    AssetClass.METAL: FxWeekdayCalendar(),
-    AssetClass.CRYPTO: AlwaysOpenCalendar(),
-}
-"""`METAL` maps to the same FX-weekday calendar as `FX`: this broker trades
-
-metals on FX-like hours. Revisit with real evidence if that is ever wrong
-for a specific metal — this is a starting assumption stated explicitly, not
-a claim verified against a real metals session."""
+    @property
+    def session_policy_approved(self) -> bool:
+        return self._session_policy_approved
 
 
-def calendar_for(asset_class: AssetClass) -> TradingCalendar:
-    return _CALENDARS_BY_ASSET_CLASS[asset_class]
+def calendar_for(
+    asset_class: AssetClass, *, session_policy_approved: bool = False
+) -> TradingCalendar:
+    """`session_policy_approved` (Market Universe, ADR-023): the calling
+
+    market's own `config.MarketConfig.session_policy_approved` — never a
+    blanket per-asset-class value. Ignored for `FX`/`METAL`
+    (`FxWeekdayCalendar` is unconditionally approved, D1.5); for `CRYPTO`
+    it decides whether the returned `AlwaysOpenCalendar` resolves entries
+    `OPEN` or fails closed. Defaults `False` — a caller that does not pass
+    it keeps the pre-ADR-023 fail-closed behaviour exactly.
+    """
+    if asset_class in (AssetClass.FX, AssetClass.METAL):
+        # METAL maps to the same FX-weekday calendar as FX: this broker
+        # trades metals on FX-like hours. Revisit with real evidence if
+        # that is ever wrong for a specific metal — a starting assumption
+        # stated explicitly, not a claim verified against a real metals
+        # session.
+        return FxWeekdayCalendar()
+    return AlwaysOpenCalendar(session_policy_approved=session_policy_approved)
 
 
 __all__ = [

@@ -353,7 +353,11 @@ class PaperLiteOrchestrator:
         self._execution_config = config.execution_for(assignment.canonical_symbol)
         _market = config.market_for(assignment.canonical_symbol)
         self._calendar: TradingCalendar = (
-            calendar_for(_market.asset_class) if _market is not None else FxWeekdayCalendar()
+            calendar_for(
+                _market.asset_class, session_policy_approved=_market.session_policy_approved
+            )
+            if _market is not None
+            else FxWeekdayCalendar()
         )
         if incident_clear_assertion is not None:
             incident_clear_assertion.record(broker)

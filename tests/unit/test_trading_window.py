@@ -185,6 +185,55 @@ class TestACalendarWithNoWeeklyCloseConceptFailsClosed:
         assert time_until_weekly_close(at(WINTER_FRIDAY, 21, 0), calendar=calendar) is None
 
 
+class TestAnApprovedNoWeeklyCloseCalendarResolvesOpen:
+    """Market Universe, ADR-023 (BTC/USD Enablement Readiness, owner
+
+    decision 2026-09-08): once a calendar's `session_policy_approved` is
+    `True`, "no weekly-close concept" means exactly what it always
+    should have meant for a genuinely 24/7, owner-approved market —
+    `OPEN`, unconditionally, at every moment, regardless of
+    `IntradayPolicy`. The fail-closed default (`TestACalendarWith
+    NoWeeklyCloseConceptFailsClosed` above) is unchanged for any
+    calendar that has *not* had this exact approval set.
+    """
+
+    def test_always_open_at_every_fixture_moment(self) -> None:
+        calendar = AlwaysOpenCalendar(session_policy_approved=True)
+        for hour in (0, 6, 12, 18, 23):
+            assert phase_at(at(WINTER_FRIDAY, hour), POLICY, calendar=calendar) is (
+                SessionPhase.OPEN
+            )
+
+    def test_open_regardless_of_the_platforms_intraday_policy(self) -> None:
+        approved = AlwaysOpenCalendar(session_policy_approved=True)
+        assert phase_at(WINTER_FRIDAY, POLICY, calendar=approved) is SessionPhase.OPEN
+        assert phase_at(WINTER_FRIDAY, IntradayPolicy.disabled(), calendar=approved) is (
+            SessionPhase.OPEN
+        )
+
+    def test_new_entries_are_permitted(self) -> None:
+        calendar = AlwaysOpenCalendar(session_policy_approved=True)
+        for hour in (0, 6, 12, 18, 23):
+            assert permits_new_entry(at(WINTER_FRIDAY, hour), POLICY, calendar=calendar)
+
+    def test_flatness_is_never_required(self) -> None:
+        calendar = AlwaysOpenCalendar(session_policy_approved=True)
+        assert not requires_flat(WINTER_FRIDAY, POLICY, calendar=calendar)
+
+    def test_an_unapproved_calendar_of_the_same_type_still_fails_closed(self) -> None:
+        """The approval is per-instance (per-market, via `config.MarketConfig
+
+        .session_policy_approved`), never a blanket change to
+        `AlwaysOpenCalendar` or the `CRYPTO` asset class as a whole — a
+        second, unapproved market on the identical calendar type stays
+        fail-closed."""
+        approved = AlwaysOpenCalendar(session_policy_approved=True)
+        unapproved = AlwaysOpenCalendar(session_policy_approved=False)
+
+        assert phase_at(WINTER_FRIDAY, POLICY, calendar=approved) is SessionPhase.OPEN
+        assert phase_at(WINTER_FRIDAY, POLICY, calendar=unapproved) is SessionPhase.CLOSED
+
+
 class TestEntriesAndFlatness:
     def test_entries_are_refused_inside_the_last_hour_before_the_weekly_close(self) -> None:
         assert permits_new_entry(at(WINTER_FRIDAY, 20, 0), POLICY)

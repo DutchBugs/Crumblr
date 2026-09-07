@@ -192,7 +192,9 @@ class ReplayOrchestrator:
         self._execution_config = config.execution_for(spec.canonical_symbol)
         market = config.market_for(spec.canonical_symbol)
         self._calendar: TradingCalendar = (
-            calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
+            calendar_for(market.asset_class, session_policy_approved=market.session_policy_approved)
+            if market is not None
+            else FxWeekdayCalendar()
         )
 
         self._risk_context = policies.RiskContext(

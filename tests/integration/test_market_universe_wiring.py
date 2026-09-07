@@ -31,7 +31,7 @@ from crumblr.config import (
     SupervisorConfig,
     TradingAgentConfig,
 )
-from crumblr.domain.enums import AssetClass, Environment, ExecutionEventType
+from crumblr.domain.enums import AssetClass, Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.models import DecisionCapsule, InstrumentSpec
 from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
@@ -59,12 +59,14 @@ BTC_OVERRIDE_DAILY_LOSS = Decimal("0.01")
 BTC_OVERRIDE_SLIPPAGE = 5
 
 
-def two_market_config() -> PlatformConfig:
+def two_market_config(*, btc_session_policy_approved: bool = False) -> PlatformConfig:
     """EUR/USD (platform default, unchanged) plus BTC/USD, `enabled: true`
 
     **for this test config only** — never touches `config/paper.yaml`,
     which keeps BTC/USD `enabled: false` per the owner's explicit
-    instruction.
+    instruction. `btc_session_policy_approved` defaults `False`
+    (fail-closed) — pass `True` to model the real, owner-approved BTC/USD
+    session policy (ADR-023, 2026-09-08).
     """
     return PlatformConfig(
         environment=Environment.PAPER,
@@ -80,6 +82,7 @@ def two_market_config() -> PlatformConfig:
                 enabled=True,
                 asset_class=AssetClass.CRYPTO,
                 broker_symbol="BTCUSD",
+                session_policy_approved=btc_session_policy_approved,
                 risk_overrides=RiskOverrides(max_daily_loss=BTC_OVERRIDE_DAILY_LOSS),
                 execution_overrides=ExecutionOverrides(max_slippage_points=BTC_OVERRIDE_SLIPPAGE),
             ),
@@ -709,3 +712,83 @@ class TestExecutionOrchestratorUsesTheMarketsOwnConfig:
             == config.execution.max_slippage_points
         )
         assert isinstance(orchestrator._calendar, FxWeekdayCalendar)
+
+
+class TestBtcUsdEnablementReadiness:
+    """Market Universe, ADR-023 (BTC/USD Enablement Readiness, owner
+
+    decision 2026-09-08): before this pass, a real `ExecutionOrchestrator
+    .run_once()` for BTC/USD could never get past `SESSION_BLACKOUT` —
+    every capsule was `INELIGIBLE`, unconditionally (proven by the
+    reconciliation tests above needing to seed BTC/USD's
+    `SUBMISSION_STARTED` state directly, bypassing the entry pipeline
+    entirely, because it was structurally unreachable). With
+    `session_policy_approved=True`, the real, unmodified pipeline moves
+    *past* the session-policy gate for BTC/USD exactly as it always could
+    for EUR/USD — proving the calendar-approval wiring reaches the real
+    orchestrator's real entry path, not just `_risk_context`.
+
+    It does **not** reach `SUBMISSION_STARTED` — `expected_spec_version`
+    stays deliberately unpinned (F-055: a human has not yet reviewed and
+    approved the real observed `InstrumentSpec`, only confirmed via
+    terminal validation that the symbol resolves), so the *next* gate,
+    intent-time reconciliation, correctly still refuses with
+    `RECONCILIATION_UNKNOWN`. Proving the session-policy gate opened
+    without also proving every other independently-gated check stayed
+    shut would be a materially weaker, and misleading, proof.
+
+    `enabled: false` in the shipped `config/paper.yaml` means none of
+    this is reachable today outside a test's own local config — this
+    class proves the mechanism is ready, not that BTC/USD is live.
+    """
+
+    def test_an_approved_btc_usd_capsule_clears_the_session_policy_gate(
+        self, engine: Engine
+    ) -> None:
+        config = two_market_config(btc_session_policy_approved=True)
+        capsule = _sealed_capsule(
+            engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD"
+        )
+        terminal = _TwoSymbolFakeMt5()
+        orchestrator = _orchestrator(
+            engine,
+            config,
+            canonical_symbol="BTC/USD",
+            terminal=terminal,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+        )
+
+        outcomes = orchestrator.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].order_request_id == _order_request_id(capsule)
+        # Not INELIGIBLE/SESSION_BLACKOUT (the gate this pass opens) —
+        # but still correctly refused at the next, separately-gated check
+        # (the instrument-spec baseline, F-055, deliberately unpinned).
+        assert outcomes[0].event_type == ExecutionEventType.RECONCILIATION_BLOCKED
+        assert ReasonCode.RECONCILIATION_UNKNOWN in outcomes[0].reason_codes
+        assert ReasonCode.SESSION_BLACKOUT not in outcomes[0].reason_codes
+
+    def test_an_unapproved_btc_usd_capsule_still_stays_ineligible(self, engine: Engine) -> None:
+        """The regression guard: this class's own positive result above
+
+        must not come from anything other than the approval flag —
+        `btc_session_policy_approved` left at its default (`False`) must
+        still refuse the identical capsule with `SESSION_BLACKOUT`,
+        before ever reaching reconciliation at all."""
+        config = two_market_config(btc_session_policy_approved=False)
+        _sealed_capsule(engine, config, canonical_symbol="BTC/USD", broker_symbol="BTCUSD")
+        terminal = _TwoSymbolFakeMt5()
+        orchestrator = _orchestrator(
+            engine,
+            config,
+            canonical_symbol="BTC/USD",
+            terminal=terminal,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+        )
+
+        outcomes = orchestrator.run_once()
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.INELIGIBLE
+        assert ReasonCode.SESSION_BLACKOUT in outcomes[0].reason_codes

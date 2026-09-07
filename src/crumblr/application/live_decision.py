@@ -286,7 +286,9 @@ class LiveDecisionOrchestrator:
         self._risk_config = config.risk_for(canonical_symbol)
         self._execution_config = config.execution_for(canonical_symbol)
         self._calendar: TradingCalendar = (
-            calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
+            calendar_for(market.asset_class, session_policy_approved=market.session_policy_approved)
+            if market is not None
+            else FxWeekdayCalendar()
         )
         self._risk_context = policies.RiskContext(
             risk=self._risk_config,
