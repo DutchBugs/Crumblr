@@ -27,6 +27,8 @@
     --up: #34d399;
     --down: #fb5468;
     --radius: 10px;
+    --simulated: #a78bfa;
+    --simulated-bg: rgba(167, 139, 250, 0.1);
   }
   * { box-sizing: border-box; }
   body {
@@ -61,10 +63,12 @@
   }
 
   /* ---- Layout ---- */
-  .section { margin-top: 22px; }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+  .section:first-child { margin-top: 0; padding-top: 0; border-top: none; }
   .section-title {
     font-size: 0.75em; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint);
     text-transform: uppercase; margin: 0 0 10px 2px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   }
   .grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
   .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
@@ -91,6 +95,26 @@
   .card {
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 16px 18px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  }
+
+  /* ---- Simulated (PAPER_LITE) vs. real state -- deliberately its own
+     accent color, distinct from good/warn/bad/neutral, so a simulated
+     card is visually unmistakable at a glance and can never be read as
+     real broker/trading-authority state even without reading the text. */
+  .card-simulated {
+    border-color: rgba(167, 139, 250, 0.35);
+    border-style: dashed;
+    background:
+      linear-gradient(var(--bg-card), var(--bg-card)) padding-box,
+      var(--bg-card);
+  }
+  .simulated-ribbon {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 999px; font-size: 0.7em;
+    font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    background: var(--simulated-bg); color: var(--simulated);
+    border: 1px solid rgba(167, 139, 250, 0.4);
   }
 
   /* ---- Row 1: status cards ---- */
@@ -196,6 +220,7 @@
   .pipeline-card {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 12px 14px; height: 100%;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   }
   .pipeline-card .stage-name { font-size: 0.68em; font-weight: 700; letter-spacing: 0.05em; color: var(--text-faint); text-transform: uppercase; }
   .pipeline-card .stage-verdict { margin-top: 8px; font-size: 1em; font-weight: 700; }
@@ -489,9 +514,9 @@
        read-only from its durable journal — never the real broker shown
        above, and never a claim about real trading authority). -->
   <div class="section">
-    <div class="section-title">Paper Portfolio <span class="muted" style="font-weight:400;">(PAPER_LITE — simulated, not the real broker)</span></div>
+    <div class="section-title">Paper Portfolio <span class="simulated-ribbon">PAPER_LITE — simulated, not the real broker</span></div>
     <div class="grid-2">
-      <div class="card">
+      <div class="card card-simulated">
         <div class="panel-title">Simulated account</div>
         <div id="paper-portfolio-account-body">
         {% if state.paper_portfolio.status == "OK" %}
@@ -512,7 +537,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card card-simulated">
         <div class="panel-title">Simulated open positions</div>
         <div id="paper-portfolio-positions-body">
         {% if state.paper_portfolio.status == "OK" and state.paper_portfolio.positions %}
