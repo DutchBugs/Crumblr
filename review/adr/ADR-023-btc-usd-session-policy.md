@@ -1,9 +1,9 @@
 # ADR-023 — BTC/USD session policy (Enablement Readiness)
 
-**Status:** ACCEPTED 2026-09-08 — Dev 1's own branch,
-`dev1/market-universe`, off `main` @ `966bf6a` (post Market Universe
-merge). Not merged; stop for owner review per the owner's own work-order
-cadence.
+**Status:** ACCEPTED 2026-09-08, **MERGED to `main` 2026-09-08** — owner
+GO ("GO voor merge van dev1/market-universe op SHA 336e830"), fast-forward
+`dev1/market-universe` → `main`, `966bf6a..336e830`. `main` HEAD is now
+`336e830`.
 **Date:** 2026-09-08
 **Drivers:** Owner work order, verbatim: *"BTC/USD Enablement Readiness —
 session-policy implementation + terminal validation + fail-closed
@@ -253,5 +253,22 @@ integration run (above) confirms zero errors against the real commit.
 
 ## 7. Deliverable / stop point
 
-Not merged. Stop for owner review before merge, matching this session's
-established cadence.
+**Merged to `main`, 2026-09-08** (`966bf6a..336e830`, fast-forward, owner
+GO). Post-merge regression gate re-run against `main` @ `336e830`:
+ruff/format/mypy clean (201 source files), full unit suite 1271
+passed/1 skipped, `tests/integration/test_market_universe_wiring.py`
+11 passed (the full integration suite, 273 passed/2 skipped/0 errors,
+had already been run clean against this identical commit content
+immediately before the merge — see the ninety-third status.md entry).
+
+**Confirmed unchanged by this merge**, per the owner's own explicit
+instruction: `MarketConfig.enabled` stays `false` for BTC/USD;
+`expected_spec_version` stays `null`; `ExecutionConfig.submission_enabled`/
+`feedback_2_0_approved`/`order_send` all stay exactly as NO-GO as before.
+
+**Next Dev-1 work is not "turn BTC/USD on."** Per the owner's own
+sequencing: the owner must first review the real BTC/USD `InstrumentSpec`
+observation in §3 and explicitly accept or reject it — no
+`expected_spec_version` pin happens without that. Only after that does
+the BTC/USD Market Capability Matrix (build.md §24) follow. Stopping
+here.
