@@ -416,6 +416,7 @@ def build_state(
     risk_panel = build_risk_panel(
         risk_config=risk_config,
         session_store=PostgresRiskSessionStore(engine),
+        canonical_symbol=canonical_symbol,
     )
     reconciliation = build_reconciliation_panel(
         broker_state=BrokerStateStore(engine),

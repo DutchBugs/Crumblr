@@ -8,6 +8,15 @@ under the shared `RiskLedgerLock` (ADR-021/AG-012) — one read serves both
 pipelines. `recover_session()` is deliberately not called here: it is
 mutating-intent trading logic (fail-closed recovery for a live decision),
 out of scope for a read-only display.
+
+Market Universe (ADR-022) scoped the ledger itself to one `canonical_symbol`
+per record — "there is no 'the' risk session any more, only 'the risk
+session for this symbol'" (`RiskSessionStore.load_latest`'s own docstring).
+This panel shows exactly the one market this dashboard instance is
+configured for (`build_state(canonical_symbol=...)`), never a cross-market
+aggregate the ledger itself does not compute — a second configured market
+(e.g. BTC/USD) would need its own dashboard instance or its own panel, not
+a silent sum across symbols.
 """
 
 from __future__ import annotations
@@ -33,8 +42,10 @@ class RiskPanelState:
     current_drawdown: str
 
 
-def build_risk_panel(*, risk_config: RiskConfig, session_store: RiskSessionStore) -> RiskPanelState:
-    record = session_store.load_latest()
+def build_risk_panel(
+    *, risk_config: RiskConfig, session_store: RiskSessionStore, canonical_symbol: str
+) -> RiskPanelState:
+    record = session_store.load_latest(canonical_symbol=canonical_symbol)
 
     if not record.is_known:
         current_open_risk = current_daily_loss = current_drawdown = "UNKNOWN"
