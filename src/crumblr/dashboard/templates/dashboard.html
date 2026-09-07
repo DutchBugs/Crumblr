@@ -410,7 +410,8 @@
         <div class="kv"><span class="k">Profit</span><span class="v">{{ state.broker.account.profit }}</span></div>
         <div class="kv"><span class="k">Margin / Free</span><span class="v">{{ state.broker.account.margin }} / {{ state.broker.account.margin_free }}</span></div>
         <div class="kv"><span class="k">Margin level</span><span class="v">{{ state.broker.account.margin_level or "—" }}</span></div>
-        <div class="kv"><span class="k">Trade allowed</span><span class="v {{ 'good' if state.broker.account.account_trade_allowed else 'bad' }}">{{ "YES" if state.broker.account.account_trade_allowed else "NO" }}</span></div>
+        <div class="kv"><span class="k">Account trade allowed</span><span class="v {{ 'good' if state.broker.account.account_trade_allowed else 'bad' }}">{{ "YES" if state.broker.account.account_trade_allowed else "NO" }}</span></div>
+        <div class="kv"><span class="k">Terminal trade allowed</span><span class="v {{ 'good' if state.broker.account.terminal_trade_allowed == true else 'bad' }}">{% if state.broker.account.terminal_trade_allowed is none %}UNKNOWN{% elif state.broker.account.terminal_trade_allowed %}YES{% else %}NO{% endif %}</span></div>
         <div class="kv"><span class="k">Position set</span><span class="v {{ state.broker.account.position_set_state | state_class }}">{{ state.broker.account.position_set_state }}</span></div>
         <div class="kv"><span class="k">Pending-order set</span><span class="v {{ state.broker.account.pending_order_set_state | state_class }}">{{ state.broker.account.pending_order_set_state }}</span></div>
         {% else %}
@@ -809,15 +810,35 @@
     if (el) el.className = base + " " + cls;
   }
 
-  // Mirrors app.py's state_class() — kept intentionally tiny and duplicated
-  // rather than fetched, so a refresh never depends on a second request.
+  // Mirrors app.py's state_class() exactly -- kept intentionally
+  // duplicated rather than fetched, so a refresh never depends on a
+  // second request. "LIVE" is the one deliberate addition: a browser-only
+  // dashboard-heartbeat label (work order §7) with no server-side
+  // equivalent, since state_class() never sees it. Owner review of commit
+  // 1d0687e found this had silently drifted from the server's three
+  // explicit sets into "good, warn, or else bad" -- so anything genuinely
+  // neutral (e.g. SnapshotCompleteness.COMPLETE, NO_TRADE) was rendering
+  // as an alarming red "bad" purely because it fell through an
+  // *implicit* catch-all, not because it was ever classified that way.
+  // The fallback must be "neutral", matching state_class()'s own default,
+  // and BAD must be an explicit set here too -- UNKNOWN must stay bad
+  // because it is *listed*, not because everything unmatched used to be.
   var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1, LIVE: 1 };
-  var WARN = { STALE: 1, UNCALIBRATED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1, AWAITING_EVIDENCE: 1 };
+  var WARN = {
+    STALE: 1, UNCALIBRATED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1, AWAITING_EVIDENCE: 1,
+    "CONFIG GATES OPEN": 1
+  };
+  var BAD = {
+    DISCONNECTED: 1, HALTED: 1, UNKNOWN: 1, MISMATCHED: 1, DOWN: 1, UNHEALTHY: 1,
+    "NOT PROVISIONED": 1, EXPIRED: 1, DISABLED: 1, DEGRADED: 1, GATEWAY_REJECTED: 1,
+    RISK_BLOCKED: 1, SESSION_BLOCKED: 1, POLICY_BLOCKED: 1, PAPER_ORDER_CHECK_BLOCKED: 1
+  };
   function stateClass(value) {
     var v = (value || "").toUpperCase();
     if (GOOD[v]) return "good";
     if (WARN[v]) return "warn";
-    return "bad"; // DISCONNECTED, HALTED, UNKNOWN, MISMATCHED, DOWN, UNHEALTHY — and any surprise value
+    if (BAD[v]) return "bad";
+    return "neutral";
   }
 
   // Mirrors app.py's format_age() so a polled refresh reads the same as the
@@ -911,9 +932,21 @@
     html += kv("Margin / Free", esc(account.margin) + " / " + esc(account.margin_free));
     html += kv("Margin level", esc(account.margin_level != null ? account.margin_level : "—"));
     html += kv(
-      "Trade allowed",
+      "Account trade allowed",
       account.account_trade_allowed ? "YES" : "NO",
       account.account_trade_allowed ? "good" : "bad"
+    );
+    // Two independent broker facts, never collapsed into one -- a `null`
+    // terminal_trade_allowed means MT5 genuinely never reported it, which
+    // must read as UNKNOWN (unsafe), never as a silent "YES" (owner review
+    // of commit 1d0687e).
+    var terminalLabel = account.terminal_trade_allowed == null
+      ? "UNKNOWN"
+      : (account.terminal_trade_allowed ? "YES" : "NO");
+    html += kv(
+      "Terminal trade allowed",
+      terminalLabel,
+      account.terminal_trade_allowed === true ? "good" : "bad"
     );
     html += kv("Position set", esc(account.position_set_state), stateClass(account.position_set_state));
     html += kv(
@@ -1272,6 +1305,7 @@
       renderBrokerPanels: renderBrokerPanels,
       renderActivityFeed: renderActivityFeed,
       activityCategory: activityCategory,
+      stateClass: stateClass,
       applyState: applyState,
     };
   }

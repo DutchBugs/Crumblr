@@ -104,6 +104,7 @@ const snapshotOne = {
   margin_free: "9892.5",
   margin_level: "8343.75",
   account_trade_allowed: true,
+  terminal_trade_allowed: true,
   position_set_state: "COMPLETE",
   pending_order_set_state: "COMPLETE",
 };
@@ -144,10 +145,57 @@ renderBrokerPanels(
 const accountHtml1 = elements.get("broker-account-body").innerHTML;
 assert.match(accountHtml1, /fingerprint-one/);
 assert.match(accountHtml1, />10000</);
+assert.match(accountHtml1, /Account trade allowed/);
+assert.match(accountHtml1, /Terminal trade allowed/);
 const positionsHtml1 = elements.get("broker-positions-body").innerHTML;
 assert.match(positionsHtml1, /1\.08512/);
 const pendingHtml1 = elements.get("broker-pending-orders-body").innerHTML;
 assert.match(pendingHtml1, />111</);
+
+// --- 2b. account_trade_allowed and terminal_trade_allowed are two
+// independent facts, visible as two separate rows after a poll refresh --
+// not merged into one line, and a poll with account=true/terminal=false
+// must show that exact mismatch (owner review of commit 1d0687e). -------
+renderBrokerPanels(
+  baseState({
+    broker: {
+      account: Object.assign({}, snapshotOne, {
+        account_trade_allowed: true,
+        terminal_trade_allowed: false,
+      }),
+      positions: [],
+      pending_orders: [],
+    },
+  })
+);
+const mismatchHtml = elements.get("broker-account-body").innerHTML;
+const accountRowIdx = mismatchHtml.indexOf("Account trade allowed");
+const terminalRowIdx = mismatchHtml.indexOf("Terminal trade allowed");
+assert.ok(accountRowIdx >= 0 && terminalRowIdx >= 0, "both trade-allowed rows must be present");
+const accountRow = mismatchHtml.slice(accountRowIdx, accountRowIdx + 120);
+const terminalRow = mismatchHtml.slice(terminalRowIdx, terminalRowIdx + 120);
+assert.match(accountRow, />YES</, "account_trade_allowed=true must show YES on its own row");
+assert.match(terminalRow, />NO</, "terminal_trade_allowed=false must show NO on its own row, not agree with account's YES");
+assert.doesNotMatch(terminalRow, />YES</);
+
+// --- 2c. terminal_trade_allowed=null must read as UNKNOWN, never YES -----
+renderBrokerPanels(
+  baseState({
+    broker: {
+      account: Object.assign({}, snapshotOne, {
+        account_trade_allowed: true,
+        terminal_trade_allowed: null,
+      }),
+      positions: [],
+      pending_orders: [],
+    },
+  })
+);
+const nullTerminalHtml = elements.get("broker-account-body").innerHTML;
+const nullTerminalIdx = nullTerminalHtml.indexOf("Terminal trade allowed");
+const nullTerminalRow = nullTerminalHtml.slice(nullTerminalIdx, nullTerminalIdx + 120);
+assert.match(nullTerminalRow, />UNKNOWN</, "a null terminal_trade_allowed must never be silently assumed YES");
+assert.doesNotMatch(nullTerminalRow, />YES</);
 
 // --- 3. A second, different snapshot must *replace*, not append ----------
 const snapshotTwo = Object.assign({}, snapshotOne, {

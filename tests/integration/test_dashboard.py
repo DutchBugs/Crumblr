@@ -682,7 +682,13 @@ class TestAgentPanelRendersInTheUi:
         assert body["agent_panel"]["strategy_artifact_hash"] == "artifact-hash-v1"
         assert body["agent_panel"]["runtime_version"] == "toy-agent-v1"
         assert body["agent_health"] == "WAITING"
-        assert "NOT PROVISIONED" not in response.text
+        # Excludes the trailing <script> block: the browser's stateClass()
+        # (added in commit 1d0687e) legitimately contains "NOT PROVISIONED"
+        # as a literal JS object key mirroring app.py's own BAD-state set,
+        # present in every page regardless of the server-rendered state --
+        # this assertion is about the *rendered* markup only.
+        rendered_markup = response.text.split("<script", 1)[0]
+        assert "NOT PROVISIONED" not in rendered_markup
         assert "ACTIVE" in response.text
 
 
@@ -918,6 +924,56 @@ class TestBrokerAccountPositionsAndPendingOrdersRenderInTheUi:
         assert response.json()["broker"]["account"] is None
         assert response.json()["broker"]["positions"] == []
         assert response.json()["broker"]["pending_orders"] == []
+
+    def test_account_and_terminal_trade_allowed_are_shown_as_two_independent_facts(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """Owner review of commit 1d0687e: `account_trade_allowed` and
+        `terminal_trade_allowed` are two genuinely different broker facts
+        and must never be collapsed into one "Trade allowed" line -- an
+        account that can trade on a terminal that itself cannot must show
+        that distinction, not silently agree with only one of the two."""
+        store = BrokerStateStore(engine)
+        account = make_broker_account_snapshot(
+            account_trade_allowed=True, terminal_trade_allowed=False
+        )
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        api = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert api["broker"]["account"]["account_trade_allowed"] is True
+        assert api["broker"]["account"]["terminal_trade_allowed"] is False
+        assert "Account trade allowed" in rendered_markup
+        assert "Terminal trade allowed" in rendered_markup
+        # Both rows present with their own distinct YES/NO -- not merged
+        # into a single "Trade allowed: YES" that would hide the mismatch.
+        account_idx = rendered_markup.index("Account trade allowed")
+        terminal_idx = rendered_markup.index("Terminal trade allowed")
+        account_row = rendered_markup[account_idx : account_idx + 200]
+        terminal_row = rendered_markup[terminal_idx : terminal_idx + 200]
+        assert ">YES<" in account_row
+        assert ">NO<" in terminal_row
+
+    def test_a_terminal_trade_allowed_of_none_reads_as_unknown_never_yes(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        store = BrokerStateStore(engine)
+        account = make_broker_account_snapshot(
+            account_trade_allowed=True, terminal_trade_allowed=None
+        )
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        api = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+        rendered_markup = page.split("<script", 1)[0]
+
+        assert api["broker"]["account"]["terminal_trade_allowed"] is None
+        terminal_idx = rendered_markup.index("Terminal trade allowed")
+        terminal_row = rendered_markup[terminal_idx : terminal_idx + 200]
+        assert ">UNKNOWN<" in terminal_row
+        assert ">YES<" not in terminal_row
 
     def test_only_the_latest_of_two_snapshots_is_current(
         self, engine: Engine, tmp_path: Path
