@@ -155,17 +155,26 @@ def phase_at(
     function falls through to OPEN by arithmetic alone — Monday-Thursday
     "no cutoff" is a consequence of this shape, not a special case in it.
 
-    `calendar.weekly_close(moment)` returning `None` (no weekly-close
-    concept — e.g. `risk.calendars.AlwaysOpenCalendar`) resolves to `OPEN`
-    the same way a disabled `policy` does: there is nothing to measure an
-    `IntradayPolicy` against, not a claim that this calendar is somehow
-    always safe. See `risk/calendars.py`'s own module docstring for why no
-    calendar invents a weekly-close boundary nobody has approved.
+    **Owner correction, 2026-09-07** (`review/adr/ADR-022-market-universe.md`
+    §4 item 1, `review/DEVIATIONS.md` D-060): `calendar.weekly_close(moment)`
+    returning `None` (no weekly-close concept — e.g.
+    `risk.calendars.AlwaysOpenCalendar`) resolves to `SessionPhase.CLOSED`,
+    **unconditionally** — checked before `policy.enabled`, so a globally
+    enabled `IntradayPolicy` cannot accidentally permit entries on a
+    calendar with no approved session policy either. An earlier version
+    resolved this case to `OPEN` (treating "no calendar policy" the same
+    as a disabled `IntradayPolicy` — nothing to measure offsets against).
+    The owner rejected that: absence of an approved session policy must
+    fail closed, not permit entries by default. No asset class trades
+    until an owner makes a real session-policy decision for it and a new
+    `TradingCalendar` implementation encodes it.
     """
     if not calendar.is_market_open(moment):
         return SessionPhase.CLOSED
     close = calendar.weekly_close(moment)
-    if close is None or not policy.enabled:
+    if close is None:
+        return SessionPhase.CLOSED
+    if not policy.enabled:
         return SessionPhase.OPEN
 
     if moment >= close - policy.flatten_offset:

@@ -18,7 +18,10 @@ from uuid import UUID
 from crumblr.domain.enums import Environment, Side
 from crumblr.domain.models import FlattenInstruction, FlattenPlan, PositionState
 from crumblr.domain.timeutils import UtcDatetime
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar
 from crumblr.risk.trading_window import has_crossed_weekly_close
+
+_DEFAULT_CALENDAR = FxWeekdayCalendar()
 
 
 def build_flatten_plan(
@@ -33,6 +36,7 @@ def build_flatten_plan(
     past_deadline: bool,
     broker_state_snapshot_id: UUID,
     now: UtcDatetime,
+    calendar: TradingCalendar = _DEFAULT_CALENDAR,
 ) -> FlattenPlan:
     """One `FlattenInstruction` per position, closing side derived as the
 
@@ -66,7 +70,9 @@ def build_flatten_plan(
             open_price=position.open_price,
             opened_at_utc=position.opened_at_utc,
             magic=position.magic,
-            crossed_weekly_close=has_crossed_weekly_close(position.opened_at_utc, now),
+            crossed_weekly_close=has_crossed_weekly_close(
+                position.opened_at_utc, now, calendar=calendar
+            ),
             observed_at_utc=now,
         )
         for position in positions

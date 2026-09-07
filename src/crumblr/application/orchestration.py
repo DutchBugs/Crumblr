@@ -59,12 +59,13 @@ from crumblr.market_data.synthetic import (
 from crumblr.mt5_gateway.simulated import ClosedTrade, SimulatedBroker
 from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, session, trading_window
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar, calendar_for
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import InMemoryRiskSessionStore, RiskSessionStore
 from crumblr.trading_agent import registry
 from crumblr.trading_agent.base import AgentContext, FeatureEvidence
-from crumblr.trading_agent.sessions import trading_day, weekly_close
+from crumblr.trading_agent.sessions import trading_day
 
 MAX_HISTORY_BARS = 400
 """Rolling window handed to the feature pipeline."""
@@ -182,9 +183,21 @@ class ReplayOrchestrator:
         self._recent_intents: deque[datetime] = deque()
         self._current_trading_day: date | None = None
 
+        # Market Universe (ADR-022): a second market must not silently
+        # trade against EUR/USD's platform-default risk/execution
+        # thresholds or trading calendar — resolved once, per this run's
+        # one fixed `spec.canonical_symbol`, not read from `config.risk`/
+        # `config.execution` directly anywhere else in this class.
+        self._risk_config = config.risk_for(spec.canonical_symbol)
+        self._execution_config = config.execution_for(spec.canonical_symbol)
+        market = config.market_for(spec.canonical_symbol)
+        self._calendar: TradingCalendar = (
+            calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
+        )
+
         self._risk_context = policies.RiskContext(
-            risk=config.risk,
-            execution=config.execution,
+            risk=self._risk_config,
+            execution=self._execution_config,
             allowed_symbols=frozenset(config.enabled_symbols()),
             require_demo_account=config.account_guard.require_demo_account,
             expected_server=config.account_guard.expected_server,
@@ -193,6 +206,7 @@ class ReplayOrchestrator:
             expected_leverage=config.account_guard.expected_leverage,
             risk_config_version=config.config_version,
             intraday=trading_window.policy_from_config(config.intraday),
+            calendar=self._calendar,
         )
         self._policy = pretrade.SupervisorPolicy(
             enabled=config.supervisor.enabled,
@@ -306,8 +320,8 @@ class ReplayOrchestrator:
             self._spec,
             AgentContext(
                 open_position_sides=tuple(p.side for p in positions_before),
-                requested_risk_fraction=self._config.risk.max_risk_per_trade,
-                min_stop_distance_points=self._config.risk.min_stop_distance_points,
+                requested_risk_fraction=self._risk_config.max_risk_per_trade,
+                min_stop_distance_points=self._risk_config.min_stop_distance_points,
             ),
         )
 
@@ -453,7 +467,7 @@ class ReplayOrchestrator:
             price=None,
             stop_loss_price=intent.stop_loss_price,
             take_profit_price=intent.take_profit_price,
-            max_slippage_points=self._config.execution.max_slippage_points,
+            max_slippage_points=self._execution_config.max_slippage_points,
             created_at_utc=snapshot.received_time_utc,
             expires_at_utc=intent.expires_at_utc,
             environment=self._config.environment,
@@ -564,8 +578,8 @@ class ReplayOrchestrator:
             live_equity=self._broker.equity,
             live_open_positions=len(self._broker.positions()),
             market_day=trading_day(first.event_time_utc),
-            max_daily_loss=self._config.risk.max_daily_loss,
-            max_drawdown=self._config.risk.max_drawdown,
+            max_daily_loss=self._risk_config.max_daily_loss,
+            max_drawdown=self._risk_config.max_drawdown,
         )
         self._ledger = recovery.ledger
         self._current_trading_day = recovery.trading_day
@@ -672,9 +686,16 @@ class ReplayOrchestrator:
             return
         positions = self._broker.positions()
         policy = self._risk_context.intraday
-        if not policies.overnight_breach(positions, tick.event_time_utc, policy):
+        if not policies.overnight_breach(
+            positions, tick.event_time_utc, policy, calendar=self._calendar
+        ):
             return
-        closes_at = weekly_close(tick.event_time_utc)
+        closes_at = self._calendar.weekly_close(tick.event_time_utc)
+        deadline_detail = (
+            f"trading week ending {closes_at.isoformat()}"
+            if closes_at is not None
+            else "this calendar's own deadline (no owner-approved weekly close exists for it)"
+        )
         self._trip(
             reason_codes=(ReasonCode.OVERNIGHT_EXPOSURE,),
             tripped_by="risk_engine",
@@ -683,7 +704,7 @@ class ReplayOrchestrator:
             detail=(
                 f"{len(positions)} position(s) still open at "
                 f"{tick.event_time_utc.isoformat()}, past the flatten deadline for the "
-                f"trading week ending {closes_at.isoformat()}"
+                f"{deadline_detail}"
             ),
         )
 
@@ -692,9 +713,9 @@ class ReplayOrchestrator:
         if self._kill_switch.is_halted:
             return
         breached: list[ReasonCode] = []
-        if self._ledger.drawdown_fraction >= self._config.risk.max_drawdown:
+        if self._ledger.drawdown_fraction >= self._risk_config.max_drawdown:
             breached.append(ReasonCode.MAX_DRAWDOWN)
-        if self._ledger.session_loss_fraction >= self._config.risk.max_daily_loss:
+        if self._ledger.session_loss_fraction >= self._risk_config.max_daily_loss:
             breached.append(ReasonCode.DAILY_LOSS_LIMIT)
         if breached:
             self._trip(

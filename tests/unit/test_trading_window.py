@@ -135,33 +135,48 @@ class TestThePhases:
             assert phase.permits_new_entries is (phase is SessionPhase.OPEN)
 
 
-class TestACalendarWithNoWeeklyCloseConceptNeverEvaluatesThePolicy:
-    """Market Universe (ADR-022): a 24/7 asset class has no owner-approved
+class TestACalendarWithNoWeeklyCloseConceptFailsClosed:
+    """Market Universe (ADR-022, owner correction 2026-09-07): a 24/7 asset
 
-    weekly-close policy yet. `phase_at` must resolve to OPEN whenever the
-    market is open, without ever consulting `IntradayPolicy`'s offsets —
-    not because they were computed and found not to apply, but because
-    there is no boundary to measure them against.
+    class has no owner-approved session policy yet. `phase_at` must
+    resolve to CLOSED unconditionally — not OPEN — whenever the calendar
+    has no weekly-close concept, regardless of whether the platform's
+    `IntradayPolicy` is itself enabled or disabled. No asset class trades
+    until an owner makes a real session-policy decision for it. See
+    `review/DEVIATIONS.md` D-060.
     """
 
-    def test_always_open_resolves_to_open_at_every_fixture_moment(self) -> None:
+    def test_always_closed_at_every_fixture_moment_with_an_enabled_policy(self) -> None:
         calendar = AlwaysOpenCalendar()
         for hour in (0, 6, 12, 18, 23):
             assert phase_at(at(WINTER_FRIDAY, hour), POLICY, calendar=calendar) is (
-                SessionPhase.OPEN
+                SessionPhase.CLOSED
             )
 
-    def test_an_enabled_policy_never_fires_flatten_or_no_new_entries(self) -> None:
-        """Even at the exact hour/minute that would trigger FLATTEN_REQUIRED
+    def test_always_closed_even_with_a_disabled_policy(self) -> None:
+        """Fail-closed must not depend on the platform's `IntradayPolicy`
 
-        on `FxWeekdayCalendar` (21:45), a calendar with no weekly close must
-        still resolve to OPEN — there is no boundary those offsets are
-        measured back from.
+        happening to be enabled — a calendar with no approved session
+        policy is CLOSED regardless of what `IntradayPolicy.enabled` says,
+        the same way a disabled policy on `FxWeekdayCalendar` still
+        respects a genuine weekend CLOSED (`TestThePhases
+        ::test_the_weekend_is_closed_whatever_the_policy_says`).
         """
         calendar = AlwaysOpenCalendar()
-        assert phase_at(at(WINTER_FRIDAY, 21, 45), POLICY, calendar=calendar) is (SessionPhase.OPEN)
+        assert phase_at(WINTER_FRIDAY, IntradayPolicy.disabled(), calendar=calendar) is (
+            SessionPhase.CLOSED
+        )
+
+    def test_no_new_entry_is_ever_permitted(self) -> None:
+        calendar = AlwaysOpenCalendar()
+        for hour in (0, 6, 12, 18, 23):
+            assert not permits_new_entry(at(WINTER_FRIDAY, hour), POLICY, calendar=calendar)
 
     def test_has_crossed_weekly_close_is_always_false(self) -> None:
+        """There is no weekly boundary to have crossed — distinct from
+
+        "cannot trade": `requires_flat`/`permits_new_entry` are what
+        enforce fail-closed, not this function."""
         calendar = AlwaysOpenCalendar()
         assert not has_crossed_weekly_close(WINTER_FRIDAY, WEEKEND_MIDNIGHT, calendar=calendar)
 

@@ -21,7 +21,10 @@ from dataclasses import dataclass
 from crumblr.domain.enums import ReasonCode
 from crumblr.domain.models import DecisionCapsule
 from crumblr.domain.timeutils import UtcDatetime
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar
 from crumblr.risk.trading_window import IntradayPolicy, permits_new_entry
+
+_DEFAULT_CALENDAR = FxWeekdayCalendar()
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ def evaluate_execution_eligibility(
     current_strategy_version: str,
     current_risk_config_version: str,
     intraday: IntradayPolicy,
+    calendar: TradingCalendar = _DEFAULT_CALENDAR,
 ) -> EligibilityDecision:
     """Whether `capsule` may enter the execution preflight chain at all.
 
@@ -75,7 +79,7 @@ def evaluate_execution_eligibility(
     if capsule.trade_intent.is_expired(at=now):
         reasons.append(ReasonCode.INTENT_EXPIRED)
 
-    if not permits_new_entry(now, intraday):
+    if not permits_new_entry(now, intraday, calendar=calendar):
         reasons.append(ReasonCode.SESSION_BLACKOUT)
 
     if reasons:

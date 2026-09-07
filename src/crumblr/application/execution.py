@@ -112,6 +112,7 @@ from crumblr.persistence.flatten import (
     flatten_request_id_for,
 )
 from crumblr.risk import policies, trading_window
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar, calendar_for
 from crumblr.risk.execution_eligibility import evaluate_execution_eligibility
 from crumblr.risk.execution_preflight_gate import evaluate_preflight_gate
 from crumblr.risk.flatten_gate import FlattenGateContext, evaluate_flatten_gate
@@ -119,7 +120,7 @@ from crumblr.risk.kill_switch import KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import RiskLedgerLock, RiskSessionStore, recover_session
 from crumblr.risk.submission_gate import SubmissionGateContext, evaluate_submission_gate
-from crumblr.trading_agent.sessions import trading_day, weekly_close
+from crumblr.trading_agent.sessions import trading_day
 
 _log = get_logger("execution_orchestrator")
 
@@ -269,6 +270,16 @@ class ExecutionOrchestrator:
         A real caller must construct a `FlattenCloseSink` and pass it
         explicitly; nothing here ever constructs one itself."""
 
+        # Market Universe (ADR-022): a second market must not silently
+        # execute against EUR/USD's platform-default risk/execution
+        # thresholds or trading calendar.
+        self._risk_config = config.risk_for(canonical_symbol)
+        self._execution_config = config.execution_for(canonical_symbol)
+        _market = config.market_for(canonical_symbol)
+        self._calendar: TradingCalendar = (
+            calendar_for(_market.asset_class) if _market is not None else FxWeekdayCalendar()
+        )
+
     def run_once(self) -> tuple[ExecutionAttemptOutcome, ...]:
         # Core critical path item 7: a flatten is policy-driven (a
         # deadline plus observed exposure), not proposal-driven, so it
@@ -346,6 +357,7 @@ class ExecutionOrchestrator:
             current_strategy_version=self._config.trading_agent.strategy_version,
             current_risk_config_version=self._config.config_version,
             intraday=risk_context.intraday,
+            calendar=risk_context.calendar,
         )
         if not eligibility.eligible:
             return self._refuse(
@@ -479,8 +491,8 @@ class ExecutionOrchestrator:
                     live_equity=observation.account_state.equity,
                     live_open_positions=len(observation.position_states),
                     market_day=trading_day(final_now),
-                    max_daily_loss=self._config.risk.max_daily_loss,
-                    max_drawdown=self._config.risk.max_drawdown,
+                    max_daily_loss=self._risk_config.max_daily_loss,
+                    max_drawdown=self._risk_config.max_drawdown,
                 )
         except Exception as error:
             _log.error("execution.risk_ledger_lock_failed", error=str(error))
@@ -579,7 +591,7 @@ class ExecutionOrchestrator:
             price=None,
             stop_loss_price=intent.stop_loss_price,
             take_profit_price=intent.take_profit_price,
-            max_slippage_points=self._config.execution.max_slippage_points,
+            max_slippage_points=self._execution_config.max_slippage_points,
             created_at_utc=final_now,
             expires_at_utc=intent.expires_at_utc,
             environment=capsule.environment,
@@ -837,10 +849,19 @@ class ExecutionOrchestrator:
         if not policy.enabled:
             return None
 
+        # Market Universe (ADR-022): a calendar with no owner-approved
+        # weekly-close concept has nothing for a flatten occurrence to be
+        # scheduled against — the same fail-closed reasoning
+        # `trading_window.phase_at` applies (CLOSED, not OPEN) means
+        # there is no boundary here either, not a boundary this method
+        # should invent from the FX calendar by mistake.
+        session_close_utc = self._calendar.weekly_close(now)
+        if session_close_utc is None:
+            return None
+
         day = trading_day(now)
         # `session_close_utc` names the *weekly* close (owner risk policy
         # v1, D1.5) - coherent on every trading day, not only Friday's own.
-        session_close_utc = weekly_close(now)
         flatten_deadline_utc = session_close_utc - policy.flatten_offset
         flatten_request_id = flatten_request_id_for(
             environment=self._config.environment,
@@ -886,7 +907,8 @@ class ExecutionOrchestrator:
         positions = observation.position_states
 
         if (
-            trading_window.phase_at(now, policy) is trading_window.SessionPhase.FLATTEN_REQUIRED
+            trading_window.phase_at(now, policy, calendar=self._calendar)
+            is trading_window.SessionPhase.FLATTEN_REQUIRED
             and observation.account.position_set_state is not SnapshotCompleteness.COMPLETE
         ):
             # Owner risk policy v1 (D1.5): flat state cannot be confirmed by
@@ -900,9 +922,11 @@ class ExecutionOrchestrator:
         if not positions:
             return None
 
-        past_deadline = trading_window.requires_flat(now, policy)
+        past_deadline = trading_window.requires_flat(now, policy, calendar=self._calendar)
         crossed_weekly_close = any(
-            trading_window.has_crossed_weekly_close(position.opened_at_utc, now)
+            trading_window.has_crossed_weekly_close(
+                position.opened_at_utc, now, calendar=self._calendar
+            )
             for position in positions
         )
         if not (past_deadline or crossed_weekly_close):
@@ -1008,9 +1032,9 @@ class ExecutionOrchestrator:
             kill_switch=self._kill_switch,
             flatten_required=past_deadline or crossed_weekly_close,
             risk_config_version=self._config.config_version,
-            approved_risk_config_version=self._config.risk.approved_config_version,
-            flatten_submission_enabled=self._config.execution.flatten_submission_enabled,
-            feedback_2_0_approved=self._config.execution.feedback_2_0_approved,
+            approved_risk_config_version=self._risk_config.approved_config_version,
+            flatten_submission_enabled=self._execution_config.flatten_submission_enabled,
+            feedback_2_0_approved=self._execution_config.feedback_2_0_approved,
             now=now,
         )
         decision = evaluate_flatten_gate(context)
@@ -1055,6 +1079,7 @@ class ExecutionOrchestrator:
             past_deadline=past_deadline,
             broker_state_snapshot_id=observation.account.snapshot_id,
             now=now,
+            calendar=self._calendar,
         )
         self._append_flatten(
             flatten_request_id,
@@ -1155,7 +1180,7 @@ class ExecutionOrchestrator:
         if (
             still_open
             and self._flatten_close_adapter is not None
-            and self._config.execution.flatten_submission_enabled
+            and self._execution_config.flatten_submission_enabled
         ):
             attempted = True
             for instruction in still_open:
@@ -1539,14 +1564,14 @@ class ExecutionOrchestrator:
             account=observation.account_state,
             reconciliation_status=ReconciliationStatus.MATCHED,
             fresh_tick=tick,
-            max_market_data_age_ms=self._config.execution.max_market_data_age_ms,
+            max_market_data_age_ms=self._execution_config.max_market_data_age_ms,
             kill_switch=self._kill_switch,
             risk_config_version=self._config.config_version,
-            approved_risk_config_version=self._config.risk.approved_config_version,
-            submission_enabled=self._config.execution.submission_enabled,
+            approved_risk_config_version=self._risk_config.approved_config_version,
+            submission_enabled=self._execution_config.submission_enabled,
             terminal_trade_allowed=bool(observation.account.terminal_trade_allowed),
-            feedback_2_0_approved=self._config.execution.feedback_2_0_approved,
-            approved_account_ref=self._config.execution.approved_canary_account_ref,
+            feedback_2_0_approved=self._execution_config.feedback_2_0_approved,
+            approved_account_ref=self._execution_config.approved_canary_account_ref,
             now=final_now,
         )
         decision = evaluate_submission_gate(context)
@@ -1578,8 +1603,8 @@ class ExecutionOrchestrator:
     def _risk_context(self) -> policies.RiskContext:
         config = self._config
         return policies.RiskContext(
-            risk=config.risk,
-            execution=config.execution,
+            risk=self._risk_config,
+            execution=self._execution_config,
             allowed_symbols=frozenset(config.enabled_symbols()),
             require_demo_account=config.account_guard.require_demo_account,
             expected_server=config.account_guard.expected_server,
@@ -1588,6 +1613,7 @@ class ExecutionOrchestrator:
             expected_leverage=config.account_guard.expected_leverage,
             risk_config_version=config.config_version,
             intraday=trading_window.policy_from_config(config.intraday),
+            calendar=self._calendar,
         )
 
     def _refuse(

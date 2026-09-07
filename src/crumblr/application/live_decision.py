@@ -110,6 +110,7 @@ from crumblr.evaluator import pretrade
 from crumblr.market_data.synthetic import snapshot_id_for
 from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, session, trading_window
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar, calendar_for
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import OpenRiskAssessment, assess_open_risk
 from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
@@ -279,9 +280,17 @@ class LiveDecisionOrchestrator:
             canonical_symbol=canonical_symbol,
             expected_spec_version=market.expected_spec_version if market is not None else None,
         )
+        # Market Universe (ADR-022): a second market must not silently
+        # trade against EUR/USD's platform-default risk/execution
+        # thresholds or trading calendar.
+        self._risk_config = config.risk_for(canonical_symbol)
+        self._execution_config = config.execution_for(canonical_symbol)
+        self._calendar: TradingCalendar = (
+            calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
+        )
         self._risk_context = policies.RiskContext(
-            risk=config.risk,
-            execution=config.execution,
+            risk=self._risk_config,
+            execution=self._execution_config,
             allowed_symbols=frozenset(config.enabled_symbols()),
             require_demo_account=config.account_guard.require_demo_account,
             expected_server=config.account_guard.expected_server,
@@ -296,6 +305,7 @@ class LiveDecisionOrchestrator:
             expected_leverage=config.account_guard.expected_leverage,
             risk_config_version=config.config_version,
             intraday=trading_window.policy_from_config(config.intraday),
+            calendar=self._calendar,
         )
         self._policy = pretrade.SupervisorPolicy(
             enabled=config.supervisor.enabled,
@@ -435,8 +445,8 @@ class LiveDecisionOrchestrator:
             spec,
             AgentContext(
                 open_position_sides=tuple(position.side for position in positions),
-                requested_risk_fraction=self._config.risk.max_risk_per_trade,
-                min_stop_distance_points=self._config.risk.min_stop_distance_points,
+                requested_risk_fraction=self._risk_config.max_risk_per_trade,
+                min_stop_distance_points=self._risk_config.min_stop_distance_points,
             ),
         )
         if outcome.features is None:
@@ -629,8 +639,8 @@ class LiveDecisionOrchestrator:
             live_equity=account_snapshot.equity,
             live_open_positions=len(self._broker_state.positions_for(account_snapshot.snapshot_id)),
             market_day=market_day,
-            max_daily_loss=self._config.risk.max_daily_loss,
-            max_drawdown=self._config.risk.max_drawdown,
+            max_daily_loss=self._risk_config.max_daily_loss,
+            max_drawdown=self._risk_config.max_drawdown,
         )
         self._ledger = recovery.ledger
         self._current_trading_day = recovery.trading_day
@@ -647,9 +657,9 @@ class LiveDecisionOrchestrator:
         if self._kill_switch.is_halted or self._ledger is None:
             return
         breached: list[ReasonCode] = []
-        if self._ledger.drawdown_fraction >= self._config.risk.max_drawdown:
+        if self._ledger.drawdown_fraction >= self._risk_config.max_drawdown:
             breached.append(ReasonCode.MAX_DRAWDOWN)
-        if self._ledger.session_loss_fraction >= self._config.risk.max_daily_loss:
+        if self._ledger.session_loss_fraction >= self._risk_config.max_daily_loss:
             breached.append(ReasonCode.DAILY_LOSS_LIMIT)
         if breached:
             self._trip(
@@ -676,7 +686,7 @@ class LiveDecisionOrchestrator:
         if self._kill_switch.is_halted:
             return
         policy = self._risk_context.intraday
-        if not policies.overnight_breach(positions, moment, policy):
+        if not policies.overnight_breach(positions, moment, policy, calendar=self._calendar):
             return
         self._trip(
             (ReasonCode.OVERNIGHT_EXPOSURE,),

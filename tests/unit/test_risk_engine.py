@@ -23,8 +23,10 @@ from crumblr.domain.models import (
     TradeIntent,
 )
 from crumblr.risk import policies
+from crumblr.risk.calendars import AlwaysOpenCalendar, FxWeekdayCalendar, TradingCalendar
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.sizing import loss_per_lot, normalise_volume, realised_risk, size_position
+from crumblr.risk.trading_window import IntradayPolicy
 from tests.conftest import (
     FIXED_NOW,
     make_account_state,
@@ -35,6 +37,8 @@ from tests.conftest import (
 
 SPEC = make_instrument_spec()
 EQUITY = Decimal("10000")
+_DISABLED_INTRADAY = IntradayPolicy.disabled()
+_FX_CALENDAR = FxWeekdayCalendar()
 
 
 def _dummy_position(ticket: int) -> PositionState:
@@ -92,6 +96,8 @@ def context(
     expected_login: int | None = None,
     expected_currency: str | None = None,
     expected_leverage: int | None = None,
+    intraday: IntradayPolicy = _DISABLED_INTRADAY,
+    calendar: TradingCalendar = _FX_CALENDAR,
 ) -> policies.RiskContext:
     return policies.RiskContext(
         risk=risk or risk_config(),
@@ -103,6 +109,8 @@ def context(
         expected_currency=expected_currency,
         expected_leverage=expected_leverage,
         risk_config_version="cfg-v1",
+        intraday=intraday,
+        calendar=calendar,
     )
 
 
@@ -396,6 +404,42 @@ class TestLossGates:
         ledger.update(EQUITY)
         decision = evaluate(portfolio_state=portfolio(ledger=ledger))
         assert ReasonCode.MAX_DRAWDOWN in decision.reason_codes
+
+
+class TestMarketUniverseCalendarFailsClosed:
+    """Market Universe (ADR-022, owner correction 2026-09-07): a market on
+
+    a calendar with no owner-approved session policy (e.g. a 24/7 asset
+    class on `AlwaysOpenCalendar`) must never reach a PASS through
+    `policies.evaluate()` — this is the one real enforcement point every
+    real call site (`ReplayOrchestrator`, `LiveDecisionOrchestrator`,
+    `ExecutionOrchestrator`, `agent_gateway/decision_path.py`) ultimately
+    funnels through via `RiskContext.calendar`.
+    """
+
+    def test_an_always_open_calendar_is_refused_with_session_blackout(self) -> None:
+        decision = evaluate(risk_context=context(calendar=AlwaysOpenCalendar()))
+        assert decision.verdict is not RiskVerdict.PASS
+        assert ReasonCode.SESSION_BLACKOUT in decision.reason_codes
+
+    def test_an_always_open_calendar_is_refused_even_with_intraday_disabled(self) -> None:
+        """Fail-closed does not depend on the platform's global
+
+        `IntradayPolicy` happening to be enabled — see
+        `risk/trading_window.py::phase_at`'s own fail-closed ordering."""
+        decision = evaluate(
+            risk_context=context(calendar=AlwaysOpenCalendar(), intraday=_DISABLED_INTRADAY)
+        )
+        assert ReasonCode.SESSION_BLACKOUT in decision.reason_codes
+
+    def test_the_default_fx_calendar_is_unaffected(self) -> None:
+        """The regression guard: this correction must not touch EUR/USD's
+
+        own real behaviour — a healthy intent still passes on the default
+        `FxWeekdayCalendar`."""
+        decision = evaluate()
+        assert decision.verdict is RiskVerdict.PASS
+        assert ReasonCode.SESSION_BLACKOUT not in decision.reason_codes
 
 
 class TestIntentValidity:

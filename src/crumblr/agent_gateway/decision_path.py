@@ -185,6 +185,7 @@ from crumblr.domain.models import (
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.observability.logging import get_logger
 from crumblr.risk import policies, trading_window
+from crumblr.risk.calendars import FxWeekdayCalendar, calendar_for
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.portfolio_risk import assess_open_risk
 from crumblr.risk.session import (
@@ -432,7 +433,7 @@ def evaluate_agent_trade_intent(
         snapshot,
         spec,
         risk_portfolio,
-        _risk_context(config),
+        _risk_context(config, snapshot.symbol),
         kill_switch,
         now=now,
     )
@@ -660,10 +661,18 @@ def _external_supervisor_record(
     )
 
 
-def _risk_context(config: PlatformConfig) -> policies.RiskContext:
+def _risk_context(config: PlatformConfig, canonical_symbol: str) -> policies.RiskContext:
+    """`canonical_symbol` (Market Universe, ADR-022): a second market must
+
+    not silently evaluate against EUR/USD's platform-default risk/
+    execution thresholds or trading calendar — `risk_for()`/
+    `execution_for()`/`calendar_for()` resolve the real per-market values.
+    """
+    market = config.market_for(canonical_symbol)
+    calendar = calendar_for(market.asset_class) if market is not None else FxWeekdayCalendar()
     return policies.RiskContext(
-        risk=config.risk,
-        execution=config.execution,
+        risk=config.risk_for(canonical_symbol),
+        execution=config.execution_for(canonical_symbol),
         allowed_symbols=frozenset(config.enabled_symbols()),
         require_demo_account=config.account_guard.require_demo_account,
         expected_server=config.account_guard.expected_server,
@@ -685,6 +694,7 @@ def _risk_context(config: PlatformConfig) -> policies.RiskContext:
         expected_leverage=config.account_guard.expected_leverage,
         risk_config_version=config.config_version,
         intraday=trading_window.policy_from_config(config.intraday),
+        calendar=calendar,
     )
 
 

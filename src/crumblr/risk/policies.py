@@ -32,6 +32,7 @@ from crumblr.domain.models import (
 )
 from crumblr.domain.money import ZERO, price_to_points
 from crumblr.domain.timeutils import UtcDatetime, age_ms
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.sizing import realised_risk, size_position
 from crumblr.risk.trading_window import (
@@ -40,6 +41,12 @@ from crumblr.risk.trading_window import (
     permits_new_entry,
     requires_flat,
 )
+
+_DEFAULT_CALENDAR = FxWeekdayCalendar()
+"""`overnight_breach`'s own default — mirrors `trading_window`'s identical
+
+pattern, so a caller that passes no `calendar` keeps today's exact
+FX-weekday behaviour (Market Universe, ADR-022)."""
 
 HALT_REASONS: frozenset[ReasonCode] = frozenset(
     {
@@ -97,6 +104,16 @@ class RiskContext:
     safe only because refusing *more* entries is never the unsafe
     direction — a context built without it blocks nothing extra rather
     than permitting something."""
+    calendar: TradingCalendar = field(default_factory=FxWeekdayCalendar)
+    """Which asset class's trading week `intraday` is measured against
+
+    (Market Universe, ADR-022) — `risk.calendars.calendar_for(market
+    .asset_class)`, not a second, independently-chosen calendar. Defaults
+    to `FxWeekdayCalendar()`, matching every real call site's own
+    zero-behaviour-change default for EUR/USD. A calendar with no
+    weekly-close concept (`risk.calendars.AlwaysOpenCalendar`, for an
+    asset class with no owner-approved session policy) fails closed —
+    see `risk/trading_window.py::phase_at`'s own docstring."""
 
 
 def _stop_distance(intent: TradeIntent) -> Decimal:
@@ -168,7 +185,7 @@ def evaluate(
 
     # --- Trading session (owner risk policy v1, D1.5) ----------------------
     # Judged on market time, not on when this process got round to deciding.
-    if not permits_new_entry(snapshot.event_time_utc, context.intraday):
+    if not permits_new_entry(snapshot.event_time_utc, context.intraday, calendar=context.calendar):
         reasons.append(ReasonCode.SESSION_BLACKOUT)
 
     # --- Intent validity --------------------------------------------------
@@ -191,7 +208,12 @@ def evaluate(
     # O-004 (one exposure per symbol) withdrawn 2026-09-02: see
     # OWNER_POLICY_V1.md §2. Multiple positions are permitted; the real
     # portfolio budget is enforced below via `open_risk_fraction`.
-    if overnight_breach(portfolio.open_positions, snapshot.event_time_utc, context.intraday):
+    if overnight_breach(
+        portfolio.open_positions,
+        snapshot.event_time_utc,
+        context.intraday,
+        calendar=context.calendar,
+    ):
         # Past the Friday flatten deadline with the book still open, or
         # holding a position that has already crossed the weekly close.
         # A block would leave it there; only a halt brings a person in.
@@ -371,7 +393,11 @@ def _refuse_at_execution_time(
 
 
 def overnight_breach(
-    positions: tuple[PositionState, ...], moment: UtcDatetime, policy: IntradayPolicy
+    positions: tuple[PositionState, ...],
+    moment: UtcDatetime,
+    policy: IntradayPolicy,
+    *,
+    calendar: TradingCalendar = _DEFAULT_CALENDAR,
 ) -> bool:
     """Whether owner risk policy v1's weekly session policy (D1.5) is being
 
@@ -388,12 +414,18 @@ def overnight_breach(
     duplication `review/adr/ADR-009-automatic-flatten-submission.md` §1
     already named as a known fact, now four sites instead of three
     inline copies plus this one.
+
+    `calendar` (Market Universe, ADR-022): default-preserving, matching
+    `trading_window`'s own five functions.
     """
     if not policy.enabled or not positions:
         return False
-    if requires_flat(moment, policy):
+    if requires_flat(moment, policy, calendar=calendar):
         return True
-    return any(has_crossed_weekly_close(position.opened_at_utc, moment) for position in positions)
+    return any(
+        has_crossed_weekly_close(position.opened_at_utc, moment, calendar=calendar)
+        for position in positions
+    )
 
 
 def _refuse(

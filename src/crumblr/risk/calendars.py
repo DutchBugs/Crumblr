@@ -9,13 +9,19 @@ equivalent owner-approved session policy for a 24/7 asset class — should
 crypto have a weekly flatten requirement at all? what, if anything, replaces
 "weekend"? Nobody has decided that, and this module does not decide it
 either: `AlwaysOpenCalendar` reports `weekly_close() -> None` rather than
-inventing a boundary, and `risk/trading_window.py::phase_at` treats "no
-weekly-close concept" as "no `IntradayPolicy` to evaluate" — the same
-"a stated choice, not a default" discipline `IntradayPolicy.disabled()`
-already uses for exactly this reason. A market on `AlwaysOpenCalendar`
-therefore always resolves to `SessionPhase.OPEN` (subject to every other
-gate), by construction, until an owner makes a real decision for that
-asset class and a new `TradingCalendar` implementation encodes it.
+inventing a boundary.
+
+**Owner correction, 2026-09-07:** an earlier version of this module had
+`risk/trading_window.py::phase_at` treat "no weekly-close concept" as "no
+`IntradayPolicy` to evaluate" and resolve to `SessionPhase.OPEN` — the
+owner rejected this: absence of an approved policy must fail closed, not
+permit entries by default. `phase_at` now resolves a calendar with no
+weekly-close concept to `SessionPhase.CLOSED` unconditionally (regardless
+of whether the platform's `IntradayPolicy` itself is enabled) — no
+asset class trades until an owner makes a real session-policy decision
+for it and a new `TradingCalendar` implementation encodes it. See
+`review/adr/ADR-022-market-universe.md` §4 item 1 and
+`review/DEVIATIONS.md` D-060 for the correction record.
 """
 
 from __future__ import annotations
@@ -51,8 +57,8 @@ class TradingCalendar(Protocol):
         if this calendar has no weekly-close concept at all — not "the
         close is far away," an actual absence of the concept. `phase_at`
         treats `None` as "no owner-approved session policy exists for this
-        calendar yet," not as "closed" or "open by default for an
-        unrelated reason."
+        calendar yet" and fails closed (`SessionPhase.CLOSED`) — never as
+        permission to trade by default.
         """
         ...
 
@@ -85,6 +91,10 @@ class AlwaysOpenCalendar:
     asset class should be. `weekly_close` returns `None`: there is no
     weekly-close concept here at all, by construction, until a real owner
     decision exists and gets its own `TradingCalendar` implementation.
+    `is_market_open` still reports the physical truth (a 24/7 market is
+    always open) — it is `phase_at`'s job, not this calendar's, to turn
+    "no approved policy" into "no entries" (`SessionPhase.CLOSED`,
+    unconditionally, regardless of `is_market_open`).
     """
 
     def is_market_open(self, moment: UtcDatetime) -> bool:

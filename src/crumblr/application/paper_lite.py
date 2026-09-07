@@ -75,6 +75,7 @@ from crumblr.persistence.paper_lite import (
     PaperPortfolioView,
 )
 from crumblr.risk import session, trading_window
+from crumblr.risk.calendars import FxWeekdayCalendar, TradingCalendar, calendar_for
 from crumblr.risk.kill_switch import EquityLedger, KillSwitch
 from crumblr.risk.session import RiskLedgerLock, RiskSessionStore
 from crumblr.trading_agent.sessions import NEW_YORK, trading_day
@@ -345,6 +346,15 @@ class PaperLiteOrchestrator:
         self._risk_ledger: EquityLedger | None = None
         self._risk_trading_day: date | None = None
         self._risk_recorded_at: UtcDatetime | None = None
+        # Market Universe (ADR-022): a second market must not silently
+        # trade against EUR/USD's platform-default risk/execution
+        # thresholds or trading calendar.
+        self._risk_config = config.risk_for(assignment.canonical_symbol)
+        self._execution_config = config.execution_for(assignment.canonical_symbol)
+        _market = config.market_for(assignment.canonical_symbol)
+        self._calendar: TradingCalendar = (
+            calendar_for(_market.asset_class) if _market is not None else FxWeekdayCalendar()
+        )
         if incident_clear_assertion is not None:
             incident_clear_assertion.record(broker)
 
@@ -378,7 +388,9 @@ class PaperLiteOrchestrator:
         now = self._clock()
         self._risk_recorded_at = snapshot.received_time_utc
         session_phase = trading_window.phase_at(
-            now, trading_window.policy_from_config(self._config.intraday)
+            now,
+            trading_window.policy_from_config(self._config.intraday),
+            calendar=self._calendar,
         )
         if (
             session_phase is trading_window.SessionPhase.FLATTEN_REQUIRED
@@ -453,7 +465,7 @@ class PaperLiteOrchestrator:
             now=now,
             policy_hints=PolicyHints(
                 max_intents_per_hour_hint=self._assignment.max_proposals_per_hour,
-                min_stop_distance_points_hint=self._config.risk.min_stop_distance_points,
+                min_stop_distance_points_hint=self._risk_config.min_stop_distance_points,
                 session_blackout_active=session_phase is not trading_window.SessionPhase.OPEN,
                 notes=PAPER_LITE_POLICY_VERSION,
             ),
@@ -616,7 +628,7 @@ class PaperLiteOrchestrator:
             price=None if intent.entry_type is EntryType.MARKET else intent.reference_price,
             stop_loss_price=intent.stop_loss_price,
             take_profit_price=intent.take_profit_price,
-            max_slippage_points=self._config.execution.max_slippage_points,
+            max_slippage_points=self._execution_config.max_slippage_points,
             created_at_utc=now,
             expires_at_utc=intent.expires_at_utc,
             environment=Environment.PAPER,
@@ -737,8 +749,8 @@ class PaperLiteOrchestrator:
             live_equity=account.equity,
             live_open_positions=len(positions),
             market_day=market_day,
-            max_daily_loss=self._config.risk.max_daily_loss,
-            max_drawdown=self._config.risk.max_drawdown,
+            max_daily_loss=self._risk_config.max_daily_loss,
+            max_drawdown=self._risk_config.max_drawdown,
         )
         self._risk_ledger = recovery.ledger
         self._risk_trading_day = recovery.trading_day
