@@ -1910,6 +1910,183 @@ rather than two long-diverged histories.
 
 ---
 
+## 0ab. Agent MVP / Neutral Static Agent Integration — new workstream kickoff, first checkpoint — 2026-09-08
+
+New workstream, own ownership scope named explicitly by the owner: both
+`crumblr/agent_gateway/**` and `DutchBugs/crumblr-static-agent-host`
+(including its runtime/adapter). Goal: prove a real external strategy can
+decide on real Crumblr market data while Crumblr keeps full Risk/Policy/
+execution/audit authority — not "agent code exists."
+
+**Branches**, both off their real current tips, both pushed:
+- Crumblr: `agent/neutral-static-mvp` @ `c3f70c3` (== `main`, the just-merged
+  Dashboard Live Ops tip). No Crumblr source changed yet this pass — every
+  finding below came from reading, running, and verifying, not editing.
+- `crumblr-static-agent-host`: `agent/neutral-static-mvp`, branched from
+  `agent/neutral-context-strategy-6.0` (`395e7b1`), **not** literal
+  `origin/main` (`f1e16b7`) — that repo's `main` predates all of
+  StrategyArtifact 6.0/the Pivot-2.2 neutral runtime entirely; branching
+  from it would have silently discarded already-built, already-hash-
+  verified work. Flagged to the owner rather than guessed silently.
+
+### Phase 1 — contract boundary: already locked, nothing new needed
+
+Read `AgentMarketContextV1`/`HttpNeutralAgentClient`/`TradeProposal`/
+`NoTradeDecision`/identity-assignment-context-hash-artifact binding
+(`agent_gateway/market_context.py`, `neutral_agent_client.py`,
+`contracts.py`) against the Static Agent's own inbound parser
+(`neutral_context.py::NeutralAgentContext.from_payload`) and outbound
+response builder (`neutral_trader.py`). They already match field-for-
+field — BINDING/PROVENANCE, MARKET, INSTRUMENT, PLATFORM STATE, no
+setup detection crossing the boundary either direction. **No new
+strategy interface needed; the existing neutral contract is sufficient**,
+exactly the outcome the owner hoped for.
+
+### Phase 2 — verified, not built: real strategy compute already lives in the Agent
+
+`crumblr_strategy_agent.neutral_trader.CrumblrNeutralContextTrader` (StrategyArtifact
+6.0, from this session's earlier PL-004 work) already: enforces
+`strategy_artifact_hash` binding (`ArtifactBindingError` on mismatch),
+scopes to EUR/USD M5 only, reads `safety_state`/`reconciliation_status`
+as fail-closed pre-checks, then calls `pivot2_engine.evaluate()` — real
+sweep/FVG/MSS/pivot-2.2 detection over the received neutral bars, inside
+the Agent's own process. `compute_strategy_artifact_hash()` hashes
+`pivot2_engine.py`'s own source at runtime, so an undisclosed logic
+change would change the hash automatically, not merely by convention.
+
+Found and fixed a real environment issue, not a content defect: this
+Windows checkout's `core.autocrlf=true` had smudged the two frozen
+legacy-v5 `.mq5` asset files (source + signal-only adapter), producing
+"frozen source hash mismatch"/"signal-only adapter hash does not match
+provenance" on 32 of 71 tests. Confirmed via `git show HEAD:<path> |
+sha256sum` (filter-free) that the real committed blobs already matched
+their pinned manifest hashes exactly — set `core.autocrlf false` locally
+and rewrote both files from the filter-free blob (`git diff` confirms
+zero content change, nothing to commit). **Full suite: 71/71 passed.**
+This only affects the legacy v5 smoke path (`test_render_staging.py`),
+not the neutral route.
+
+### Phase 3 — driving path: mostly already exists; two real, genuine end-to-end proofs run
+
+`PaperLiteOrchestrator`/`scripts/paper_lite.py` already *is* the real
+driving path (market snapshot → `publish_context` →
+`build_agent_market_context_v1` → `agent.decide(context)` → Gateway →
+`evaluate_agent_trade_intent` → PAPER_LITE) — it already requires
+`--agent-url` and speaks real HTTP via `HttpNeutralAgentClient`, which
+structurally satisfies `PaperLiteTradingAgent`'s Protocol with zero
+adapter code. Nothing new needed here either; what was missing was ever
+having pointed it at a real, running neutral-context Static Agent server
+and proven the wire round-trip.
+
+**Proof 1 — genuine HEALTHY NO_TRADE, full real chain:**
+Registered a real `AgentIdentity`+`TradingAssignment`+credential in
+`crumblr_test_dev3` (`scripts/setup_paper_lite_agent.py`, StrategyArtifact
+6.0's real id/hash). Seeded real EUR/USD instrument spec + 374 recent
+bars + latest tick into it (copied from `crumblr_soak`, the same real
+data this session's dashboard live-market smoke test used — not
+fabricated). Found and fixed a real gap along the way:
+`crumblr_test_dev3`'s schema was stale (missing `risk_session_states
+.canonical_symbol`, Market Universe's `8801080869a6` migration) — ran
+`alembic upgrade head` against it. Started the real neutral-only Static
+Agent server (`crumblr-static-agent-host serve --neutral-only`,
+loopback, its own bearer token, no MT5 capability — confirmed via its own
+`/health`: `mt5_capability: false`, `execution_capability: false`). Ran
+`scripts/paper_lite.py --once` for real against it:
+
+```text
+outcome: NO_TRADE
+paper_balance: 10000  paper_equity: 10000  simulated_fill: false
+```
+
+Real durable journal entries confirm the full audit trail
+(`PORTFOLIO_CREATED`, `PAPER_LITE_INCIDENT_CLEAR_ASSERTED`,
+`MARKET_OBSERVED`, `PAPER_LITE_DECISION_WINDOW_CLAIMED`). The real market
+genuinely had no sweep (`NO_LIQUIDITY_SWEEP`) — an honest strategy
+conclusion on real data, not a forced result.
+
+**Proof 2 — genuine directional `TradeProposal`, deterministic fixture,
+real HTTP + real Crumblr contract validation:**
+Replayed `crumblr-static-agent-host`'s own known-good deterministic
+sweep/FVG/MSS/pivot-2.2 bar fixture (`tests/test_pivot2_engine.py
+::_real_sweep_fvg_mss_bars`, byte-identical values) as a real Crumblr
+`AgentMarketContextV1` (via the real `build_agent_market_context_v1()`),
+sent over real HTTP to the same running server:
+
+```text
+side: BUY  entry_type: LIMIT
+reference_price: 1.10015  stop_loss: 1.098500  take_profit: 1.1034500
+reason_codes: SWEEP_DETECTED, FVG_CONFIRMED, MSS_CONFIRMED,
+              PIVOT_2_2_CONFIRMED, STATIC_STRATEGY_TRIGGER_VALID
+```
+
+Validated cleanly against Crumblr's own strict `TradeProposal` pydantic
+contract (directional check, stop/target-direction check, lifetime
+check) — `proposal_fingerprint` computed successfully.
+
+**Not yet done, honestly still open**: this directional proposal has not
+yet been driven through the *full* `PaperLiteOrchestrator` DB-snapshot
+path (Gateway → Core Risk → Policy → Supervisor → a real simulated fill)
+the way Proof 1 was — the deterministic fixture's timestamps predate the
+real EUR/USD data already seeded, so it would never surface as the
+"latest" snapshot without deliberately re-anchoring the fixture's clock
+time (same relative structure, shifted to a fresh, unclaimed decision
+window) — flagged rather than forced through quickly to avoid a rushed,
+badly-understood timing bug in a safety-relevant path. Concrete next
+step, not a blocker.
+
+### Negative-proof audit (existing coverage, not newly written this pass)
+
+Checked test names directly rather than assuming: **11 of 13** required
+proofs already have direct existing coverage —
+`test_a_wrong_credential_is_refused`,
+`test_an_unknown_assignment_is_rejected`/
+`test_an_assignment_belonging_to_another_agent_is_rejected`,
+`test_an_expired_context_bundle_is_rejected`,
+`test_a_context_bundle_for_a_different_assignment_is_rejected` +
+`test_mismatched_binding_fails_before_gateway`,
+`test_an_identical_retry_is_a_safe_no_op` +
+`test_publish_context_is_idempotent_for_the_same_symbol_and_instant`,
+`test_a_conflicting_retry_fails_closed` +
+`test_a_conflicting_no_trade_retry_fails_closed`,
+`test_a_slow_server_times_out` +
+`test_a_stall_mid_body_also_raises_the_typed_timeout` (never silently
+becomes `NO_TRADE`), `test_a_decision_violating_the_crumblr_contract_
+fails_closed` + three sibling malformed-response tests,
+`test_risk_block_never_reaches_the_policy_gate` +
+`test_the_supervisor_is_never_asked_when_risk_blocks`,
+`test_the_supervisor_is_never_asked_when_the_policy_gate_does_not_approve`.
+No MT5/DB-write authority and `order_send` structurally absent are true
+by construction, confirmed live via the real server's own `/health`
+(`mt5_capability: false`, `execution_capability: false`) rather than
+merely asserted. **Strategy-artifact-mismatch on the Gateway side**
+specifically (as opposed to the Agent's own `ArtifactBindingError`,
+already proven) is the one item not yet independently confirmed —
+named as a gap, not silently assumed covered.
+
+### Full gate
+
+Crumblr: unchanged since the Dashboard Live Ops merge (no source touched
+this pass) — ruff/format/mypy clean, unit 1343 passed/1 skipped, full
+integration suite 332 passed/2 skipped, already confirmed at `c3f70c3`.
+`crumblr-static-agent-host`: 71/71 passed (see Phase 2 above).
+
+### Open, next
+
+1. Drive the directional proposal through the full `PaperLiteOrchestrator`
+   (Phase 5 path B), not only the raw HTTP/contract level.
+2. Confirm the Gateway-side (not just Agent-side) strategy-artifact-
+   mismatch rejection with a direct test if one does not already exist.
+3. Dashboard confirmation (agent panel, pipeline, PAPER_LITE portfolio,
+   activity evidence) against this real run.
+4. Decide whether any of this session's ad hoc verification (the
+   `crumblr_test_dev3` seed data, the two registered assignments) should
+   become a committed, reusable fixture/script rather than one-off manual
+   steps.
+
+Not merged. No shared-contract/Core change requested or needed this pass.
+
+---
+
 ## 1. Where this track actually stands (as of 2026-09-04 — §0v; table below dated 2026-09-01 elsewhere, corrected rows marked)
 
 | Step | Scope | State |
