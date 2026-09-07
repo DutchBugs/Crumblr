@@ -66,6 +66,7 @@ def _write_health_snapshot(
     overloaded status.
     """
     payload = {**health.to_payload(), "broker_state": broker_state_health.to_payload()}
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
