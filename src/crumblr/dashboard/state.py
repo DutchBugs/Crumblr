@@ -46,6 +46,7 @@ from crumblr.dashboard.agent_state import (
     build_agent_panel,
     build_last_decision,
 )
+from crumblr.dashboard.broker_panel import BrokerReadModel, build_broker_read_model
 from crumblr.dashboard.execution_panel import ExecutionGateState, build_execution_gate_state
 from crumblr.dashboard.paper_lite_journal import JournalReadResult, read_journal_entries
 from crumblr.dashboard.reader_health import read_health_snapshot
@@ -186,6 +187,9 @@ class DashboardState:
     risk_panel: RiskPanelState
     reconciliation: ReconciliationPanelState
     execution_gate: ExecutionGateState
+    broker: BrokerReadModel
+    """Account/positions/pending orders, all drawn from one consistent
+    `BrokerAccountSnapshot` read — see `dashboard.broker_panel`."""
     """Renders the "Execution" header card — derived from real config gates,
 
     never hardcoded."""
@@ -419,6 +423,7 @@ def build_state(
         execution_config=execution_config,
         live_trading_acknowledged=live_trading_acknowledged,
     )
+    broker = build_broker_read_model(broker_state=BrokerStateStore(engine))
 
     return DashboardState(
         generated_at_utc=now,
@@ -446,6 +451,7 @@ def build_state(
         risk_panel=risk_panel,
         reconciliation=reconciliation,
         execution_gate=execution_gate,
+        broker=broker,
         latest_signal=(
             _decision_summary(
                 latest_signal,

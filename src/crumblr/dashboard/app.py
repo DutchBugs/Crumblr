@@ -188,6 +188,27 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             "checked_at_utc": state.reconciliation.checked_at_utc.isoformat(),
         },
         "execution_gate": asdict(state.execution_gate),
+        "broker": {
+            "account": (
+                {
+                    **asdict(state.broker.account),
+                    "observed_at_utc": state.broker.account.observed_at_utc.isoformat(),
+                }
+                if state.broker.account is not None
+                else None
+            ),
+            "positions": [
+                {**asdict(p), "opened_at_utc": p.opened_at_utc.isoformat()}
+                for p in state.broker.positions
+            ],
+            "pending_orders": [
+                {
+                    **asdict(o),
+                    "expires_at_utc": o.expires_at_utc.isoformat() if o.expires_at_utc else None,
+                }
+                for o in state.broker.pending_orders
+            ],
+        },
         "latest_tick": (
             {
                 "event_time_utc": state.latest_tick.event_time_utc.isoformat(),

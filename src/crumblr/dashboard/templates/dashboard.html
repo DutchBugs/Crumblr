@@ -66,15 +66,18 @@
     font-size: 0.75em; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint);
     text-transform: uppercase; margin: 0 0 10px 2px;
   }
+  .grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
   .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
   .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
   .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .grid-hero { display: grid; grid-template-columns: 300px 1fr; gap: 14px; }
   @media (max-width: 1100px) {
+    .grid-6 { grid-template-columns: repeat(3, 1fr); }
     .grid-5 { grid-template-columns: repeat(3, 1fr); }
   }
   @media (max-width: 1000px) {
+    .grid-6 { grid-template-columns: repeat(2, 1fr); }
     .grid-5 { grid-template-columns: repeat(2, 1fr); }
     .grid-4 { grid-template-columns: repeat(2, 1fr); }
     .grid-3 { grid-template-columns: 1fr; }
@@ -144,6 +147,9 @@
     color: var(--text-faint); font-style: normal; font-size: 0.9em;
     display: flex; align-items: center; justify-content: center; height: 220px;
     border: 1px dashed var(--border-soft); border-radius: 8px;
+  }
+  .empty.bad {
+    color: var(--bad); border-color: rgba(251, 84, 104, 0.4); background: var(--bad-bg);
   }
 
   /* ---- key/value rows used in several panels ---- */
@@ -217,7 +223,7 @@
 <div class="topbar">
   <div class="identity">
     <span class="brand">CRUMBLR</span>
-    <span class="subtitle">EUR/USD Autonomous Trading Platform</span>
+    <span class="subtitle">Crumblr Autonomous Trading Platform</span>
   </div>
   <div class="badges">
     <span class="pill pill-demo">{{ state.environment_badge_label if state else "—" }}</span>
@@ -244,7 +250,16 @@
 
   <!-- Row 1: header status cards -->
   <div class="section">
-    <div class="grid-5">
+    <div class="grid-6">
+      <div class="card status-card">
+        <div class="label">Dashboard</div>
+        <div class="state good" id="heartbeat-state">
+          <span class="dot good" id="heartbeat-dot"></span>
+          <span id="heartbeat-text">LIVE</span>
+        </div>
+        <div class="sub" id="heartbeat-sub">refreshed just now</div>
+      </div>
+
       <div class="card status-card">
         <div class="label">Market Reader</div>
         <div class="state {{ state.mt5_connectivity | state_class }}" id="mt5-state">
@@ -364,6 +379,91 @@
         <div class="empty" id="chart-empty">No {{ state.timeframe }} bars stored yet</div>
         {% endif %}
       </div>
+    </div>
+  </div>
+
+  <!-- Row 2.5: broker account / positions / pending orders -->
+  <div class="section">
+    <div class="section-title">Account &amp; Broker State</div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="panel-title">Account (latest observed broker snapshot)</div>
+        {% if state.broker.account %}
+        <div class="kv"><span class="k">Observed</span><span class="v">{{ state.broker.account.observed_at_utc }} ({{ (state.generated_at_utc - state.broker.account.observed_at_utc) | age }} ago)</span></div>
+        <div class="kv"><span class="k">Server</span><span class="v">{{ state.broker.account.server }}</span></div>
+        <div class="kv"><span class="k">Account</span><span class="v">{{ state.broker.account.account_ref }}</span></div>
+        <div class="kv"><span class="k">Currency / Leverage</span><span class="v">{{ state.broker.account.currency }} · 1:{{ state.broker.account.leverage }}</span></div>
+        <div class="kv"><span class="k">Balance</span><span class="v">{{ state.broker.account.balance }}</span></div>
+        <div class="kv"><span class="k">Equity</span><span class="v">{{ state.broker.account.equity }}</span></div>
+        <div class="kv"><span class="k">Profit</span><span class="v">{{ state.broker.account.profit }}</span></div>
+        <div class="kv"><span class="k">Margin / Free</span><span class="v">{{ state.broker.account.margin }} / {{ state.broker.account.margin_free }}</span></div>
+        <div class="kv"><span class="k">Margin level</span><span class="v">{{ state.broker.account.margin_level or "—" }}</span></div>
+        <div class="kv"><span class="k">Trade allowed</span><span class="v {{ 'good' if state.broker.account.account_trade_allowed else 'bad' }}">{{ "YES" if state.broker.account.account_trade_allowed else "NO" }}</span></div>
+        <div class="kv"><span class="k">Position set</span><span class="v {{ state.broker.account.position_set_state | state_class }}">{{ state.broker.account.position_set_state }}</span></div>
+        <div class="kv"><span class="k">Pending-order set</span><span class="v {{ state.broker.account.pending_order_set_state | state_class }}">{{ state.broker.account.pending_order_set_state }}</span></div>
+        {% else %}
+        <div class="empty">No broker account observation recorded yet</div>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <div class="panel-title">Open positions</div>
+        {% if not state.broker.account %}
+        <div class="empty">No broker account observation recorded yet</div>
+        {% elif state.broker.account.position_set_state != "COMPLETE" %}
+        <div class="empty bad">POSITION SET {{ state.broker.account.position_set_state }} — absence cannot be trusted</div>
+        {% elif state.broker.positions %}
+        <table class="timeline">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Vol</th><th>Open</th><th>Current</th><th>SL</th><th>TP</th><th>Profit</th></tr></thead>
+          <tbody>
+          {% for p in state.broker.positions %}
+            <tr>
+              <td>{{ p.canonical_symbol }} <span class="muted">({{ p.broker_symbol }})</span></td>
+              <td>{{ p.side }}</td>
+              <td>{{ p.volume }}</td>
+              <td>{{ p.open_price }}</td>
+              <td>{{ p.current_price or "—" }}</td>
+              <td>{{ p.stop_loss_price or "—" }}</td>
+              <td>{{ p.take_profit_price or "—" }}</td>
+              <td>{{ p.profit }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="empty">0 open positions (complete broker snapshot)</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="panel-title">Pending orders</div>
+      {% if not state.broker.account %}
+      <div class="empty">No broker account observation recorded yet</div>
+      {% elif state.broker.account.pending_order_set_state != "COMPLETE" %}
+      <div class="empty bad">PENDING-ORDER SET {{ state.broker.account.pending_order_set_state }} — absence cannot be trusted</div>
+      {% elif state.broker.pending_orders %}
+      <table class="timeline">
+        <thead><tr><th>Symbol</th><th>Type</th><th>State</th><th>Vol</th><th>Price</th><th>SL</th><th>TP</th><th>Expires</th><th>Order ID</th></tr></thead>
+        <tbody>
+        {% for o in state.broker.pending_orders %}
+          <tr>
+            <td>{{ o.canonical_symbol }} <span class="muted">({{ o.broker_symbol }})</span></td>
+            <td>{{ o.order_type }}</td>
+            <td>{{ o.state }}</td>
+            <td>{{ o.volume }}</td>
+            <td>{{ o.price }}</td>
+            <td>{{ o.stop_loss_price or "—" }}</td>
+            <td>{{ o.take_profit_price or "—" }}</td>
+            <td>{{ o.expires_at_utc or "—" }}</td>
+            <td>{{ o.order_id }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No pending orders observed in latest COMPLETE broker snapshot</div>
+      {% endif %}
     </div>
   </div>
 
@@ -681,7 +781,7 @@
 
   // Mirrors app.py's state_class() — kept intentionally tiny and duplicated
   // rather than fetched, so a refresh never depends on a second request.
-  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1 };
+  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1, LIVE: 1 };
   var WARN = { STALE: 1, UNCALIBRATED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1, AWAITING_EVIDENCE: 1 };
   function stateClass(value) {
     var v = (value || "").toUpperCase();
@@ -819,14 +919,81 @@
   var candlesEl = document.getElementById("candles");
   if (initial && candlesEl) drawCandles(candlesEl, initial.recent_bars);
 
-  function poll() {
-    fetch("/api/state")
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (data) { if (data) applyState(data); })
-      .catch(function () { /* a failed poll keeps showing the last-known state, not an error banner */ });
+  // ---- Dashboard heartbeat (browser/API transport freshness) ----
+  //
+  // Deliberately separate from LiveReader/market-data/Agent/DB health —
+  // this only answers "is the browser itself still receiving successful
+  // /api/state responses," never conflated into one "system healthy"
+  // boolean (work order §7). A failed poll used to leave the last-known
+  // state on screen with no visible failure indication at all; this makes
+  // that failure visible without touching the rest of the page.
+  var POLL_INTERVAL_MS = 5000;
+  var STALE_AFTER_MS = POLL_INTERVAL_MS * 2;
+  var DOWN_AFTER_MS = POLL_INTERVAL_MS * 6;
+  var heartbeat = {
+    last_successful_api_poll_at: initial ? Date.now() : null,
+    last_attempted_api_poll_at: null,
+    consecutive_poll_failures: 0
+  };
+
+  function renderHeartbeat() {
+    var now = Date.now();
+    var sinceSuccessMs = heartbeat.last_successful_api_poll_at === null
+      ? null
+      : now - heartbeat.last_successful_api_poll_at;
+
+    var label, cls;
+    if (sinceSuccessMs === null) {
+      label = "DOWN"; cls = "bad";
+    } else if (sinceSuccessMs > DOWN_AFTER_MS) {
+      label = "DOWN"; cls = "bad";
+    } else if (sinceSuccessMs > STALE_AFTER_MS) {
+      label = "STALE"; cls = "warn";
+    } else {
+      label = "LIVE"; cls = "good";
+    }
+
+    setClass("heartbeat-state", "state", cls);
+    setClass("heartbeat-dot", "dot", cls);
+    setText("heartbeat-text", label);
+    setText(
+      "heartbeat-sub",
+      sinceSuccessMs === null
+        ? "no successful refresh yet"
+        : "last successful refresh " + formatAge(sinceSuccessMs / 1000) + " ago"
+        + (heartbeat.consecutive_poll_failures > 0
+            ? " (" + heartbeat.consecutive_poll_failures + " failed poll"
+              + (heartbeat.consecutive_poll_failures === 1 ? "" : "s") + " since)"
+            : "")
+    );
   }
 
-  setInterval(poll, 5000);
+  function poll() {
+    heartbeat.last_attempted_api_poll_at = Date.now();
+    fetch("/api/state")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (data) {
+          heartbeat.last_successful_api_poll_at = Date.now();
+          heartbeat.consecutive_poll_failures = 0;
+          applyState(data);
+        } else {
+          heartbeat.consecutive_poll_failures += 1;
+        }
+        renderHeartbeat();
+      })
+      .catch(function () {
+        // A failed poll keeps showing the last-known panel state (never an
+        // error banner over the whole page), but the heartbeat card itself
+        // must still visibly age/degrade — that is the whole point of §7.
+        heartbeat.consecutive_poll_failures += 1;
+        renderHeartbeat();
+      });
+  }
+
+  renderHeartbeat();
+  setInterval(poll, POLL_INTERVAL_MS);
+  setInterval(renderHeartbeat, 1000);
 })();
 </script>
 {% endif %}

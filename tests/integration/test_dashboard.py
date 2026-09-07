@@ -27,6 +27,7 @@ from crumblr.agent_gateway.contracts import (
     ChampionShadowStatus,
     TradingAssignment,
 )
+from crumblr.application.broker_state import BrokerStateObservation
 from crumblr.config import AccountGuardConfig, ExecutionConfig, RiskConfig
 from crumblr.dashboard.app import create_app
 from crumblr.domain.enums import (
@@ -36,6 +37,7 @@ from crumblr.domain.enums import (
     ReasonCode,
     RiskVerdict,
     Side,
+    SnapshotCompleteness,
 )
 from crumblr.domain.events import SignalGenerated, build_event
 from crumblr.domain.models import (
@@ -48,10 +50,16 @@ from crumblr.persistence.agent_gateway import (
     PostgresAgentIdentityStore,
     PostgresTradingAssignmentStore,
 )
+from crumblr.persistence.broker_state import BrokerStateStore
 from crumblr.persistence.journal import EventJournal
 from crumblr.persistence.market_data import MarketDataStore, bar_identity, tick_identity
 from crumblr.persistence.safety_state import PostgresSafetyStateStore
 from crumblr.risk.safety_state import SafetyState
+from tests.conftest import (
+    make_broker_account_snapshot,
+    make_broker_pending_order_snapshot,
+    make_broker_position_snapshot,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -895,3 +903,87 @@ class TestNoSecretsAnywhereInTheResponse:
             assert forbidden not in api_text_lower, f"{forbidden!r} leaked into /api/state"
         for forbidden in self._PAGE_FORBIDDEN_SUBSTRINGS:
             assert forbidden not in page_text_lower, f"{forbidden!r} leaked into the rendered page"
+
+
+class TestBrokerAccountPositionsAndPendingOrdersRenderInTheUi:
+    """Work order §43 items 2-5: real PostgreSQL, only the latest snapshot's
+    own rows ever render, and an incomplete set never renders as confirmed
+    empty."""
+
+    def test_no_broker_observation_yet_reads_as_no_evidence(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        response = client(engine, tmp_path / "health.json").get("/api/state")
+
+        assert response.json()["broker"]["account"] is None
+        assert response.json()["broker"]["positions"] == []
+        assert response.json()["broker"]["pending_orders"] == []
+
+    def test_only_the_latest_of_two_snapshots_is_current(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        store = BrokerStateStore(engine)
+        first = make_broker_account_snapshot(balance=Decimal("1000"))
+        store.record(BrokerStateObservation(account=first, positions=(), pending_orders=()))
+        second = make_broker_account_snapshot(balance=Decimal("2000"))
+        store.record(BrokerStateObservation(account=second, positions=(), pending_orders=()))
+
+        response = client(engine, tmp_path / "health.json").get("/api/state")
+
+        assert response.json()["broker"]["account"]["balance"] == "2000"
+
+    def test_a_complete_snapshot_with_positions_and_pending_orders_renders_both(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        store = BrokerStateStore(engine)
+        account = make_broker_account_snapshot(
+            position_set_state=SnapshotCompleteness.COMPLETE,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        position = make_broker_position_snapshot(account.snapshot_id, ticket=555)
+        order = make_broker_pending_order_snapshot(account.snapshot_id, order_id=777)
+        store.record(
+            BrokerStateObservation(account=account, positions=(position,), pending_orders=(order,))
+        )
+
+        api = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+
+        assert len(api["broker"]["positions"]) == 1
+        assert len(api["broker"]["pending_orders"]) == 1
+        assert "EUR/USD" in page
+        assert "555" not in page  # ticket is not itself a displayed field
+        assert "777" in page  # order_id is displayed
+
+    def test_zero_rows_with_a_complete_set_is_confirmed_empty_not_hidden(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        store = BrokerStateStore(engine)
+        account = make_broker_account_snapshot(
+            position_set_state=SnapshotCompleteness.COMPLETE,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        page = client(engine, tmp_path / "health.json").get("/").text
+
+        assert "0 open positions" in page
+        assert "No pending orders observed" in page
+
+    def test_a_failed_position_set_never_renders_as_confirmed_empty_in_the_page(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        store = BrokerStateStore(engine)
+        account = make_broker_account_snapshot(
+            position_set_state=SnapshotCompleteness.FAILED,
+            pending_order_set_state=SnapshotCompleteness.COMPLETE,
+        )
+        store.record(BrokerStateObservation(account=account, positions=(), pending_orders=()))
+
+        api = client(engine, tmp_path / "health.json").get("/api/state").json()
+        page = client(engine, tmp_path / "health.json").get("/").text
+
+        assert api["broker"]["account"]["position_set_state"] == "FAILED"
+        assert api["broker"]["positions"] == []
+        assert "absence cannot be trusted" in page
+        assert "0 open positions" not in page
