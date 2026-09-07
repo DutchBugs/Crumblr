@@ -11,6 +11,13 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-08 — D-061 added: BTC/USD's first real session
+policy (continuous trading, no weekly close) — an explicit owner
+decision (BTC/USD Enablement Readiness work order), not invented.
+Per-market approval, real-terminal validation performed, `enabled`/
+`expected_spec_version`/`order_send` all unchanged. Full detail in
+`review/adr/ADR-023-btc-usd-session-policy.md`.
+
 Last updated 2026-09-08 — D-060 corrected a third time: two more
 unscoped reads in `ExecutionOrchestrator` — `reconcile_once()`'s
 candidate read and FINAL Risk's order-frequency count, both bulk reads
@@ -1603,21 +1610,80 @@ mean anything should start here.
   caller, fixed the same way. Full detail in
   `review/adr/ADR-022-market-universe.md` §0b.
 - **Watch for:** before enabling any second market, (1) real-terminal
-  confirmation of its broker-symbol pin (`scripts/mt5_probe.py`), (2) an
-  owner decision on that asset class's session/weekly-close policy if it
-  is not FX/METAL (`risk/calendars.py`'s own module docstring — no
-  calendar invents one; until then the market fails closed and cannot
-  trade at all, not merely "behaves as disabled"), (3) the Market
-  Capability Matrix build.md §24 itself calls for, not skipped here.
-  ~~Registration-time Universe validation~~ closed 2026-09-06/07 by Dev 2
-  as AG-026 (ADR-022 §4 item 2) — `dev1/market-universe` will need to
-  pass `platform_config=` at any future `AgentGateway(...)` construction
-  site once it converges with a `main` that includes it; constructs none
-  itself today.
+  confirmation of its broker-symbol pin (`scripts/mt5_probe.py`) —
+  ~~for BTC/USD~~ done 2026-09-08, see D-061; (2) an owner decision on
+  that asset class's session/weekly-close policy if it is not FX/METAL
+  (`risk/calendars.py`'s own module docstring — no calendar invents one;
+  until then the market fails closed and cannot trade at all, not merely
+  "behaves as disabled") — ~~for BTC/USD~~ done 2026-09-08, see D-061;
+  every other/future `CRYPTO` market stays fail-closed by default, this
+  approval is per-market, not per-asset-class; (3) the Market Capability
+  Matrix build.md §24 itself calls for, not skipped here — still open
+  for BTC/USD, and `expected_spec_version`/`enabled` both stay unset,
+  see D-061. ~~Registration-time Universe validation~~ closed 2026-09-06/07
+  by Dev 2 as AG-026 (ADR-022 §4 item 2) — `dev1/market-universe` will
+  need to pass `platform_config=` at any future `AgentGateway(...)`
+  construction site once it converges with a `main` that includes it;
+  constructs none itself today.
 - **Gate affected:** blocks nothing today (`order_send` NO-GO, no
   process trades concurrently on multiple markets); would block any
   future attempt to enable a second market without first closing the
   three watch-for items above.
+
+### D-061 — BTC/USD session policy: continuous trading, no weekly close, owner-approved
+- **Status:** deliberate — explicit owner decision, on their own spec
+- **Spec:** `build.md` has no session-policy concept for a 24/7 asset
+  class at all — D1.5/ADR-012's weekly-close policy is FX-specific by
+  design. `risk/calendars.py::AlwaysOpenCalendar` (ADR-022) reports "no
+  weekly-close concept" for exactly this reason, and the prior corrective
+  pass (D-060 Correction #1) made that fail closed pending a real owner
+  decision.
+- **Code:** `config.py::MarketConfig.session_policy_approved`,
+  `risk/calendars.py` (`TradingCalendar.session_policy_approved`,
+  `AlwaysOpenCalendar.__init__`, `calendar_for()`),
+  `risk/trading_window.py::phase_at`'s fail-closed branch, all five real
+  `calendar_for()` call sites, `config/paper.yaml` — full design in
+  `review/adr/ADR-023-btc-usd-session-policy.md`.
+- **Why:** owner work order 2026-09-08, "BTC/USD Enablement Readiness —
+  session-policy implementation... no trading authorization changes."
+  Presented three concrete options (24/7 no restriction; a real periodic
+  flatten deadline needing actual numbers; scaffolding only, no decision
+  yet) rather than choosing one — the owner chose the first: BTC/USD
+  trades continuously, no weekly close or flatten deadline. Real-terminal
+  validation (`scripts/mt5_probe.py`, real Pepperstone DEMO account) ran
+  the same day, confirming `broker_symbol: BTCUSD` and capturing the real
+  observed `InstrumentSpec` fields — see ADR-023 §3 for the full figures.
+- **Current state:** `session_policy_approved: true` set for BTC/USD in
+  `config/paper.yaml` only; `phase_at` resolves `OPEN` for it
+  unconditionally (subject to every other risk/execution gate — this is
+  not a trading authorization, only a session-permission gate). Proven
+  per-market, not per-asset-class: a hypothetical second, unapproved
+  `CRYPTO` market still fails closed on the identical calendar type
+  (`tests/unit/test_trading_window.py
+  ::TestAnApprovedNoWeeklyCloseCalendarResolvesOpen
+  ::test_an_unapproved_calendar_of_the_same_type_still_fails_closed`,
+  `tests/unit/test_risk_engine.py
+  ::TestMarketUniverseCalendarFailsClosed
+  ::test_approving_one_calendar_instance_does_not_approve_another`).
+  `expected_spec_version` stays unset (F-055 — the real observation is
+  evidence, not yet a reviewed-and-approved pin) and `enabled: false` is
+  unchanged: a real `ExecutionOrchestrator.run_once()` pass for an
+  approved BTC/USD capsule now clears the session-policy gate but is
+  still correctly refused one gate later,
+  `RECONCILIATION_BLOCKED`/`RECONCILIATION_UNKNOWN`
+  (`tests/integration/test_market_universe_wiring.py
+  ::TestBtcUsdEnablementReadiness`).
+- **Watch for:** before BTC/USD can reach `SUBMISSION_STARTED` at all,
+  `expected_spec_version` must be pinned by a human reviewing the real
+  observation in ADR-023 §3 (F-055 discipline — never invented, never
+  pinned automatically from a probe run). Before it can be `enabled: true`
+  at all, a separate owner decision, not implied by this one. The Market
+  Capability Matrix build.md §24 calls for is still not built or run
+  against BTC/USD specifically.
+- **Gate affected:** blocks nothing today (`order_send` NO-GO,
+  `enabled: false`); closes exactly one of the fail-closed gates a future
+  BTC/USD enablement would need to clear, named explicitly rather than
+  silently treated as "readiness == enabled."
 
 ### D-011 — Kill switch and equity ledger were in-memory
 - **Status:** RESOLVED 2026-08-18 for both halves; see the remaining gap

@@ -11588,6 +11588,115 @@ merge entry).
 
 ---
 
+## Update 2026-09-08 (ninety-third entry) — BTC/USD Enablement Readiness (ADR-023): session policy + real-terminal validation
+
+```text
+Component: config.py, risk/calendars.py, risk/trading_window.py, application/{orchestration,live_decision,execution,paper_lite}.py, agent_gateway/decision_path.py, config/paper.yaml
+Milestone: owner work order "BTC/USD Enablement Readiness — session-policy implementation + terminal validation + fail-closed acceptance tests; no trading authorization changes"
+Status before: no owner-approved session policy for any 24/7 asset class (D-060 item 1); BTC/USD real-terminal confirmation outstanding (D-060 item 3, ADR-022 §4 item 3)
+Status after:  BTC/USD has a real, owner-approved session policy (continuous, no weekly close), per-market not per-asset-class; real terminal validation confirms broker_symbol: BTCUSD; enabled/expected_spec_version/order_send all unchanged
+```
+
+**The work order named a task without a decision, correctly.** "Session-
+policy implementation" is not itself a policy — every established
+precedent this session (D1.4/D1.5's own numbers, F-055's spec-pin
+discipline, D-053's canary-fraction precedent) holds that an owner risk/
+session-policy shape must never be invented by the implementer. Asked
+directly via three concrete options (24/7 no restriction; a real periodic
+deadline needing actual numbers; scaffolding only, no decision yet) —
+**the owner chose 24/7, no weekly close or flatten deadline at all.**
+
+**Design — approval is per-market, not per-asset-class.** The naive fix
+(flip `AlwaysOpenCalendar`'s own default, or change what `CRYPTO` maps
+to) would have silently extended the owner's BTC/USD-specific decision to
+every future crypto market. Instead: `MarketConfig.session_policy_approved:
+bool = False` (same "explicit, git-visible act, not inferred" shape
+`expected_spec_version` already uses), threaded through a new
+`TradingCalendar.session_policy_approved` property (`FxWeekdayCalendar`
+always `True` — D1.5 is already approved; `AlwaysOpenCalendar` reports
+exactly what it was constructed with, `calendar_for()` now builds a fresh
+instance per call from the calling market's own flag rather than reusing
+a shared singleton). `phase_at`'s fail-closed branch now checks this flag
+before falling back to `CLOSED`. All five real `calendar_for()` call
+sites updated to pass `market.session_policy_approved`.
+
+**Real terminal validation, this session, this host.** `terminal64.exe`
+was already running, logged into the real Pepperstone DEMO account
+(credentials from `.env`, never printed). `uv sync --extra mt5` (not
+previously installed in this worktree), then `scripts/mt5_probe.py
+--canonical-symbol "BTC/USD" --sanitized-json <path>` — **read-only,
+non-sending** (`ReadOnlyMt5Gateway`, execution methods raise, D-036).
+Result: exactly one candidate, `BTCUSD`, matching the existing pin.
+Real observed `InstrumentSpec` captured (digits=2, point=0.01,
+tick_value=0.00860244653579478, contract_size=1.0, spread_points=1500,
+swap_long=-11.5/swap_short=1.09, path `Retail\Cryptocurrencies\Major
+\BTCUSD`) — full figures in ADR-023 §3, not acted on beyond confirming
+the symbol pin (`expected_spec_version` stays unset, F-055 — a human has
+not yet reviewed and approved this specific observation).
+
+**Scope boundary, honored exactly as instructed:** `MarketConfig.enabled`
+unchanged (`false`); `expected_spec_version` unchanged (`null`);
+`ExecutionConfig.submission_enabled`/`feedback_2_0_approved`/`order_send`
+completely untouched, platform-wide. A real `ExecutionOrchestrator
+.run_once()` pass for an approved BTC/USD capsule now clears the
+session-policy gate (no longer `INELIGIBLE`/`SESSION_BLACKOUT`) but is
+still correctly refused one gate later —
+`RECONCILIATION_BLOCKED`/`RECONCILIATION_UNKNOWN` — proving this pass
+touched exactly the one gate it should have and no other, proven directly
+by `tests/integration/test_market_universe_wiring.py
+::TestBtcUsdEnablementReadiness`.
+
+**New fail-closed acceptance tests**, six files:
+`test_risk_calendars.py` (approval defaults/threading/FX-METAL
+irrelevance), `test_trading_window.py` (approved calendar resolves OPEN
+unconditionally; **an unapproved instance of the identical calendar type
+still fails closed** — the core per-market-not-per-type proof),
+`test_config.py` (default False; settable; independent of `enabled`),
+`test_risk_engine.py` (the core `policies.evaluate()` enforcement point:
+approved calendar clears SESSION_BLACKOUT; a second unapproved instance
+in the same process does not), `test_market_universe_wiring.py` (unit:
+`evaluate_agent_trade_intent`/`ReplayOrchestrator` both ways; integration:
+a real Postgres/fake-MT5 `run_once()` pass proving the exact stopping
+point described above).
+
+**Evidence:**
+- `uv run ruff check . && uv run ruff format --check .` — clean
+- `uv run mypy` — clean, 201 source files
+- `uv run pytest --ignore=tests/integration` — full suite plus every new
+  test passing (spot-checked per file during development: calendars 76,
+  trading_window 84, config 59, risk_engine 62, market_universe_wiring 9
+  — all green)
+- `uv run pytest tests/integration/test_market_universe_wiring.py` — 11
+  passed in isolation, repeated
+- `uv run pytest tests/integration` — **273 passed, 2 skipped** (both
+  pre-existing filesystem-permission skips, unrelated), 590.00s, zero
+  errors — one clean single run, per the flakiness note below
+
+**Problems found:** the same real-Postgres connection-pool/test-isolation
+flakiness already documented twice in the eighty-ninth/ninetieth entries
+reproduced again here under rapid repeated `pytest tests/integration
+/test_market_universe_wiring.py` invocations while iterating — same class,
+confirmed cleared on isolated/spaced-out runs, not a regression from this
+change. Named plainly rather than silently re-run past; this session
+deliberately slowed its own re-run cadence afterward rather than
+continuing to hammer the single Postgres container.
+
+**Risk impact:** real, but bounded exactly as instructed. This is a
+session-*permission* decision, not a trading authorization — every other
+gate (`enabled`, `expected_spec_version`, `order_send`) stays exactly as
+closed as before. The one thing that changed is real: a future owner
+decision to pin `expected_spec_version` and flip `enabled: true` for
+BTC/USD is now one fewer gate away than it was.
+
+**Decision:** implement exactly the owner's chosen policy, no more. Do
+not pin `expected_spec_version` or flip `enabled` — both remain separate,
+later owner decisions per F-055/ADR-023 §6.
+
+**Next:** committed and pushed. Not merged — stop for owner review, as
+always.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
