@@ -11424,6 +11424,107 @@ always.
 
 ---
 
+## Update 2026-09-08 (ninety-first entry) — Market Universe corrective pass #3: reconciliation history + order-frequency scoping
+
+```text
+Component: persistence/execution.py, application/execution.py, scripts/reconcile.py
+Milestone: third, independent owner corrective review on the ninetieth entry's Market Universe cross-market fix
+Status before: ExecutionOrchestrator.reconcile_once() derived expected exposure from every market's SUBMISSION_STARTED history unscoped; FINAL Risk's order-frequency count was also unscoped despite feeding a per-market RiskConfig.max_orders_per_hour comparison
+Status after:  both ExecutionEventStore.request_ids_with_event()/count_events_since() accept an optional environment/canonical_symbol filter, joined through decision_capsules; both real call sites in ExecutionOrchestrator, plus a standalone script with the identical bug, now pass it
+```
+
+**Same shape of finding as the ninetieth entry's, twice more.** The
+owner's third review found `reconcile_once()`'s candidate read
+(`request_ids_with_event(SUBMISSION_STARTED)`) was unscoped while the
+broker observation/`ExpectedState` it feeds a few lines later are bound
+to `self._canonical_symbol` — a EUR/USD worker could derive expected
+exposure from, or record `RECONCILED` against, a BTC/USD request.
+Separately, FINAL Risk's order-frequency count
+(`count_events_since(SUBMISSION_STARTED, ...)`) was also unscoped,
+despite feeding `PortfolioState.orders_in_last_hour`, compared against
+`RiskConfig.max_orders_per_hour` — a genuinely per-market
+`RiskOverrides` field since slice 1. An unscoped count would let one
+market's submissions exhaust another's hourly budget.
+
+**Fixed, no schema change** (both joins use foreign keys that already
+exist — `execution_events.order_request_id -> execution_requests
+.order_request_id -> execution_requests.capsule_id ->
+decision_capsules.capsule_id`):
+- `persistence/execution.py::ExecutionEventStore.request_ids_with_event()`
+  and `.count_events_since()` both gained optional `environment`/
+  `canonical_symbol` parameters, sharing a new `_events_joined_to_capsules()`
+  helper for the join. `None` (either or both, the default) preserves the
+  prior unscoped query exactly.
+- `ExecutionOrchestrator.reconcile_once()` and the FINAL-Risk order-count
+  read now pass `environment=self._config.environment,
+  canonical_symbol=self._canonical_symbol`.
+- `scripts/reconcile.py` — found to carry the *identical* unscoped-read
+  bug while checking every real caller of `request_ids_with_event()`
+  (it already binds `flatten_histories`/`expectation` to
+  `args.canonical_symbol`/`args.environment` two lines below the bug) —
+  fixed the same way. Not a scope expansion: the identical fix applied
+  to a second call site of the identical pre-existing bug.
+
+**New regression tests**,
+`tests/integration/test_market_universe_wiring.py
+::TestReconciliationHistoryIsBoundedBySymbol` (4 tests): the raw
+persistence-layer join/filter for both methods (two markets seeded, each
+query returns only its own market, unscoped still returns both — a
+regression guard for every existing caller); and an end-to-end real-
+PostgreSQL test running a real two-market `run_once()`/`reconcile_once()`
+sequence — EUR/USD through the real, unmodified entry pipeline, BTC/USD
+seeded directly at the `SUBMISSION_STARTED`/
+`AMBIGUOUS_OUTCOME_RESOLVED{submitted:false}` state
+`_recover_ambiguous_submission` itself would produce (BTC/USD cannot
+reach entry eligibility today by the *separately, correctly* fixed
+fail-closed calendar design from the eighty-ninth entry — a deliberately
+different concern from the one under test here). Both workers reach
+`RECONCILED` for their own request only; each worker's `events_for()` on
+the *other* market's request is asserted unchanged before and after.
+
+**Evidence:**
+- `uv run ruff check . && uv run ruff format --check .` — clean (223 files)
+- `uv run mypy` — clean, 201 source files
+- `uv run pytest --ignore=tests/integration` — **1253 passed, 1 skipped**
+  (unchanged — this fix touches only `ExecutionOrchestrator`'s
+  integration-tested reconciliation/order-frequency paths)
+- `uv run pytest tests/integration/test_market_universe_wiring.py` —
+  9 passed, run twice for stability, both clean
+- `uv run pytest tests/integration` — **271 passed, 2 skipped** (both
+  pre-existing filesystem-permission skips, unrelated), 351.27s, zero
+  errors
+
+**Problems found while building the new orchestrator-level test (not a
+regression, a test-design issue caught and fixed before it shipped):**
+the test's own `_orchestrator()` helper omitted the `clock`/
+`activation_watermark` parameters `_execution_fixtures.py::orchestrator()`
+already threads through — without them, `ExecutionOrchestrator` defaulted
+to the real wall clock, so a capsule sealed at the fixture's `FIXED_NOW`
+read as `INTENT_EXPIRED`/`INELIGIBLE` against actual present-day time, and
+the adapter's own broker-clock-offset detection (`ReadOnlyMt5Gateway
+._clock_offset()`) raised on the resulting multi-week gap against the fake
+terminal's fixed tick timestamp. Fixed by threading the same `clock`
+through both the orchestrator and its `OrderCheckMt5Gateway` adapter,
+mirroring `_execution_fixtures.py`'s own two-clock wiring exactly.
+
+**Risk impact:** real, positive — same class as the ninetieth entry's.
+Before this fix, a second enabled market's `reconcile_once()` pass could
+have derived expected exposure from another market's requests or wrongly
+marked one `RECONCILED`; FINAL Risk's order-frequency gate could have
+been starved or bypassed by another market's submission volume. No
+behaviour change for the single-market (EUR/USD-only) case the platform
+runs today.
+
+**Decision:** apply exactly as specified, no scope expansion beyond the
+one identical-bug fix in `scripts/reconcile.py`. Do not merge without
+further owner review.
+
+**Next:** pushed to `origin/dev1/market-universe`. Not merged, not
+stacked on the dashboard branch — stop for owner review before merge, as
+always.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:

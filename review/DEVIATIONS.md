@@ -11,6 +11,15 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-08 — D-060 corrected a third time: two more
+unscoped reads in `ExecutionOrchestrator` — `reconcile_once()`'s
+candidate read and FINAL Risk's order-frequency count, both bulk reads
+across every market feeding logic already bound to one — fixed by
+joining through to `decision_capsules` for an `environment`/
+`canonical_symbol` filter (no schema change). A standalone script with
+the identical bug found and fixed the same way. Full detail in D-060's
+"Correction #3" bullet and `review/adr/ADR-022-market-universe.md` §0b.
+
 Last updated 2026-09-07/08 — D-060 corrected a second time: a real
 cross-market capsule-routing gap in `ExecutionOrchestrator.run_once()`
 (no `canonical_symbol` filter on its capsule read, no defensive check in
@@ -1577,6 +1586,22 @@ mean anything should start here.
   updated to match. Full detail, including the pre-existing test-isolation
   flakiness reproduced and ruled out while verifying this, in
   `review/adr/ADR-022-market-universe.md` §0a.
+- **Correction #3, 2026-09-08 (owner review):** a third review found the
+  same shape of gap twice more — `reconcile_once()`'s
+  `request_ids_with_event(SUBMISSION_STARTED)` candidate read was
+  unscoped (a EUR/USD worker could derive expected exposure from, or
+  record `RECONCILED` against, a BTC/USD request), and FINAL Risk's
+  `count_events_since(SUBMISSION_STARTED, ...)` order-frequency count was
+  also unscoped despite feeding a comparison against
+  `RiskConfig.max_orders_per_hour` — a genuinely per-market
+  `RiskOverrides` field. Fixed: both `ExecutionEventStore` methods gained
+  optional `environment`/`canonical_symbol` parameters, joining
+  `execution_events -> execution_requests -> decision_capsules` (no
+  schema change — the join uses existing foreign keys); both call sites
+  in `ExecutionOrchestrator` now pass them; `scripts/reconcile.py`, found
+  to carry the identical unscoped-read bug while checking every real
+  caller, fixed the same way. Full detail in
+  `review/adr/ADR-022-market-universe.md` §0b.
 - **Watch for:** before enabling any second market, (1) real-terminal
   confirmation of its broker-symbol pin (`scripts/mt5_probe.py`), (2) an
   owner decision on that asset class's session/weekly-close policy if it

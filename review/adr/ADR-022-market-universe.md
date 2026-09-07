@@ -1,12 +1,14 @@
 # ADR-022 — Market Universe: multi-market Core, Risk & Policy
 
-**Status:** ACCEPTED 2026-09-06, CORRECTED 2026-09-07 (twice) — Dev 1's own
-branch, `dev1/market-universe`, off `origin/main` @ `1971d7a`. Not merged;
-stop for owner review per the owner's own work-order cadence (see §7).
+**Status:** ACCEPTED 2026-09-06, CORRECTED 2026-09-07/08 (three times) —
+Dev 1's own branch, `dev1/market-universe`, off `origin/main` @ `1971d7a`.
+Not merged; stop for owner review per the owner's own work-order cadence
+(see §7).
 **Date:** 2026-09-04 (work order) — 2026-09-06 (this record) —
 2026-09-07 (owner corrective review #1, wiring + fail-closed, §0) —
 2026-09-07/08 (owner corrective review #2, cross-market capsule routing,
-§0a)
+§0a) — 2026-09-08 (owner corrective review #3, reconciliation history +
+order-frequency scoping, §0b)
 
 ## 0. Owner corrective review, 2026-09-07 — what changed and why
 
@@ -190,7 +192,79 @@ to its own `canonical_symbol` from construction, so there is no analogous
 
 ---
 
-## 1. The tension this ADR names rather than silently resolves
+## 0b. Owner corrective review #3, 2026-09-08 — reconciliation history and order-frequency scoping
+
+A third owner review, on the same branch, found two more unscoped reads
+in `ExecutionOrchestrator`, both the same shape as §0a's finding — a bulk
+read across the whole environment, feeding logic already bound to
+`self._canonical_symbol` downstream:
+
+1. **`reconcile_once()`'s candidate read.** `self._events
+   .request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED)` read
+   every request with a `SUBMISSION_STARTED` event across *every* market,
+   while the broker observation and `ExpectedState` built from it a few
+   lines later are bound to `self._canonical_symbol` — a EUR/USD worker
+   could derive expected exposure from a BTC/USD request's history, or
+   append a `RECONCILED` event to it.
+2. **FINAL Risk's order-frequency count.** `self._events
+   .count_events_since(ExecutionEventType.SUBMISSION_STARTED, ...)` fed
+   `PortfolioState.orders_in_last_hour`, compared against
+   `RiskConfig.max_orders_per_hour` — a genuinely per-market
+   `RiskOverrides` field (§3.2). An unscoped count would let one market's
+   submissions exhaust another's hourly budget, or vice versa.
+
+Fixed, per the owner's own stated preference (no schema change — both
+join through the existing `capsule_id`/`order_request_id` foreign keys):
+
+- `persistence/execution.py::ExecutionEventStore.request_ids_with_event()`
+  and `.count_events_since()` both gained optional `environment`/
+  `canonical_symbol` keyword parameters. Passing either joins
+  `execution_events -> execution_requests -> decision_capsules`
+  (`execution_events` itself carries neither column) and filters on it;
+  passing neither preserves the prior unscoped query exactly — a shared
+  `_events_joined_to_capsules()` helper builds the join once for both
+  methods.
+- `ExecutionOrchestrator.reconcile_once()` and the FINAL-Risk order-count
+  read (`_process()`) now pass `environment=self._config.environment,
+  canonical_symbol=self._canonical_symbol`.
+- `scripts/reconcile.py` — a standalone read-only reconciliation tool
+  with the *identical* unscoped-`request_ids_with_event()` bug, found
+  while checking every real caller of the method (it already binds
+  `flatten_histories`/`expectation` to `args.canonical_symbol`/
+  `args.environment` two lines below the bug, exactly like
+  `reconcile_once()` did) — fixed the same way. Not a scope expansion:
+  the identical fix applied to a second call site of the identical
+  pre-existing bug, found and fixed rather than left standing next to
+  the one under review.
+
+New regression tests, `tests/integration/test_market_universe_wiring.py
+::TestReconciliationHistoryIsBoundedBySymbol`:
+
+- `test_request_ids_with_event_is_bounded_by_symbol` /
+  `test_count_events_since_is_bounded_by_symbol` — the raw persistence-
+  layer join/filter, two markets' seeded `SUBMISSION_STARTED` events,
+  each query returns only its own market's request/count, an unscoped
+  call still returns both (regression guard for every existing caller
+  that never passes the new parameters).
+- `test_a_eur_usd_worker_never_reconciles_or_derives_exposure_from_a_btc_usd_request` —
+  end to end, real PostgreSQL, a real two-market `run_once()`/
+  `reconcile_once()` sequence. EUR/USD runs the real, unmodified pipeline
+  (claim → `SUBMISSION_STARTED` → ambiguity resolves → `RECONCILED`).
+  BTC/USD's request is seeded directly at the `SUBMISSION_STARTED`/
+  `AMBIGUOUS_OUTCOME_RESOLVED{submitted:false}` state
+  `_recover_ambiguous_submission` itself would produce on a real pass —
+  **not** run through the real entry pipeline, because BTC/USD
+  structurally cannot reach eligibility today (`SESSION_BLACKOUT`,
+  correctly, per §0's fail-closed calendar fix) — a deliberately
+  separate concern from the one under test here: whether reconciliation
+  itself, given a request that has somehow reached `SUBMISSION_STARTED`,
+  stays bounded to its own market. Both workers reach `RECONCILED` for
+  their own request; each worker's `events_for()` on the *other*
+  market's request is asserted unchanged, before and after.
+
+`config/paper.yaml` untouched — BTC/USD stays `enabled: false`. No
+schema change: both new query parameters join through foreign keys that
+already exist.
 
 `build.md` §30's own critical recommendation #12 states: *"Do not add more
 markets until the EUR/USD lifecycle is operationally boring."* By the
@@ -493,7 +567,7 @@ needed on this branch until it converges with `agent/contracts`.
 uv run ruff check . && uv run ruff format --check .   # pass
 uv run mypy                                            # pass, 201 source files
 uv run pytest --ignore=tests/integration               # 1253 passed, 1 skipped (pre-existing, unrelated)
-uv run pytest tests/integration                        # 268 passed, 2 skipped (pre-existing, unrelated) — see §0a for two flakiness episodes investigated and ruled out
+uv run pytest tests/integration                        # 271 passed, 2 skipped (pre-existing, unrelated) — see §0a for two flakiness episodes investigated and ruled out during that pass; this pass's own full run was clean, zero errors
 uv run alembic heads                                   # single head: 8801080869a6
 ```
 
