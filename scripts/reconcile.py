@@ -78,7 +78,15 @@ def main() -> int:
 
     events = ExecutionEventStore(engine)
     flatten_events = FlattenEventStore(engine)
-    candidates = events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED)
+    # Market Universe (ADR-022): bound to the same market/environment as
+    # flatten_histories/expectation below — the identical scoping fix
+    # applied to ExecutionOrchestrator.reconcile_once() (owner corrective
+    # review, 2026-09-08).
+    candidates = events.request_ids_with_event(
+        ExecutionEventType.SUBMISSION_STARTED,
+        environment=Environment(args.environment),
+        canonical_symbol=args.canonical_symbol,
+    )
     if candidates:
         request_histories = tuple((rid, events.events_for(rid)) for rid in candidates)
         flatten_histories = flatten_events.occurrence_histories(

@@ -562,8 +562,14 @@ class ExecutionOrchestrator:
         # committed to attempting one broker submission"; Phase 4
         # structurally never emits one, so this is honestly `0` today, not
         # a placeholder.
+        # Market Universe (ADR-022): RiskConfig.max_orders_per_hour is a
+        # per-market RiskOverrides field — an unscoped count would let one
+        # market's submissions exhaust another's hourly budget.
         orders_in_last_hour = self._events.count_events_since(
-            ExecutionEventType.SUBMISSION_STARTED, final_now - timedelta(hours=1)
+            ExecutionEventType.SUBMISSION_STARTED,
+            final_now - timedelta(hours=1),
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
         )
 
         # Owner risk policy v1 (D1.4): real portfolio risk, never a
@@ -1457,7 +1463,15 @@ class ExecutionOrchestrator:
         flatten). A request failing any of these stays unreconciled and
         is re-examined next pass.
         """
-        candidates = self._events.request_ids_with_event(ExecutionEventType.SUBMISSION_STARTED)
+        # Market Universe (ADR-022): this worker's broker observation and
+        # ExpectedState below are bound to self._canonical_symbol — the
+        # candidate set reconciliation derives exposure from, and may
+        # record RECONCILED against, must be bound to the same market.
+        candidates = self._events.request_ids_with_event(
+            ExecutionEventType.SUBMISSION_STARTED,
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+        )
         if not candidates:
             return ()
 

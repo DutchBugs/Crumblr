@@ -37,12 +37,13 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sqlalchemy import Engine, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
+from sqlalchemy.sql.selectable import Join
 
-from crumblr.domain.enums import ExecutionEventType, ReasonCode
+from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.timeutils import UtcDatetime
 from crumblr.persistence.journal import AppendResult
-from crumblr.persistence.schema import execution_events, execution_requests
+from crumblr.persistence.schema import decision_capsules, execution_events, execution_requests
 
 
 class ExecutionRequestConflictError(RuntimeError):
@@ -64,6 +65,24 @@ class ExecutionEventConflictError(RuntimeError):
     cannot be treated as a harmless duplicate — mirrors
     `ExecutionRequestConflictError` exactly, one level down the stack.
     """
+
+
+def _events_joined_to_capsules() -> Join:
+    """`execution_events -> execution_requests -> decision_capsules`
+
+    (Market Universe, ADR-022) — the one join path that reaches
+    `canonical_symbol`/`environment` from an event row, since
+    `execution_events` carries neither column itself. Shared by
+    `ExecutionEventStore.count_events_since()`/`.request_ids_with_event()`,
+    the two real per-market-scoped queries this store offers.
+    """
+    return execution_events.join(
+        execution_requests,
+        execution_events.c.order_request_id == execution_requests.c.order_request_id,
+    ).join(
+        decision_capsules,
+        execution_requests.c.capsule_id == decision_capsules.c.capsule_id,
+    )
 
 
 def event_id_for(*, order_request_id: UUID, event_type: ExecutionEventType) -> UUID:
@@ -299,7 +318,14 @@ class ExecutionEventStore:
             for row in rows
         )
 
-    def count_events_since(self, event_type: ExecutionEventType, since: UtcDatetime) -> int:
+    def count_events_since(
+        self,
+        event_type: ExecutionEventType,
+        since: UtcDatetime,
+        *,
+        environment: Environment | None = None,
+        canonical_symbol: str | None = None,
+    ) -> int:
         """How many `event_type` events occurred at or after `since`.
 
         Review 1.23 F-060 (reopened): the durable order-frequency authority
@@ -313,22 +339,52 @@ class ExecutionEventStore:
         fields default closed. Calling this with that event type therefore
         stays an honest `0` in every real deployment, not because the event
         type is unemittable, but because nothing shipped can reach it.
+
+        `environment`/`canonical_symbol` (Market Universe, ADR-022): the
+        threshold this feeds, `RiskConfig.max_orders_per_hour`, is a
+        per-market `RiskOverrides` field — a global count compared against
+        a per-market limit would let one market's submissions exhaust
+        another's budget. Joins `execution_events -> execution_requests ->
+        decision_capsules` for the filter (`execution_events` itself
+        carries neither column); `None` (either or both) preserves the
+        prior global-count behaviour for a caller that does not pass them.
         """
         from sqlalchemy import func
 
-        statement = (
-            select(func.count())
-            .select_from(execution_events)
-            .where(
-                execution_events.c.event_type == event_type.value,
-                execution_events.c.occurred_at_utc >= since,
+        if environment is None and canonical_symbol is None:
+            statement = (
+                select(func.count())
+                .select_from(execution_events)
+                .where(
+                    execution_events.c.event_type == event_type.value,
+                    execution_events.c.occurred_at_utc >= since,
+                )
             )
-        )
+        else:
+            statement = (
+                select(func.count())
+                .select_from(_events_joined_to_capsules())
+                .where(
+                    execution_events.c.event_type == event_type.value,
+                    execution_events.c.occurred_at_utc >= since,
+                )
+            )
+            if environment is not None:
+                statement = statement.where(decision_capsules.c.environment == environment.value)
+            if canonical_symbol is not None:
+                statement = statement.where(
+                    decision_capsules.c.canonical_symbol == canonical_symbol
+                )
         with self._engine.connect() as connection:
             return int(connection.execute(statement).scalar_one())
 
     def request_ids_with_event(
-        self, event_type: ExecutionEventType, *, since: UtcDatetime | None = None
+        self,
+        event_type: ExecutionEventType,
+        *,
+        since: UtcDatetime | None = None,
+        environment: Environment | None = None,
+        canonical_symbol: str | None = None,
     ) -> tuple[UUID, ...]:
         """Every distinct `order_request_id` that has at least one
 
@@ -350,15 +406,41 @@ class ExecutionEventStore:
         driver deliberately passes `None` — bounding by time would defeat
         the mechanism's purpose (a position lost track of weeks ago is
         exactly the drift item 8 exists to catch).
+
+        `environment`/`canonical_symbol` (Market Universe, ADR-022):
+        `application/execution.py::ExecutionOrchestrator.reconcile_once()`
+        passes both — its own broker observation and `ExpectedState` are
+        already bound to one market, and reconciliation history read
+        without the same bound would let a worker derive expected
+        exposure from, or record a `RECONCILED` event against, another
+        market's requests. Joins `execution_events -> execution_requests
+        -> decision_capsules` for the filter, the same as
+        `count_events_since()`; `None` (either or both) preserves the
+        prior unscoped behaviour.
         """
         from sqlalchemy import func
 
-        statement = (
-            select(execution_events.c.order_request_id)
-            .where(execution_events.c.event_type == event_type.value)
-            .group_by(execution_events.c.order_request_id)
-            .order_by(func.min(execution_events.c.sequence))
-        )
+        if environment is None and canonical_symbol is None:
+            statement = (
+                select(execution_events.c.order_request_id)
+                .where(execution_events.c.event_type == event_type.value)
+                .group_by(execution_events.c.order_request_id)
+                .order_by(func.min(execution_events.c.sequence))
+            )
+        else:
+            statement = (
+                select(execution_events.c.order_request_id)
+                .select_from(_events_joined_to_capsules())
+                .where(execution_events.c.event_type == event_type.value)
+                .group_by(execution_events.c.order_request_id)
+                .order_by(func.min(execution_events.c.sequence))
+            )
+            if environment is not None:
+                statement = statement.where(decision_capsules.c.environment == environment.value)
+            if canonical_symbol is not None:
+                statement = statement.where(
+                    decision_capsules.c.canonical_symbol == canonical_symbol
+                )
         if since is not None:
             statement = statement.where(execution_events.c.occurred_at_utc >= since)
         with self._engine.connect() as connection:
