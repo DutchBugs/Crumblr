@@ -293,6 +293,74 @@ class TestFirstConnect:
         assert health.connected is False
 
 
+class TestHeartbeat:
+    """Producer-liveness evidence (dashboard smoke-test corrective,
+
+    2026-09-07): `heartbeat_at_utc` must advance on every `poll_once()`
+    call regardless of which branch produced the rest of the snapshot, and
+    `heartbeat_max_age_seconds` must reflect this reader's own configured
+    cadence rather than a value a consumer would have to invent."""
+
+    def test_a_healthy_poll_stamps_the_current_clock_time(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        fake.bar_rows = (bar_row(),)
+        clock = FakeClock(NOW)
+
+        health = reader(fake, RecordingSink(), clock).poll_once()
+
+        assert health.heartbeat_at_utc == NOW
+
+    def test_the_heartbeat_advances_across_polls_even_with_no_new_market_data(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = ()
+        fake.bar_rows = ()
+        clock = FakeClock(NOW)
+        live = reader(fake, RecordingSink(), clock)
+
+        first = live.poll_once()
+        clock.advance(300)
+        second = live.poll_once()
+
+        assert second.heartbeat_at_utc == NOW + timedelta(seconds=300)
+        assert second.heartbeat_at_utc != first.heartbeat_at_utc
+        assert second.last_tick_at_utc == first.last_tick_at_utc
+
+    def test_heartbeat_max_age_reflects_this_readers_own_configured_cadence(self) -> None:
+        fake = ScriptedMt5()
+        clock = FakeClock(NOW)
+
+        health = reader(
+            fake,
+            RecordingSink(),
+            clock,
+            poll_interval=timedelta(seconds=10),
+            stale_after=timedelta(seconds=20),
+        ).poll_once()
+
+        assert health.heartbeat_max_age_seconds == 60.0  # max(10, 20) * HEARTBEAT_GRACE_MULTIPLIER
+
+    def test_the_heartbeat_still_advances_while_sticky_unhealthy(self) -> None:
+        class ConflictingSink(RecordingSink):
+            def record_bars(self, bars: Any) -> int:
+                from crumblr.persistence.journal import JournalIntegrityError
+
+                raise JournalIntegrityError("bar already stored with different values")
+
+        fake = ScriptedMt5()
+        fake.bar_rows = (bar_row(),)
+        clock = FakeClock(NOW)
+        live = reader(fake, ConflictingSink(), clock)
+
+        first = live.poll_once()
+        assert first.status is ReaderStatus.UNHEALTHY
+        clock.advance(120)
+        second = live.poll_once()
+
+        assert second.status is ReaderStatus.UNHEALTHY  # still sticky
+        assert second.heartbeat_at_utc == NOW + timedelta(seconds=120)
+
+
 class RecordingInstrumentSpecSink:
     """Stands in for `InstrumentSpecStore` — no PostgreSQL required."""
 

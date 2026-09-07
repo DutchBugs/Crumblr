@@ -349,6 +349,23 @@ class TestBarGapsAndAnomalies:
         assert body["bar_gap_count"] == 1
 
 
+def _fresh_heartbeat(**overrides: object) -> dict[str, object]:
+    """A reader-health payload with valid, current producer-liveness
+
+    evidence — matches what a real `LiveReader` always writes now
+    (dashboard corrective, 2026-09-07). Tests that only care about the
+    status-derived mapping use this rather than a bare `{"status": ...}`
+    dict, which would now correctly, but unhelpfully for those tests, read
+    as an expired heartbeat regardless of `status`.
+    """
+    fields: dict[str, object] = {
+        "heartbeat_at_utc": datetime.now(UTC).isoformat(),
+        "heartbeat_max_age_seconds": 300.0,
+    }
+    fields.update(overrides)
+    return fields
+
+
 class TestReaderHealthSnapshot:
     def test_a_missing_snapshot_file_reads_as_absent_not_an_error(
         self, engine: Engine, tmp_path: Path
@@ -392,7 +409,9 @@ class TestF043PresentationStates:
         self, engine: Engine, tmp_path: Path
     ) -> None:
         path = tmp_path / "health.json"
-        self._write_health(path, status="HEALTHY", connected=True, reconnect_count=1)
+        self._write_health(
+            path, **_fresh_heartbeat(status="HEALTHY", connected=True, reconnect_count=1)
+        )
 
         body = client(engine, path).get("/api/state").json()
 
@@ -420,6 +439,47 @@ class TestF043PresentationStates:
 
         assert body["mt5_connectivity"] == "DISCONNECTED"
         assert body["data_feed_state"] == "DOWN"
+
+    def test_a_healthy_status_with_an_expired_heartbeat_is_never_connected_or_healthy(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """The exact scenario the 2026-09-07 smoke test found live: a real
+
+        `mt5_live_reader.py` process exited after its last poll said
+        HEALTHY, and nothing ever updates the file again -- the dashboard
+        must not keep showing CONNECTED/HEALTHY indefinitely just because
+        that is the last thing the file happened to say."""
+        path = tmp_path / "health.json"
+        self._write_health(
+            path,
+            status="HEALTHY",
+            connected=True,
+            reconnect_count=1,
+            heartbeat_at_utc=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            heartbeat_max_age_seconds=30.0,
+        )
+
+        body = client(engine, path).get("/api/state").json()
+
+        assert body["mt5_connectivity"] != "CONNECTED"
+        assert body["data_feed_state"] != "HEALTHY"
+        assert body["mt5_connectivity"] == "DISCONNECTED"
+        assert body["data_feed_state"] == "STALE"
+
+    def test_a_healthy_status_with_no_heartbeat_field_at_all_is_never_connected_or_healthy(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """An older-format snapshot (no `heartbeat_at_utc` at all) must fail
+
+        closed the same way an expired one does, not silently trust the
+        bare `status` field the way this dashboard did before."""
+        path = tmp_path / "health.json"
+        self._write_health(path, status="HEALTHY", connected=True, reconnect_count=1)
+
+        body = client(engine, path).get("/api/state").json()
+
+        assert body["mt5_connectivity"] != "CONNECTED"
+        assert body["data_feed_state"] != "HEALTHY"
 
     def test_an_unreachable_database_is_reported_not_silently_empty(self, tmp_path: Path) -> None:
         from crumblr.persistence.engine import create_db_engine
@@ -517,7 +577,7 @@ class TestF046HistoricalDataIsNeverMistakenForLive:
     ) -> None:
         path = tmp_path / "health.json"
         path.write_text(
-            json.dumps({"status": "HEALTHY", "connected": True, "reconnect_count": 1}),
+            json.dumps(_fresh_heartbeat(status="HEALTHY", connected=True, reconnect_count=1)),
             encoding="utf-8",
         )
 

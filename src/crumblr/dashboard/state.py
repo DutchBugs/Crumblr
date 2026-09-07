@@ -31,6 +31,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -328,26 +329,94 @@ def _environment_badge_label(environment: Environment) -> str:
     return environment.value.upper()
 
 
-def _connectivity(reader_health: dict[str, Any] | None) -> tuple[ConnectivityState, DataFeedState]:
-    """Derive the two headline health cards from the reader's own status.
+_DATA_FEED_SEVERITY: dict[DataFeedState, int] = {"HEALTHY": 0, "STALE": 1, "DOWN": 2}
+"""Total order among the three "we have an opinion" data-feed states, used
+
+only to combine the status-derived result with the heartbeat-expiry result
+in `_connectivity` without ever letting an expired heartbeat *upgrade* an
+already-worse state (e.g. UNHEALTHY -> DOWN) back down to STALE. `UNKNOWN`
+is deliberately excluded — it lives on a different axis ("no snapshot
+exists at all") and `_connectivity` returns it directly, before this table
+is ever consulted."""
+
+
+def _connectivity(
+    reader_health: dict[str, Any] | None, *, now: UtcDatetime
+) -> tuple[ConnectivityState, DataFeedState]:
+    """Derive the two headline health cards from the reader's own status —
+
+    plus an independent liveness check on top (dashboard smoke-test
+    corrective, 2026-09-07).
 
     `reader_health["status"]` already encodes `LiveReader`'s real
     `stale_after` threshold and reconnect logic (`HEALTHY`/`STALE`/
-    `DISCONNECTED`/`UNHEALTHY`) — this maps that authoritative signal onto
-    the two cards, rather than re-deriving freshness from a raw timestamp
-    with a threshold the dashboard would have to guess at independently.
+    `DISCONNECTED`/`UNHEALTHY`) — mapped onto the two cards below, rather
+    than re-deriving *market* freshness from a raw tick timestamp with a
+    threshold this function would have to guess at independently.
+
+    That status field is the *last thing the writer process happened to
+    say before it stopped running* — nothing updates it once that process
+    exits. A dashboard that only ever reads `status` verbatim would keep
+    showing `CONNECTED`/`HEALTHY` forever after the reader was killed,
+    crashed, or was simply never restarted after a `--duration`-bounded
+    run — confirmed live during the 2026-09-07 smoke test. `last_tick_at_utc`
+    alone cannot fix this either: a genuinely live reader can legitimately
+    see no new market ticks for a long time (a quiet session, a weekend).
+
+    The independent check instead asks "is the *writer process* still
+    checking in," using `heartbeat_at_utc`/`heartbeat_max_age_seconds` —
+    stamped by `LiveReader.poll_once()` on literally every call regardless
+    of market activity (see that method's own docstring). `stale_after` is
+    `LiveReader`'s market-tick-gap threshold, not this one — reusing it
+    here would conflate two different questions ("is the market quiet" vs.
+    "is the writer still there"). If the heartbeat is missing (an
+    older-format snapshot, or the field was never written) or older than
+    its own declared `heartbeat_max_age_seconds`, connectivity is forced to
+    `DISCONNECTED` and the data-feed state is raised to at least `STALE` —
+    never silently kept at `HEALTHY`, and never *downgraded* if the
+    status-derived result was already `DOWN` (an expired heartbeat must
+    only ever make the picture more cautious, never less).
     """
     if reader_health is None:
         return "UNKNOWN", "UNKNOWN"
     status = reader_health.get("status")
     connected = bool(reader_health.get("connected"))
     if status == "HEALTHY":
-        return "CONNECTED", "HEALTHY"
-    if status == "STALE":
-        return ("CONNECTED" if connected else "DISCONNECTED"), "STALE"
-    if status in ("DISCONNECTED", "UNHEALTHY"):
-        return "DISCONNECTED", "DOWN"
-    return "UNKNOWN", "UNKNOWN"
+        connectivity: ConnectivityState = "CONNECTED"
+        data_feed: DataFeedState = "HEALTHY"
+    elif status == "STALE":
+        connectivity = "CONNECTED" if connected else "DISCONNECTED"
+        data_feed = "STALE"
+    elif status in ("DISCONNECTED", "UNHEALTHY"):
+        connectivity = "DISCONNECTED"
+        data_feed = "DOWN"
+    else:
+        return "UNKNOWN", "UNKNOWN"
+
+    if _heartbeat_expired(reader_health, now=now):
+        connectivity = "DISCONNECTED"
+        data_feed = max(data_feed, "STALE", key=_DATA_FEED_SEVERITY.__getitem__)
+    return connectivity, data_feed
+
+
+def _heartbeat_expired(reader_health: dict[str, Any], *, now: UtcDatetime) -> bool:
+    """`True` when the writer's own liveness evidence is absent or too old
+
+    to still vouch for the rest of the snapshot. Fails closed: a missing
+    `heartbeat_at_utc`/`heartbeat_max_age_seconds` (an older-format
+    snapshot, or a malformed one) counts as expired, the same "an
+    incomplete read must not produce a confident answer" rule the rest of
+    this dashboard already applies.
+    """
+    raw_heartbeat = reader_health.get("heartbeat_at_utc")
+    max_age_seconds = reader_health.get("heartbeat_max_age_seconds")
+    if not raw_heartbeat or not isinstance(max_age_seconds, (int, float)):
+        return True
+    try:
+        heartbeat_at = datetime.fromisoformat(raw_heartbeat)
+    except (TypeError, ValueError):
+        return True
+    return (now - heartbeat_at).total_seconds() > max_age_seconds
 
 
 def build_state(
@@ -391,7 +460,7 @@ def build_state(
     latest_risk = journal.latest(EventType.RISK_DECISION_MADE)
     latest_supervisor = journal.latest(EventType.SUPERVISOR_DECISION_MADE)
     reader_health = read_health_snapshot(reader_health_path)
-    mt5_connectivity, data_feed_state = _connectivity(reader_health)
+    mt5_connectivity, data_feed_state = _connectivity(reader_health, now=now)
 
     recent_bars = market.recent_bars(
         canonical_symbol=canonical_symbol, timeframe=timeframe, limit=RECENT_BAR_COUNT

@@ -117,6 +117,21 @@ window is how a bar that was still forming on the last poll gets its final
 values without needing separate "closed" vs. "forming" logic here.
 """
 
+HEARTBEAT_GRACE_MULTIPLIER = 3
+"""How many missed heartbeats a consumer should tolerate before treating the
+
+writer as gone (dashboard smoke test corrective, 2026-09-07): a dashboard
+that stopped seeing the process update its health file was still showing
+`CONNECTED`/`HEALTHY` indefinitely, because the last-written `status` field
+is frozen the instant the writer exits — it never gets a chance to write
+its own "I am gone" state. `LiveReader.heartbeat_max_age()` multiplies this
+against `max(poll_interval, stale_after)` so a single slow poll or one
+retried reconnect never trips it, while a genuinely dead or stuck-in-backoff
+process eventually does — the same "we have not heard from you in far too
+long to keep vouching for you" judgment either way, which is the honest
+answer regardless of which specific reason caused the silence.
+"""
+
 DEFAULT_BROKER_STATE_INTERVAL = timedelta(seconds=60)
 """How often broker state (F-047) is captured between reconnects.
 
@@ -151,7 +166,25 @@ class ReaderStatus(StrEnum):
 
 @dataclass(frozen=True)
 class ReaderHealth:
-    """A snapshot of the reader's state, for logging, tests and a dashboard."""
+    """A snapshot of the reader's state, for logging, tests and a dashboard.
+
+    `heartbeat_at_utc`/`heartbeat_max_age_seconds` are producer-liveness
+    evidence, deliberately separate from `last_tick_at_utc`: a live reader
+    can legitimately go a long time between real market ticks (a quiet
+    session, a weekend), but it still touches this object — and the file a
+    dashboard reads it from — on every `poll_once()` call, roughly every
+    `poll_interval`. `heartbeat_at_utc` is stamped at the end of every
+    `poll_once()`, regardless of which branch produced the rest of the
+    snapshot, so it is the one field that answers "is the *process* still
+    here," not "has the *market* said anything lately." A consumer that
+    only ever reads a frozen file (the writer process exited without
+    updating it again) sees `heartbeat_at_utc` stop advancing and can
+    detect that on its own, without needing a second channel — see
+    `dashboard.state._connectivity` for the consuming side.
+    `heartbeat_max_age_seconds` travels with each snapshot so a consumer
+    never has to invent its own freshness threshold — the reader is the
+    only side that actually knows its own `poll_interval`/`stale_after`.
+    """
 
     status: ReaderStatus
     connected: bool
@@ -164,6 +197,8 @@ class ReaderHealth:
     spec_changes: int = 0
     last_error: str | None = None
     detail: str | None = None
+    heartbeat_at_utc: UtcDatetime | None = None
+    heartbeat_max_age_seconds: float | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """A dashboard-safe rendering — no credential-shaped field exists here."""
@@ -183,6 +218,10 @@ class ReaderHealth:
             "spec_changes": self.spec_changes,
             "last_error": self.last_error,
             "detail": self.detail,
+            "heartbeat_at_utc": (
+                self.heartbeat_at_utc.isoformat() if self.heartbeat_at_utc else None
+            ),
+            "heartbeat_max_age_seconds": self.heartbeat_max_age_seconds,
         }
 
 
@@ -292,6 +331,9 @@ class LiveReader:
         self._tick_lookback = tick_lookback
         self._poll_interval = poll_interval
         self._stale_after = stale_after
+        self._heartbeat_max_age_seconds = (
+            max(poll_interval, stale_after).total_seconds() * HEARTBEAT_GRACE_MULTIPLIER
+        )
         self._reconnect_backoff = reconnect_backoff
         self._max_reconnect_backoff = max_reconnect_backoff
         self._environment = environment
@@ -347,7 +389,25 @@ class LiveReader:
         Never raises for an ordinary MT5 failure — those become health
         transitions, because a long-running reader that dies on the first
         dropped connection has not implemented reconnect at all.
+
+        Every exit path below is stamped with a fresh `heartbeat_at_utc`
+        here, in one place, after the fact — rather than threading it
+        through each of the several branches that can produce the returned
+        `ReaderHealth` — so reaching *any* return from this method (a
+        healthy read, a reconnect, a transient failure, even the sticky
+        `UNHEALTHY` early-return) is proof this call actually ran, which is
+        exactly the "process still alive" fact a consumer needs and cannot
+        get from `last_tick_at_utc` alone (a live reader can legitimately
+        see no new ticks for a while).
         """
+        self._health = replace(
+            self._poll_once_inner(),
+            heartbeat_at_utc=self._clock(),
+            heartbeat_max_age_seconds=self._heartbeat_max_age_seconds,
+        )
+        return self._health
+
+    def _poll_once_inner(self) -> ReaderHealth:
         if self._health.status is ReaderStatus.UNHEALTHY:
             # Sticky by design. See `acknowledge`.
             return self._health
