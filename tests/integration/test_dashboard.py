@@ -982,8 +982,14 @@ class TestBrokerAccountPositionsAndPendingOrdersRenderInTheUi:
 
         api = client(engine, tmp_path / "health.json").get("/api/state").json()
         page = client(engine, tmp_path / "health.json").get("/").text
+        # The JS refresh logic (tests/js/dashboard_broker_refresh_test.mjs)
+        # legitimately contains "0 open positions" as a string literal for
+        # the COMPLETE-and-empty case, in every page regardless of the
+        # server-rendered state -- excluding the trailing <script> block
+        # keeps this assertion about the *rendered* markup only.
+        rendered_markup = page.split("<script", 1)[0]
 
         assert api["broker"]["account"]["position_set_state"] == "FAILED"
         assert api["broker"]["positions"] == []
-        assert "absence cannot be trusted" in page
-        assert "0 open positions" not in page
+        assert "absence cannot be trusted" in rendered_markup
+        assert "0 open positions" not in rendered_markup

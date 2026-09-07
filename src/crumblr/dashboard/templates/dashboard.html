@@ -171,6 +171,17 @@
   .badge-inline.bad { background: var(--bad-bg); color: var(--bad); }
   .badge-inline.neutral { background: var(--neutral-bg); color: var(--text-dim); }
 
+  /* ---- Activity feed filter bar (client-side only; no write route) ---- */
+  .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px 2px; }
+  .filter-btn {
+    background: var(--card-bg, transparent); color: var(--text-dim);
+    border: 1px solid var(--border-soft); border-radius: 999px;
+    padding: 5px 14px; font-size: 0.78em; font-weight: 600; letter-spacing: 0.02em;
+    cursor: pointer;
+  }
+  .filter-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .filter-btn.active { background: var(--good-bg); color: var(--good); border-color: var(--good); }
+
   /* ---- Agent panel ---- */
   .agent-empty {
     padding: 22px; text-align: center; color: var(--text-dim);
@@ -388,6 +399,7 @@
     <div class="grid-2">
       <div class="card">
         <div class="panel-title">Account (latest observed broker snapshot)</div>
+        <div id="broker-account-body">
         {% if state.broker.account %}
         <div class="kv"><span class="k">Observed</span><span class="v">{{ state.broker.account.observed_at_utc }} ({{ (state.generated_at_utc - state.broker.account.observed_at_utc) | age }} ago)</span></div>
         <div class="kv"><span class="k">Server</span><span class="v">{{ state.broker.account.server }}</span></div>
@@ -404,10 +416,12 @@
         {% else %}
         <div class="empty">No broker account observation recorded yet</div>
         {% endif %}
+        </div>
       </div>
 
       <div class="card">
         <div class="panel-title">Open positions</div>
+        <div id="broker-positions-body">
         {% if not state.broker.account %}
         <div class="empty">No broker account observation recorded yet</div>
         {% elif state.broker.account.position_set_state != "COMPLETE" %}
@@ -433,11 +447,13 @@
         {% else %}
         <div class="empty">0 open positions (complete broker snapshot)</div>
         {% endif %}
+        </div>
       </div>
     </div>
 
     <div class="card" style="margin-top:14px;">
       <div class="panel-title">Pending orders</div>
+      <div id="broker-pending-orders-body">
       {% if not state.broker.account %}
       <div class="empty">No broker account observation recorded yet</div>
       {% elif state.broker.account.pending_order_set_state != "COMPLETE" %}
@@ -464,6 +480,7 @@
       {% else %}
       <div class="empty">No pending orders observed in latest COMPLETE broker snapshot</div>
       {% endif %}
+      </div>
     </div>
   </div>
 
@@ -712,9 +729,19 @@
   <!-- Row 8: activity timeline -->
   <div class="section">
     <div class="section-title">Recent activity</div>
+    <div class="filter-bar" id="activity-filter-bar">
+      <button type="button" class="filter-btn active" data-filter="ALL">All</button>
+      <button type="button" class="filter-btn" data-filter="MARKET">Market</button>
+      <button type="button" class="filter-btn" data-filter="AGENT">Agent</button>
+      <button type="button" class="filter-btn" data-filter="RISK">Risk</button>
+      <button type="button" class="filter-btn" data-filter="SUPERVISOR">Supervisor</button>
+      <button type="button" class="filter-btn" data-filter="EXECUTION">Execution</button>
+      <button type="button" class="filter-btn" data-filter="PAPER">Paper</button>
+    </div>
     <div class="grid-2">
       <div class="card">
         <div class="panel-title">Platform journal</div>
+        <div id="activity-journal-body">
         {% if state.recent_events %}
         <table class="timeline">
           <thead><tr><th>Time (UTC)</th><th>Component</th><th>Event</th><th>Result</th></tr></thead>
@@ -732,9 +759,11 @@
         {% else %}
         <div class="empty">No recent journal events</div>
         {% endif %}
+        </div>
       </div>
-      <div class="card">
+      <div class="card" id="activity-paper-card">
         <div class="panel-title">PAPER_LITE audit trail (by sequence, no wall-clock time recorded)</div>
+        <div id="activity-paper-body">
         {% if state.paper_lite_activity %}
         <table class="timeline">
           <thead><tr><th>Seq</th><th>Event</th><th>Detail</th></tr></thead>
@@ -751,6 +780,7 @@
         {% else %}
         <div class="empty">No PAPER_LITE audit entries yet</div>
         {% endif %}
+        </div>
       </div>
     </div>
   </div>
@@ -841,7 +871,243 @@
     });
   }
 
+  function esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function kv(label, valueHtml, cls) {
+    return '<div class="kv"><span class="k">' + esc(label) + '</span>'
+      + '<span class="v' + (cls ? " " + esc(cls) : "") + '">' + valueHtml + "</span></div>";
+  }
+
+  // Mirrors the server-rendered Jinja markup for the broker section exactly
+  // (dashboard.html's own "Row 2.5") -- kept as one function per panel so a
+  // poll rebuilds each panel's *entire* inner content from the current
+  // `state.broker` in one shot, the same one-snapshot-consistent object
+  // `/api/state` already serializes server-side (`BrokerReadModel`, built
+  // from a single `latest_account_snapshot()` call). This is what makes a
+  // later poll's rows genuinely *replace* the previous ones rather than
+  // merely appending or leaving stale rows behind: every render starts from
+  // an empty container, never patches individual cells in place.
+  function renderBrokerAccount(state) {
+    var el = document.getElementById("broker-account-body");
+    if (!el) return;
+    var account = state.broker && state.broker.account;
+    if (!account) {
+      el.innerHTML = '<div class="empty">No broker account observation recorded yet</div>';
+      return;
+    }
+    var ageMs = Date.parse(state.generated_at_utc) - Date.parse(account.observed_at_utc);
+    var ageText = formatAge(Math.max(0, ageMs / 1000)) + " ago";
+    var html = "";
+    html += kv("Observed", esc(account.observed_at_utc) + " (" + esc(ageText) + ")");
+    html += kv("Server", esc(account.server));
+    html += kv("Account", esc(account.account_ref));
+    html += kv("Currency / Leverage", esc(account.currency) + " · 1:" + esc(account.leverage));
+    html += kv("Balance", esc(account.balance));
+    html += kv("Equity", esc(account.equity));
+    html += kv("Profit", esc(account.profit));
+    html += kv("Margin / Free", esc(account.margin) + " / " + esc(account.margin_free));
+    html += kv("Margin level", esc(account.margin_level != null ? account.margin_level : "—"));
+    html += kv(
+      "Trade allowed",
+      account.account_trade_allowed ? "YES" : "NO",
+      account.account_trade_allowed ? "good" : "bad"
+    );
+    html += kv("Position set", esc(account.position_set_state), stateClass(account.position_set_state));
+    html += kv(
+      "Pending-order set", esc(account.pending_order_set_state), stateClass(account.pending_order_set_state)
+    );
+    el.innerHTML = html;
+  }
+
+  function renderBrokerPositions(state) {
+    var el = document.getElementById("broker-positions-body");
+    if (!el) return;
+    var broker = state.broker || {};
+    var account = broker.account;
+    if (!account) {
+      el.innerHTML = '<div class="empty">No broker account observation recorded yet</div>';
+      return;
+    }
+    if (account.position_set_state !== "COMPLETE") {
+      el.innerHTML = '<div class="empty bad">POSITION SET ' + esc(account.position_set_state)
+        + " — absence cannot be trusted</div>";
+      return;
+    }
+    var positions = broker.positions || [];
+    if (positions.length === 0) {
+      el.innerHTML = '<div class="empty">0 open positions (complete broker snapshot)</div>';
+      return;
+    }
+    var rows = positions.map(function (p) {
+      return "<tr>"
+        + "<td>" + esc(p.canonical_symbol) + ' <span class="muted">(' + esc(p.broker_symbol) + ")</span></td>"
+        + "<td>" + esc(p.side) + "</td>"
+        + "<td>" + esc(p.volume) + "</td>"
+        + "<td>" + esc(p.open_price) + "</td>"
+        + "<td>" + esc(p.current_price != null ? p.current_price : "—") + "</td>"
+        + "<td>" + esc(p.stop_loss_price != null ? p.stop_loss_price : "—") + "</td>"
+        + "<td>" + esc(p.take_profit_price != null ? p.take_profit_price : "—") + "</td>"
+        + "<td>" + esc(p.profit) + "</td>"
+        + "</tr>";
+    }).join("");
+    el.innerHTML = '<table class="timeline"><thead><tr>'
+      + "<th>Symbol</th><th>Side</th><th>Vol</th><th>Open</th><th>Current</th><th>SL</th><th>TP</th><th>Profit</th>"
+      + "</tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function renderBrokerPendingOrders(state) {
+    var el = document.getElementById("broker-pending-orders-body");
+    if (!el) return;
+    var broker = state.broker || {};
+    var account = broker.account;
+    if (!account) {
+      el.innerHTML = '<div class="empty">No broker account observation recorded yet</div>';
+      return;
+    }
+    if (account.pending_order_set_state !== "COMPLETE") {
+      el.innerHTML = '<div class="empty bad">PENDING-ORDER SET ' + esc(account.pending_order_set_state)
+        + " — absence cannot be trusted</div>";
+      return;
+    }
+    var orders = broker.pending_orders || [];
+    if (orders.length === 0) {
+      el.innerHTML = '<div class="empty">No pending orders observed in latest COMPLETE broker snapshot</div>';
+      return;
+    }
+    var rows = orders.map(function (o) {
+      return "<tr>"
+        + "<td>" + esc(o.canonical_symbol) + ' <span class="muted">(' + esc(o.broker_symbol) + ")</span></td>"
+        + "<td>" + esc(o.order_type) + "</td>"
+        + "<td>" + esc(o.state) + "</td>"
+        + "<td>" + esc(o.volume) + "</td>"
+        + "<td>" + esc(o.price) + "</td>"
+        + "<td>" + esc(o.stop_loss_price != null ? o.stop_loss_price : "—") + "</td>"
+        + "<td>" + esc(o.take_profit_price != null ? o.take_profit_price : "—") + "</td>"
+        + "<td>" + esc(o.expires_at_utc != null ? o.expires_at_utc : "—") + "</td>"
+        + "<td>" + esc(o.order_id) + "</td>"
+        + "</tr>";
+    }).join("");
+    el.innerHTML = '<table class="timeline"><thead><tr>'
+      + "<th>Symbol</th><th>Type</th><th>State</th><th>Vol</th><th>Price</th><th>SL</th><th>TP</th><th>Expires</th><th>Order ID</th>"
+      + "</tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function renderBrokerPanels(state) {
+    renderBrokerAccount(state);
+    renderBrokerPositions(state);
+    renderBrokerPendingOrders(state);
+  }
+
+  // ---- Unified Live Activity feed (work order §23) ----
+  //
+  // Two genuinely separate streams, never sort-merged by a fabricated
+  // shared clock: the platform journal (real wall-clock `occurred_at_utc`,
+  // `EventJournal.recent()` -- already every source that writes to Core's
+  // shared journal: orchestration, trading_agent, agent_gateway,
+  // risk_engine, supervisor, execution_orchestrator) and the PAPER_LITE
+  // audit trail (its own monotonic `sequence`, no comparable timestamp --
+  // `persistence.paper_lite.PaperJournalEntry` does not carry one).
+  // Filtering is client-side over the already-fetched, already-bounded
+  // rows this same poll response carries -- no new endpoint, no extra
+  // request per filter click (§23: "no write route required").
+  var ACTIVITY_CATEGORY_BY_SOURCE = {
+    orchestration: "MARKET",
+    trading_agent: "AGENT",
+    agent_gateway: "AGENT",
+    risk_engine: "RISK",
+    supervisor: "SUPERVISOR",
+    execution_orchestrator: "EXECUTION",
+    paper_lite: "PAPER",
+  };
+  var currentActivityFilter = "ALL";
+  var lastActivityState = null;
+
+  function activityCategory(component) {
+    return ACTIVITY_CATEGORY_BY_SOURCE[component] || null;
+  }
+
+  function renderActivityJournal(state, filter) {
+    var el = document.getElementById("activity-journal-body");
+    if (!el) return;
+    var events = (state && state.recent_events) || [];
+    var filtered = filter === "ALL" ? events : events.filter(function (e) {
+      return activityCategory(e.component) === filter;
+    });
+    if (filtered.length === 0) {
+      el.innerHTML = '<div class="empty">'
+        + (filter === "ALL" ? "No recent journal events" : "No recent " + esc(filter.toLowerCase()) + " events")
+        + "</div>";
+      return;
+    }
+    var rows = filtered.map(function (e) {
+      return "<tr><td>" + esc(e.occurred_at_utc) + "</td><td>" + esc(e.component) + "</td><td>"
+        + esc(e.event_type) + "</td><td>" + esc(e.summary) + "</td></tr>";
+    }).join("");
+    el.innerHTML = '<table class="timeline"><thead><tr>'
+      + "<th>Time (UTC)</th><th>Component</th><th>Event</th><th>Result</th>"
+      + "</tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function renderActivityPaper(state, filter) {
+    var card = document.getElementById("activity-paper-card");
+    var el = document.getElementById("activity-paper-body");
+    if (!el) return;
+    // Paper activity is only relevant under "ALL" or the "PAPER" filter --
+    // any other category (MARKET/AGENT/RISK/SUPERVISOR/EXECUTION) hides
+    // this card entirely rather than showing an always-irrelevant "no
+    // rows match" table for a stream that was never going to match a
+    // non-paper category in the first place.
+    var relevant = filter === "ALL" || filter === "PAPER";
+    if (card) card.style.display = relevant ? "" : "none";
+    if (!relevant) return;
+
+    var rows = (state && state.paper_lite_activity) || [];
+    if (rows.length === 0) {
+      el.innerHTML = '<div class="empty">No PAPER_LITE audit entries yet</div>';
+      return;
+    }
+    var html = rows.map(function (r) {
+      return "<tr><td>" + esc(r.sequence) + "</td><td>" + esc(r.event_type) + "</td><td>"
+        + esc(r.detail != null ? r.detail : "—") + "</td></tr>";
+    }).join("");
+    el.innerHTML = '<table class="timeline"><thead><tr><th>Seq</th><th>Event</th><th>Detail</th></tr></thead>'
+      + "<tbody>" + html + "</tbody></table>";
+  }
+
+  function renderActivityFeed(state, filter) {
+    lastActivityState = state;
+    currentActivityFilter = filter;
+    renderActivityJournal(state, filter);
+    renderActivityPaper(state, filter);
+    var bar = document.getElementById("activity-filter-bar");
+    if (bar && bar.querySelectorAll) {
+      var buttons = bar.querySelectorAll(".filter-btn");
+      for (var i = 0; i < buttons.length; i++) {
+        var isActive = buttons[i].getAttribute("data-filter") === filter;
+        buttons[i].className = "filter-btn" + (isActive ? " active" : "");
+      }
+    }
+  }
+
+  function initActivityFilterBar() {
+    var bar = document.getElementById("activity-filter-bar");
+    if (!bar || !bar.querySelectorAll) return;
+    var buttons = bar.querySelectorAll(".filter-btn");
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener("click", function (event) {
+        var filter = event.currentTarget.getAttribute("data-filter");
+        renderActivityFeed(lastActivityState, filter);
+      });
+    }
+  }
+
   function applyState(state) {
+    renderBrokerPanels(state);
+    renderActivityFeed(state, currentActivityFilter);
+
     setClass("mt5-state", "state", stateClass(state.mt5_connectivity));
     setClass("mt5-dot", "dot", stateClass(state.mt5_connectivity));
     setText("mt5-text", state.mt5_connectivity);
@@ -918,6 +1184,8 @@
   var initial = bootstrap();
   var candlesEl = document.getElementById("candles");
   if (initial && candlesEl) drawCandles(candlesEl, initial.recent_bars);
+  lastActivityState = initial;
+  initActivityFilterBar();
 
   // ---- Dashboard heartbeat (browser/API transport freshness) ----
   //
@@ -994,6 +1262,19 @@
   renderHeartbeat();
   setInterval(poll, POLL_INTERVAL_MS);
   setInterval(renderHeartbeat, 1000);
+
+  // Test-only hook: `module` is never defined in a browser, so this is a
+  // no-op there. tests/js/dashboard_broker_refresh_test.mjs requires this
+  // exact template file (not a reimplementation) to drive the real
+  // rendering functions against a fake DOM.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      renderBrokerPanels: renderBrokerPanels,
+      renderActivityFeed: renderActivityFeed,
+      activityCategory: activityCategory,
+      applyState: applyState,
+    };
+  }
 })();
 </script>
 {% endif %}
