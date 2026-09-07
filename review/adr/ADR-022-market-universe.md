@@ -1,10 +1,12 @@
 # ADR-022 — Market Universe: multi-market Core, Risk & Policy
 
-**Status:** ACCEPTED 2026-09-06, CORRECTED 2026-09-07 — Dev 1's own branch,
-`dev1/market-universe`, off `origin/main` @ `1971d7a`. Not merged; stop for
-owner review per the owner's own work-order cadence (see §7).
+**Status:** ACCEPTED 2026-09-06, CORRECTED 2026-09-07 (twice) — Dev 1's own
+branch, `dev1/market-universe`, off `origin/main` @ `1971d7a`. Not merged;
+stop for owner review per the owner's own work-order cadence (see §7).
 **Date:** 2026-09-04 (work order) — 2026-09-06 (this record) —
-2026-09-07 (owner corrective review, see §0)
+2026-09-07 (owner corrective review #1, wiring + fail-closed, §0) —
+2026-09-07/08 (owner corrective review #2, cross-market capsule routing,
+§0a)
 
 ## 0. Owner corrective review, 2026-09-07 — what changed and why
 
@@ -93,6 +95,98 @@ split out), `mt5_gateway/execution.py`/`application/live_reader.py`
 (`RiskSessionState`/`RiskSessionStore` per-symbol scoping),
 `application/{orchestration,live_decision,execution,paper_lite}.py`,
 `agent_gateway/decision_path.py` (call-site updates).
+
+---
+
+## 0a. Owner corrective review #2, 2026-09-07/08 — cross-market capsule routing
+
+A second, independent owner review of the same branch found a real
+routing gap the first corrective pass did not touch:
+`ExecutionOrchestrator.run_once()` read every sealed capsule for the
+environment via `self._capsules.read_all(environment=...)` and never
+bound that read to `self._canonical_symbol` — `_process()` never checked
+`capsule.canonical_symbol`/`intent.symbol` against the worker's own
+market either. Fresh broker state, `InstrumentSpec`, the risk session and
+market ticks were all then read for `self._canonical_symbol` regardless
+of which market the capsule actually belonged to. For multi-market, an
+execution worker bound to one market must never be able to claim or
+process a capsule sealed for another. Fixed per the owner's own stated
+preference, all four points:
+
+1. **Filter before claim, at the database.**
+   `persistence/journal.py::CapsuleStore.read_all()` gained an optional
+   `canonical_symbol: str | None = None` parameter — a `WHERE
+   canonical_symbol = ...` clause, not an application-level filter after
+   the fact. `decision_capsules.canonical_symbol` was already a real,
+   indexed-adjacent column (populated since the capsule schema's own
+   original design); no migration needed. `run_once()` now calls
+   `self._capsules.read_all(environment=..., canonical_symbol=self
+   ._canonical_symbol)` — a capsule for another market is never fetched
+   from PostgreSQL at all, let alone iterated over or claimed.
+2. **Defensive invariant in `_process()`.** Immediately after the
+   existing `assert capsule.trade_intent is not None` block, two more
+   assertions: `capsule.canonical_symbol == self._canonical_symbol` and
+   `intent.symbol == self._canonical_symbol`. These should be
+   unreachable given fix 1 — they exist as a second, independent layer,
+   the same "prove it, don't just trust it" discipline the three existing
+   asserts in this method already use. A routing bug that ever bypasses
+   the `read_all` filter (a direct `_process()` call, a future refactor)
+   crashes loudly instead of silently claiming/executing the wrong
+   market's order — an invariant violation, not a business refusal, so no
+   new `ExecutionEventType`/`ReasonCode` was added for it.
+3. **`CapsuleSource` Protocol updated to match** (`application/execution
+   .py`) — the one other implementation, `scripts
+   /run_execution_preflight_evidence.py::_SingleCapsuleSource`, updated
+   for Protocol conformance (mypy caught this automatically).
+4. **Regression tests, both directions, at the persistence layer, not
+   just the return value:** `tests/integration/test_market_universe_wiring
+   .py`. `TestCapsuleStoreReadAllIsBoundedBySymbol` proves the raw filter.
+   `TestExecutionOrchestratorNeverClaimsAnotherMarketsCapsule` seals one
+   EUR/USD and one BTC/USD capsule into the same environment, runs a
+   EUR/USD-bound worker's `run_once()`, and proves the BTC/USD capsule
+   left **no** `execution_requests` claim and **no** `execution_events`
+   row — a fresh probe claim against its `order_request_id` wins outright
+   (nothing claimed it first), and `events_for()` returns empty — then
+   proves the mirror case (a BTC/USD-bound worker never touches the
+   EUR/USD capsule).
+
+**Two pre-existing, unrelated flakiness episodes were investigated and
+ruled out** during this pass, both named plainly rather than quietly
+re-run past:
+
+1. `tests/integration/test_execution_orchestrator.py` (completely
+   unmodified) intermittently fails 2-3 of its own tests with a
+   `DROP TABLE ... does not exist` / mid-query `UndefinedTable` error on
+   a fast repeated run — reproduced identically on the new test file and
+   on the unmodified pre-existing file, then confirmed to pass cleanly on
+   a subsequent run with zero code changes in between. Same
+   "real-Postgres-connection-pool/test-isolation" class of flakiness
+   named in slice 2's commit message.
+2. The first *full-suite* integration run after this fix landed came
+   back with 22 failed, 57 errors, spread across files with no
+   relationship to this change — nearly all pytest `ERROR`s (fixture
+   setup failures, pointing at the `engine` fixture itself). Checked
+   `docker ps`/`pg_isready` (healthy), `pg_stat_activity` (7 of 100
+   connections, not exhaustion), disk space (17G free) — nothing pointed
+   at a real cause. Two immediate re-runs came back clean (268 passed, 2
+   skipped, 0-1 errors) with zero code changes in between; treated as a
+   transient environmental event (most likely Docker Desktop/WSL2 under
+   load from several heavy back-to-back Postgres runs earlier in the same
+   session), not a regression.
+
+Neither caused by this fix. The full suite passes reliably: 268 passed, 2
+skipped, confirmed across repeated clean runs.
+
+`config/paper.yaml` untouched — BTC/USD stays `enabled: false`. No scope
+expansion: this fix only bounds an existing read, adds two assertions,
+and extends one Protocol; it does not touch risk/execution/calendar
+logic, `order_send` (still NO-GO), or anything outside
+`ExecutionOrchestrator`'s own capsule-claiming path. `LiveDecisionOrchestrator`
+and `ReplayOrchestrator` were checked and do not have the equivalent
+exposure: neither reads a collection of capsules by environment alone —
+each processes one `MarketSnapshot`/`GeneratedTick` stream already scoped
+to its own `canonical_symbol` from construction, so there is no analogous
+"read many, filter none" step for them to leak across.
 
 ---
 
@@ -399,7 +493,7 @@ needed on this branch until it converges with `agent/contracts`.
 uv run ruff check . && uv run ruff format --check .   # pass
 uv run mypy                                            # pass, 201 source files
 uv run pytest --ignore=tests/integration               # 1253 passed, 1 skipped (pre-existing, unrelated)
-uv run pytest tests/integration                        # see status.md for the run this ADR shipped with
+uv run pytest tests/integration                        # 268 passed, 2 skipped (pre-existing, unrelated) — see §0a for two flakiness episodes investigated and ruled out
 uv run alembic heads                                   # single head: 8801080869a6
 ```
 

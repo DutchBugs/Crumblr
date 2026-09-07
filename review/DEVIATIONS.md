@@ -11,6 +11,14 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-07/08 — D-060 corrected a second time: a real
+cross-market capsule-routing gap in `ExecutionOrchestrator.run_once()`
+(no `canonical_symbol` filter on its capsule read, no defensive check in
+`_process()`) — a worker bound to one market could in principle have
+claimed a capsule sealed for another. Fixed at the database read plus a
+defensive invariant; full detail in D-060's "Correction #2" bullet and
+`review/adr/ADR-022-market-universe.md` §0a.
+
 Last updated 2026-09-07 — D-060 corrected: the Market Universe
 config-layer functions (`risk_for()`/`execution_for()`/`calendar_for()`)
 were not actually wired into any real orchestrator when first recorded —
@@ -1551,6 +1559,24 @@ mean anything should start here.
   `SessionPhase.CLOSED` (fail-closed, unconditional) — the owner rejected
   the original "no policy = nothing to measure offsets against, so OPEN"
   reasoning outright.
+- **Correction #2, 2026-09-07/08 (owner review):** a second, independent
+  review found `ExecutionOrchestrator.run_once()` read every sealed
+  capsule for the environment (`self._capsules.read_all(environment=...)`)
+  without binding the read to `self._canonical_symbol`, and `_process()`
+  never checked `capsule.canonical_symbol`/`intent.symbol` against the
+  worker's own market — an execution worker bound to one market could in
+  principle have claimed and processed a capsule sealed for another. Real
+  gap, not theoretical: fresh broker state, `InstrumentSpec`, the risk
+  session and market ticks were all read for `self._canonical_symbol`
+  regardless of which market the claimed capsule actually named. Fixed:
+  `CapsuleStore.read_all()` gained a `canonical_symbol` filter applied at
+  the database (`decision_capsules.canonical_symbol` was already a real
+  column); `_process()` gained two defensive assertions behind that
+  filter; the `CapsuleSource` Protocol and its one other implementation
+  (`scripts/run_execution_preflight_evidence.py::_SingleCapsuleSource`)
+  updated to match. Full detail, including the pre-existing test-isolation
+  flakiness reproduced and ruled out while verifying this, in
+  `review/adr/ADR-022-market-universe.md` §0a.
 - **Watch for:** before enabling any second market, (1) real-terminal
   confirmation of its broker-symbol pin (`scripts/mt5_probe.py`), (2) an
   owner decision on that asset class's session/weekly-close policy if it

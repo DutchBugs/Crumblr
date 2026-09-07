@@ -11313,6 +11313,117 @@ on the dashboard branch — stop for owner review before merge.
 
 ---
 
+## Update 2026-09-08 (ninetieth entry) — Market Universe corrective pass #2: cross-market capsule routing
+
+```text
+Component: persistence/journal.py, application/execution.py, scripts/run_execution_preflight_evidence.py
+Milestone: second, independent owner corrective review on the eighty-ninth entry's Market Universe work
+Status before: ExecutionOrchestrator.run_once() read every sealed capsule for the environment without binding the read to self._canonical_symbol; _process() never checked capsule.canonical_symbol/intent.symbol against the worker's own market
+Status after:  the capsule read is bounded by canonical_symbol at the database; _process() carries a second, defensive invariant behind that filter
+```
+
+**The finding, precisely (owner, verbatim in `review/adr
+/ADR-022-market-universe.md` §0a):** an execution worker bound to one
+market could in principle claim and process a capsule sealed for
+another, since nothing checked `capsule.canonical_symbol`/`intent.symbol`
+against `self._canonical_symbol` anywhere in the claim path — while
+fresh broker state, `InstrumentSpec`, the risk session and market ticks
+downstream were all read for the *worker's own* symbol regardless. A real
+gap, found by the owner reviewing the multi-market design directly, not
+by any test this session had written.
+
+**Fixed, four parts, exactly as the owner specified:**
+1. `persistence/journal.py::CapsuleStore.read_all()` gained an optional
+   `canonical_symbol` filter — a `WHERE` clause, not a post-hoc
+   application filter. `decision_capsules.canonical_symbol` was already a
+   real column; no migration needed. `ExecutionOrchestrator.run_once()`
+   now passes `canonical_symbol=self._canonical_symbol` — a wrong-market
+   capsule is never fetched from PostgreSQL at all.
+2. `_process()` gained two defensive assertions (`capsule.canonical_symbol
+   == self._canonical_symbol`, `intent.symbol == self._canonical_symbol`)
+   immediately after its existing three — a second, independent layer
+   behind fix 1, matching this method's own existing "prove it" style.
+3. `CapsuleSource` Protocol updated to match; its one other
+   implementation (`scripts/run_execution_preflight_evidence.py
+   ::_SingleCapsuleSource`) updated for conformance (mypy caught this
+   automatically — a real, useful catch, not busywork).
+4. New tests in `tests/integration/test_market_universe_wiring.py`:
+   `TestCapsuleStoreReadAllIsBoundedBySymbol` (the raw filter),
+   `TestExecutionOrchestratorNeverClaimsAnotherMarketsCapsule` (both
+   directions — a EUR/USD worker never claims/processes a BTC/USD
+   capsule and vice versa, proven at the persistence layer: a fresh probe
+   claim against the untouched capsule's `order_request_id` wins outright,
+   and `ExecutionEventStore.events_for()` returns empty for it).
+
+**Checked and ruled out as not needing the same fix:**
+`LiveDecisionOrchestrator` and `ReplayOrchestrator` do not have the
+equivalent exposure — neither reads a bulk collection of capsules by
+environment; each processes one snapshot/tick stream already scoped to
+its own `canonical_symbol` from construction (`market_data.latest_tick
+(canonical_symbol=...)`, `instrument_specs.latest(canonical_symbol=...)`,
+etc.), so there is no analogous "read many, forget to filter" step. This
+gap was specific to `ExecutionOrchestrator`'s own bulk capsule read.
+
+**Evidence:**
+- `uv run ruff check . && uv run ruff format --check .` — clean (223 files)
+- `uv run mypy` — clean, 201 source files (the Protocol-mismatch catch in
+  `_SingleCapsuleSource` above was mypy working correctly, not a defect)
+- `uv run pytest --ignore=tests/integration` — **1253 passed, 1 skipped**
+  (unchanged from the eighty-ninth entry — this fix touches only
+  `ExecutionOrchestrator`'s integration-tested capsule path)
+- `uv run pytest tests/integration` — **268 passed, 2 skipped** (both
+  pre-existing filesystem-permission skips, unrelated), confirmed clean
+  across two consecutive full runs (255.60s / 343.57s — the second
+  carried the one known pre-existing "DROP TABLE" flake described below,
+  the third ran with zero errors at all)
+
+**Problems found (both investigated, neither a regression from this
+fix):**
+- While verifying the new tests, `tests/integration/test_execution_orchestrator.py`
+  — completely unmodified — intermittently failed 2-3 of its own tests on
+  a fast repeated run, with a `DROP TABLE ... does not exist` /
+  mid-query `UndefinedTable` error consistent with real-Postgres
+  connection-pool/test-isolation flakiness (the same class already
+  documented in the eighty-eighth entry's slice 2 for
+  `test_execution_reconciliation.py`). Reproduced identically against
+  the new test file, confirmed absent on a subsequent clean run with
+  zero code changes in between.
+- The first *full-suite* integration run after this fix landed came back
+  with **22 failed, 57 errors** — nearly a third of the suite, spread
+  across files with no relationship to this change (`test_migrations.py`,
+  `test_canary_permit_store.py`, `test_broker_state_store.py`, etc.).
+  Nearly all were pytest `ERROR`s (fixture/setup failures, not test-body
+  assertions), pointing at the `engine` fixture itself rather than
+  anything this fix touched. Investigated before assuming anything:
+  `docker ps`/`pg_isready` showed the container healthy, `pg_stat_activity`
+  showed only 7 of 100 connections in use (not exhaustion), disk had 17G
+  free. Two immediate, back-to-back re-runs came back clean — **268
+  passed, 2 skipped, 0-1 errors** (the 1 being the already-documented
+  DROP TABLE flake) — with zero code changes in between. Treated as a
+  transient environmental event (most likely Docker Desktop/WSL2 under
+  load from several heavy back-to-back Postgres-integration runs earlier
+  in this same session while investigating the first flake), not a
+  regression — but named here in full rather than quietly re-run past,
+  per CLAUDE.md's "report failures plainly" rule.
+
+**Risk impact:** real, positive. Before this fix, enabling a second
+market (still blocked today — `enabled: false`, `order_send` NO-GO)
+would have let one execution worker's pass claim and act on another
+market's capsule — the exact kind of cross-market contamination the
+whole Market Universe effort exists to prevent. No behaviour change for
+the single-market (EUR/USD-only) case the platform runs today: the
+filter and the two new asserts are no-ops when only one market's
+capsules ever exist.
+
+**Decision:** apply exactly as specified, no scope expansion. Do not
+merge without further owner review.
+
+**Next:** pushed to `origin/dev1/market-universe`. Not merged, not
+stacked on the dashboard branch — stop for owner review before merge, as
+always.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
