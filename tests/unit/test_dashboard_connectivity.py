@@ -57,6 +57,14 @@ class TestHeartbeatExpired:
         health = _health(heartbeat_max_age_seconds="soon")
         assert _heartbeat_expired(health, now=NOW) is True
 
+    def test_a_syntactically_valid_but_naive_timestamp_fails_closed_not_a_crash(self) -> None:
+        """`now` is always timezone-aware; a naive `heartbeat_at_utc` (no
+
+        offset) would raise `TypeError` on subtraction if not caught --
+        owner-flagged hardening, 2026-09-08."""
+        health = _health(heartbeat_at_utc="2026-09-07T12:00:00")
+        assert _heartbeat_expired(health, now=NOW) is True
+
 
 class TestConnectivity:
     def test_no_snapshot_at_all_is_unknown(self) -> None:

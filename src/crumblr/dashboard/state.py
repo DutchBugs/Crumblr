@@ -406,7 +406,10 @@ def _heartbeat_expired(reader_health: dict[str, Any], *, now: UtcDatetime) -> bo
     `heartbeat_at_utc`/`heartbeat_max_age_seconds` (an older-format
     snapshot, or a malformed one) counts as expired, the same "an
     incomplete read must not produce a confident answer" rule the rest of
-    this dashboard already applies.
+    this dashboard already applies. A syntactically valid but naive (no
+    timezone) `heartbeat_at_utc` also counts as expired rather than
+    crashing the whole read — `now` is always timezone-aware, and Python
+    refuses to subtract a naive datetime from an aware one.
     """
     raw_heartbeat = reader_health.get("heartbeat_at_utc")
     max_age_seconds = reader_health.get("heartbeat_max_age_seconds")
@@ -414,9 +417,10 @@ def _heartbeat_expired(reader_health: dict[str, Any], *, now: UtcDatetime) -> bo
         return True
     try:
         heartbeat_at = datetime.fromisoformat(raw_heartbeat)
+        age_seconds = (now - heartbeat_at).total_seconds()
     except (TypeError, ValueError):
         return True
-    return (now - heartbeat_at).total_seconds() > max_age_seconds
+    return age_seconds > max_age_seconds
 
 
 def build_state(
