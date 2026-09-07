@@ -2,7 +2,7 @@
 
 **Project:** Autonomous EUR/USD Trading Platform  
 **Status document version:** 1.13  
-**Last updated:** 2026-09-04  
+**Last updated:** 2026-09-08  
 **Current environment:** DESIGN  
 **Live trading permitted:** NO
 
@@ -14,7 +14,7 @@ session a meaningful slice merges to `main`, not later.
 
 | | |
 |---|---|
-| **`main` HEAD** | `398b2e9` — **Dashboard Live Ops work order merged, 2026-09-08** (owner GO "voor merge van dev2/dashboard-live-ops op SHA 3e19bfb" plus one owner-requested hardening commit landed the same session; fast-forwarded `dev2/dashboard-live-ops` → `main`, `9ebbe6f..398b2e9`, 13 commits, clean fast-forward, no squash — every slice kept as its own commit). The read-only operational dashboard (`src/crumblr/dashboard/**`) is now on `main` for the first time — previously a standalone track off an old fork point, never merged. Ten slices: dashboard heartbeat + broker account/positions/pending-orders panel; live broker refresh + unified Live Activity feed; `stateClass()`/account-vs-terminal-trade-allowed truthfulness fixes; the 8-stage decision pipeline restaging (`dashboard/pipeline.py`, work order §16); a rebase onto Market Universe/BTC-USD (`risk_panel.py`'s `RiskSessionStore.load_latest()` now-required `canonical_symbol` fix); the PAPER_LITE paper-portfolio reducer (`dashboard/paper_portfolio.py`, a real replay of `DurablePaperBroker.portfolio_view()`, gated on the owner-approved `expected_spec_version` pin); a CSS-only visual redesign (simulated/real accent, elevation, section rhythm); a real EUR/USD live-market smoke test against the live Pepperstone DEMO terminal (`terminal64.exe`, account `62137706`) with a real, observed `mt5_live_reader.py` crash fix (missing `var/` parent directory); and a reader-heartbeat/liveness corrective (`ReaderHealth.heartbeat_at_utc`/`heartbeat_max_age_seconds`, `dashboard.state._connectivity()`) closing a real truthfulness gap the smoke test found live — a frozen `HEALTHY` reader-health file no longer reads as still-connected once the writer process itself has gone silent, proven end-to-end against the real terminal (HEALTHY while running → DISCONNECTED/STALE ~20s after the reader exited, same dashboard process, no restart) — plus a small owner-flagged hardening fix (`_heartbeat_expired()` no longer crashes on a naive/timezone-less ISO timestamp). **Unchanged, explicitly confirmed:** the dashboard remains fully read-only (`TestReadOnlyBoundary`: no mutating route, no `MetaTrader5`/`mt5_gateway` import anywhere in the dashboard package, `POST /` refused); no MT5 credentials are read by dashboard code (only `scripts/mt5_live_reader.py`, its own separate process, ever does); `order_send`/`ExecutionConfig.feedback_2_0_approved` stay NO-GO, platform-wide, untouched by any of this. Post-merge regression gate re-run against `main` @ `398b2e9`: ruff/format/mypy clean (221 source files), full unit suite 1343 passed/1 skipped, full integration suite 332 passed/2 skipped (pre-existing, unrelated filesystem-permission skips) against real PostgreSQL, single Alembic head (`8801080869a6`) confirmed unchanged. Full detail: §13 ninety-fifth entry. **Next workstream: Agent MVP / Neutral Static Agent Integration** — separate owner work order to follow; Dev 1 supports shared Core/Risk/Policy/capsule contracts. Prior merge: BTC/USD Enablement Readiness (ADR-023), `336e830..9ebbe6f`, 2026-09-08 — full detail §13 ninety-third/ninety-fourth entries, `review/adr/ADR-023-btc-usd-session-policy.md`, `review/DEVIATIONS.md` D-061 |
+| **`main` HEAD** | `bb38029` — **Agent MVP / Neutral Static Agent Integration DONE, merged, 2026-09-08** (owner-confirmed final state; Crumblr `agent/neutral-static-mvp` fast-forwarded `c3f70c3 → b02ee03` → `main`, no squash; companion `crumblr-static-agent-host` repo fast-forwarded `f1e16b7 → dcc3770` → its own `main`, no squash — this row's own SHA is the status.md-only follow-up commit on top of `b02ee03` that records this). Full route proven end to end: Agent → Gateway → Risk → Platform Policy → External Supervisor → PAPER_LITE → `PAPER_FILLED` (`approved_volume=1.41`, Risk-computed, not Agent-supplied); genuine real EUR/USD NO_TRADE proof; deterministic Pivot-2.2 directional proof; dashboard 8-stage proof complete (real Supervisor verdict + real correlation-bound `PAPER_FILLED`); Dev-1 Core review **PASS**, no Core commit needed (zero diff in `migrations/`, `domain/`, `risk/`, `agent_gateway/`, `config/`). Static Agent StrategyArtifact 6.0 hash `81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5`; strategy compute lives in the external Agent, never in Crumblr Core. **Unchanged, explicitly confirmed:** `feedback_2_0_approved=false`, `submission_enabled=false`, `order_send` NO-GO platform-wide, PAPER_LITE stays fully simulated, no real MT5 mutation added, Static Agent `/health` reports `mt5_capability=false`/`execution_capability=false`. Post-merge regression gate re-run fresh against `main` @ `b02ee03`: ruff/format/mypy clean (239 files formatted, 221 mypy-clean), full suite **1693 passed/3 skipped, 0 failed** (589.6s) against real PostgreSQL, single Alembic head (`8801080869a6`) confirmed; Static Agent gate 71/71 (Dev-2-reported). Full detail: §13 ninety-sixth entry. Prior merge: Dashboard Live Ops, `9ebbe6f..398b2e9`, 2026-09-08 — full detail §13 ninety-fifth entry |
 | **Last hosted CI result** | **Owner-reported 2026-09-03 (`OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` §1.2): run #106, 1341 collected, 1339 passed, 2 failed.** PostgreSQL 17 client/server alignment (F-068), lint, format and mypy all passed — F-063/F-065/F-067/F-068 effectively confirmed green. The 2 failures are the known, already-fixed-on-`agent/contracts` (`d62722d`) `test_agent_decision_path.py` PL-006 timing assertions — not a new Core defect. Still no `gh`/Actions access in this environment; this result is owner-reported, not independently re-pulled |
 | **Dev 1** | DONE: owner risk policy v1 (D1.2/D1.3/D1.4, `ADR-011`, O-008), CI PostgreSQL client version pin (F-068), owner session policy v1 (D1.5, `ADR-012`, O-009), PL-006 restart-recovery hardening (`ADR-013`), item 9 broker-side SL verification (`ADR-014`). Owner/reviewer coordination order `review/OWNER_WORK_ORDERS_DEMO_CANARY_2026-09-03.md` (staged route to a constrained DEMO canary, Phases 0-F): **Phase 0 done** — Dev 2's `agent/contracts` convergence merged (PR #2), reviewed, independently re-verified green. **Phase B, all 6 slices now shipped:** B4 (`ADR-015`, ambiguous-recovery fails closed/HALTs on >1 matching positions) · B1+B2 (`ADR-016`, `mt5_gateway/demo_execution.py::DemoOrderSendMt5Gateway`, a real tested `order_send` adapter, deliberately unwired) · B7 (`ADR-017`, `SubmissionGate` 10th condition — owner-approval-gated exact account-reference pin; found/routed around a real D-046 landmine) · B8 (`ADR-018`, durable atomic one-shot canary permit, race-safe under real concurrency, append-only-table-constrained design) · B3 (`ADR-019`, definite `order_send` outcomes normalized to durable events — new `ExecutionEventType.REJECTED`, `FILLED` covers full+partial by payload) · **B5, done 2026-09-04** (`ADR-020`, real per-ticket close: `DemoOrderSendMt5Gateway.close_position()`/`.close_all_positions()`, `ExecutionOrchestrator._attempt_and_resolve_flatten()`, `FlattenCloseSink` Protocol, new `ReasonCode.FLATTEN_CLOSE_FAILED` tolerated by the flatten gate so retry survives its own halt; `_commit_flatten` deliberately unchanged — the real close only ever runs one pass later, via the same recovery branch ADR-009 already built — every existing flatten integration test passes unchanged as a result). All six deliberately **not wired into `ExecutionOrchestrator`'s entry path** (B5's close is real but its own adapter is unconstructed everywhere) — same reasoning each time: Phase C/AG-012's shared Risk authority doesn't exist yet for entries; a flatten close needed no such authority, so B5 built and left it genuinely ready rather than also unwired-by-necessity. Full suite 1431 passed/3 skips/0 failed, 330.20s, real PostgreSQL against the isolated `crumblr_test_dev1` database (§13 seventy-ninth entry has the full breakdown). B6 (removing the flat-book reconciliation assumption) stays explicitly deferred by the work order until continuous-DEMO promotion — not part of the first canary. **Phase B is complete.** **Phase C (AG-012, single Risk authority) — Dev-1 side done same day, 2026-09-04** (`ADR-021`, cross-session-coordinated with Dev 2 before implementation, two rounds — a required-vs-lock-owns-the-transaction design correction found and fixed *before* code, both rounds acked): `risk/session.py::RiskLedgerLock` (new Protocol) + `InMemoryRiskLedgerLock`; `persistence/risk_session.py::PostgresRiskLedgerLock` (real `pg_advisory_xact_lock`, reuses `lock_assignment()`'s exact primitive, symbol-keyed); `RiskSessionStore.load_latest()`/`.save()` gain an optional `connection` param (source-compatible). `LiveDecisionOrchestrator.decide_once()` redesigned — no longer caches the ledger across calls, recovers/updates/persists fresh every cycle under the lock; closed a second, separately-found staleness gap in the same change (persistence previously only ran on a risk-`PASS` cycle, so a run of `NO_TRADE` decisions never updated the durable checkpoint). `ExecutionOrchestrator`'s FINAL Risk read joins the same lock for completeness (was already race-free, lock-for-read-consistency only). Both orchestrators' constructors gain a new *required* `risk_ledger_lock` param — every real construction site updated (`bootstrap.py::DurableRuntime`, both scripts, all test builders), plus one Dev-2-owned test file's one-line Protocol-conformance ripple found and fixed (`test_agent_decision_path.py::ExplodingSessionStore`, flagged in `review/INTEGRATION_NOTICES.md`). New tests: 2 unit (`TestADR021RiskLedgerPersistsEveryCycle`) + 2 integration against real PostgreSQL proving genuine mutual exclusion under real concurrent threads (`test_risk_ledger_lock.py`). Full suite green (exact count in §13 eightieth entry). **AG-012 closed on both sides, 2026-09-04**: Dev 2's `decision_path.py` side landed same day (4 new tests, `TestAG012RiskLedgerLockAcquired`; full suite 1217 passed unit + 255 passed integration against real PostgreSQL, 0 failed on their side), pushed to `origin/agent/contracts` (`6ac8cf2`) — merged to `main` same day via PR #3 (`c7ba505`, see below). One follow-on item opened while wiring this: **AG-023** — `application/paper_lite.py`'s own `risk_session_states` recover/persist pair (Dev-3-owned) was unlocked; **closed 2026-09-04** by Dev 2 (owner-authorized to cross the file-ownership line, no Dev-3 session available) — both methods now acquire `risk_ledger_lock`, deadlock-safety verified, one tradeoff left explicitly named (separately-locked methods, not one atomic section — ADR-021 §7). Dev 2's self-review while closing AG-023 surfaced **AG-024** — lock/recovery/persist failure had no exception handling anywhere and would have crashed the process on a transient database blip, deferred to Dev 1 as a design call — **fixed same day**: new `ReasonCode.RISK_LEDGER_LOCK_UNAVAILABLE`, the whole `with risk_ledger_lock.held(...)` block wrapped in try/except at both `live_decision.py::decide_once()` and `execution.py::ExecutionOrchestrator._process()`, converting a lock/store failure into the same fail-closed HALT/skip pattern every other `..._STATE_UNKNOWN` reason already uses (ADR-021 §8; 3 new tests; full suite 1438 passed/3 skips/0 failed). **Phase C is Dev-1-complete and AG-012/AG-023/AG-024 are now resolved on both tracks** — Dev 2 mirrored AG-024 same day (`agent/contracts` `c35f4d5`, 3 new tests, full suite 1224 unit + 256 integration, 0 failed). **`agent/contracts` merged to `main` via PR #3, 2026-09-04** (owner-merged, `c7ba505`) — Core, the external-agent Gateway, and PAPER_LITE are now all on one branch for the first time. Re-ran the full quality gate and suite against this session's own worktree post-merge: ruff/format/mypy clean (197 source files), **1480 passed, 3 skips, 0 failed**, single Alembic head confirmed. No fresh *hosted* CI run confirmed for this exact merge commit (no `gh` auth in this environment — the local re-run above is this session's own substitute evidence, not a replacement for a real hosted run). Only remaining gate before the real submission chain (entries) can be wired together at all is real `order_send` wiring, which stays owner-gated regardless (`feedback.2.0`). NEXT: nothing queued — idle pending a hosted CI confirmation of the merge, or a new work order. BLOCKED: none currently |
 | **Dev 2** | DONE: Agent contracts + Gateway ingestion/audit merged, AG-007–014 tracked/fixed, `TradeProposal → TradeIntent` mapping merged, shared no-MT5 Risk → Policy → capsule path merged, D2.2 wired to Dev 1's `assess_open_risk`. **AG-012 (Phase C) closed on the Dev-2 side, 2026-09-04** — `evaluate_agent_trade_intent()` acquires `RiskLedgerLock` around its existing `load_latest()` read (ADR-021 §4's exact scope), 4 new tests, full suite 1217 unit + 255 integration against real PostgreSQL. Independently found and flagged **AG-023** (`application/paper_lite.py`'s own unlocked `risk_session_states` access, Dev-3-owned, not fixed by either track) while checking every real caller before wiring this — **AG-023 closed 2026-09-04**, owner-authorized to cross the file-ownership line (no Dev-3 session available): both `paper_lite.py` recover/persist methods now acquire `risk_ledger_lock`, deadlock-safety verified, one tradeoff left explicitly named (ADR-021 §7). Own self-review while closing AG-023 surfaced **AG-024** (lock/recovery/persist failure had no exception handling anywhere, would crash the process on a transient DB blip), deferred the design to Dev 1 — **AG-024 mirrored on the Dev-2 side same day**: `decision_path.py` synthesizes the same halted `SessionRecovery` shape `risk.session._halt()` already returns, so `recovery.must_halt` handling runs unchanged; `paper_lite.py` factored `_trip_risk_session_at(...)` so both recover/persist trip through one mechanism, and added a logger (`paper_lite.py` had none before — caught in Dev 2's own self-review against ADR-021 §8's explicit logging requirement before it shipped, not assumed optional). 3 new tests, full suite 1224 unit + 256 integration against real PostgreSQL, 0 failed, ruff/mypy clean. Pushed to `origin/agent/contracts` (`c35f4d5`). **F-066 (Core must be strategy-neutral, review 1.28) down to conditions 2 and 7 only, both fork-dependent — condition 8 (a second, fully independent toy agent with its own identity/assignment/artifact/vocabulary reaching identical PASS/APPROVE through the real, unmodified `AgentGateway` boundary) closed 2026-09-04**, `AGENT_FEEDBACK.md`'s own F-066 row corrected in place (was stale — claimed `AgentMarketContextV1`/opaque reason-code handling still open after both had shipped weeks earlier). **`agent/contracts` merged to `main` via PR #3, 2026-09-04** (owner-merged, `c7ba505`) — everything on this row is now on `main`, not a separate branch. **AG-012/AG-023/AG-024 lock work is now closed across both tracks.** NEXT: F-066 conditions 2/7 need the external Agent Developer's own fork/runtime work, which Dev 2 cannot substitute for — otherwise idle pending a new work order. BLOCKED: none currently on anything Dev-2-actionable |
@@ -12153,6 +12153,105 @@ own commit and evidence trail stays intact and individually reviewable.
 **Next:** a separate owner work order for **Agent MVP / Neutral Static
 Agent Integration** — Dev 1 supports the shared Core/Risk/Policy/capsule
 contracts. No further dashboard work queued.
+
+---
+
+## Update 2026-09-08 (ninety-sixth entry) — Agent MVP / Neutral Static Agent Integration: DONE, merged to both `main`s
+
+```text
+Component: application/paper_lite.py, dashboard/{agent_state,pipeline}.py, persistence/paper_lite.py, scripts/paper_lite.py (Crumblr, Dev 2); crumblr-static-agent-host (external Static Agent runtime, Agent Developer); status.md/this entry (Dev 1, documentation only)
+Milestone: Agent MVP / Neutral Static Agent Integration — owner work order, final merge
+Status before: Core seam (TradeIntent -> RiskLedgerLock -> Risk -> deterministic Policy -> capsule) existed and was Dev-1-reviewed sufficient (NO CORE CHANGE REQUIRED, §13 this section's own prior standby note); external-Supervisor wiring, the directional full-chain fill and the dashboard 8-stage proof were still in progress on Dev 2's branch, unmerged
+Status after: both merges complete; the full Agent -> Gateway -> Risk -> Platform Policy -> External Supervisor -> PAPER_LITE -> PAPER_FILLED route is proven end to end against real and deterministic-fixture data; dashboard shows all 8 pipeline stages including a real Supervisor verdict and PAPER_FILLED; Core semantics unchanged throughout
+```
+
+**Agent MVP / Neutral Static Agent Integration is DONE and merged.** Full
+technical detail lives in `review/AGENT_STATUS.md` §0ac (Dev 2's own real
+record) — this entry is the compact, canonical cross-reference, not a
+competing narrative.
+
+- **Crumblr final merge:** `c3f70c3 → b02ee03`, fast-forward, no squash
+  (`git merge-base --is-ancestor` confirmed before push; every slice kept
+  as its own commit — `338e536` kickoff checkpoint, `b02ee03` Slice A+B+D).
+- **Static Agent final merge:** `f1e16b7 → dcc3770`, fast-forward, no
+  squash, on the companion `crumblr-static-agent-host` repository (a
+  separate codebase, not part of this repo).
+- **Static Agent StrategyArtifact 6.0 hash:**
+  `81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5` —
+  reconfirmed unchanged after a packaging-only fix (`tzdata` added as an
+  explicit dependency for `zoneinfo`'s NY_AM kill-zone lookup; touches no
+  strategy source).
+- **Strategy compute lives in the external Agent, not in Crumblr Core** —
+  the real Pivot-2.2 engine runs inside the Static Agent's own process
+  (`neutral_trader.py` → `pivot2_engine.py`); Crumblr never computes or
+  emulates it, matching F-066's strategy-neutrality requirement.
+- **Genuine real EUR/USD NO_TRADE proof** — re-seeded real (not
+  fabricated) EUR/USD spec/bars/tick from `crumblr_soak`, ran without
+  `--fixed-now` (real wall clock, real data): a genuine
+  `DecisionCapsuleSealed` with `trade_intent: null` at the real tick's own
+  timestamp.
+- **Deterministic Pivot-2.2 directional proof** — the exact deterministic
+  sweep/FVG/MSS/pivot-2.2 bar fixture driven through the real HTTP Static
+  Agent server end to end.
+- **Full route proven:** Agent → Gateway → Risk → Platform Policy →
+  External Supervisor → PAPER_LITE → `PAPER_FILLED`:
+  ```text
+  RiskDecisionMade:       PASS  approved_volume=1.41  risk_amount=199.60  stop_distance_points=165
+  SupervisorDecisionMade: APPROVE (Platform Policy gate)
+  PAPER_LITE_EXTERNAL_SUPERVISOR_REVIEWED: verdict=APPROVE
+  PAPER_ORDER_ACCEPTED:   BUY 1.41 @ 1.10015  SL 1.098500  TP 1.1034500
+  outcome: PAPER_FILLED   open_positions: 1   simulated_fill: true
+  ```
+- **Risk-owned sizing proven** — `approved_volume=1.41` above was computed
+  by Core Risk from account equity/stop distance, not supplied by the
+  Agent; `TradeIntent` itself carries no volume field (structurally
+  confirmed during Dev-1's Core review, see below).
+- **Dashboard 8-stage proof complete** — all 8 pipeline stages
+  substantively filled (`market: OBSERVED`, `context: ISSUED`,
+  `agent: TRADE_PROPOSAL`, `gateway: ACCEPTED`, `risk: PASS`,
+  `policy: APPROVE`, `supervisor: APPROVE` — the real `ReferenceSupervisor`
+  verdict, not a placeholder — `paper: PAPER_FILLED`, a real
+  correlation-bound fill), verified via `scripts/run_dashboard.py`'s
+  `/api/state` JSON and rendered HTML (`GET /` → 200).
+- **Dev-1 Core review: PASS.** Reviewed `main@c3f70c3..b02ee03` directly
+  in code against six invariants (TradeIntent/Risk/Policy/DecisionCapsule
+  semantics unchanged; external Supervisor stays a separate
+  APPROVE/VETO/UNKNOWN veto layer with no sizing/side/SL/TP/Risk/Policy
+  override/HALT-reset capability; PAPER_LITE stays fully simulated; no
+  real execution adapter/`order_send` reachable; `ExternalSupervisorReviewRecord`
+  persistence stays in PAPER_LITE's own audit journal, never Core's event
+  registry; `RiskLedgerLock`/open-risk stays the existing ADR-021
+  authority) — confirmed structurally (zero diff in `migrations/`,
+  `domain/`, `risk/`, `agent_gateway/`, `config/`) and by test: unit 182
+  passed / integration 53 passed against real PostgreSQL, targeted at
+  every surface the slice touches. No Core commit was needed.
+- **Crumblr post-merge gate** (re-run fresh against `main@b02ee03` this
+  entry, not just quoted from Dev 2): `ruff check`/`ruff format --check`
+  clean (239 files), `mypy` clean (221 source files), Alembic single head
+  `8801080869a6` confirmed, **full suite 1693 passed / 3 skipped, 0
+  failed** (589.6s) — the 3 skips are pre-existing/unrelated (two
+  filesystem-permission skips, one platform MT5-import skip). Matches Dev
+  2's own reported count exactly.
+- **Static Agent gate:** **71/71 passed**, per `review/AGENT_STATUS.md`
+  §0ac — Dev-2-reported, not independently re-run this pass (this
+  session's sandbox could not properly resolve `crumblr-static-agent-host`'s
+  own environment via `uv sync` — an environment-scoping limitation here,
+  not a repository defect; the local checkout was independently confirmed
+  to sit on `main @ dcc3770`, matching the stated SHA exactly).
+- **Static Agent `/health`:** `mt5_capability: false`,
+  `execution_capability: false` — per `review/AGENT_STATUS.md` §0ac.
+- **`feedback_2_0_approved=false`, `submission_enabled=false`** — both
+  confirmed as their unmodified defaults (`config.py`), not overridden
+  anywhere under `config/`.
+- **`order_send` stays NO-GO** — structurally: `DurablePaperBroker` has no
+  MT5-adapter constructor path at all (no generic `BrokerPort` argument a
+  real adapter could be injected through).
+- **PAPER_LITE stays fully simulated** — `application/paper_lite.py`
+  touches only `mt5_gateway.simulated`/`SimulatedBroker`, never real MT5.
+- **No real MT5 mutation added** anywhere in this milestone.
+
+**Next:** idle pending a new owner work order. No Core blocker currently
+identified.
 
 ---
 
