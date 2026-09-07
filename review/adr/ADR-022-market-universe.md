@@ -1,9 +1,75 @@
 # ADR-022 — Market Universe: multi-market Core, Risk & Policy
 
-**Status:** ACCEPTED 2026-09-06 — Dev 1's own branch, `dev1/market-universe`,
-off `origin/main` @ `1971d7a`. Not merged; stop for owner review per the
-owner's own work-order cadence (see §7).
-**Date:** 2026-09-04 (work order) — 2026-09-06 (this record)
+**Status:** ACCEPTED 2026-09-06, CORRECTED 2026-09-07 — Dev 1's own branch,
+`dev1/market-universe`, off `origin/main` @ `1971d7a`. Not merged; stop for
+owner review per the owner's own work-order cadence (see §7).
+**Date:** 2026-09-04 (work order) — 2026-09-06 (this record) —
+2026-09-07 (owner corrective review, see §0)
+
+## 0. Owner corrective review, 2026-09-07 — what changed and why
+
+The 2026-09-06 version of this branch added `risk_for()`/`execution_for()`/
+`calendar_for()` as real, tested functions (§3.2, §3.4) but did **not**
+finish wiring them into the real orchestrators — every live/agent/execution
+call site still read `config.risk`/`config.execution` (the platform-wide
+default) directly, and every `trading_window`/`policies` call left
+`calendar` at its default `FxWeekdayCalendar`. A second enabled market
+would have silently traded against EUR/USD's thresholds and calendar
+despite the config layer supporting per-market values — the config-layer
+work was real, but it was not reachable from anything that runs. The owner
+caught this directly and required a corrective pass, verbatim (Dutch):
+
+> Wire PlatformConfig.risk_for(symbol) en execution_for(symbol) werkelijk
+> door de relevante live/agent/execution paths... Wire calendar_for(market
+> .asset_class) daadwerkelijk door de session/trading-window checks...
+> Voor een asset class zonder owner-approved session policy: fail closed,
+> niet SessionPhase.OPEN.
+
+Two corrections landed in this pass:
+
+1. **Real wiring**, not just the API surface. Every `RiskContext`
+   construction site (`ReplayOrchestrator`, `LiveDecisionOrchestrator`,
+   `ExecutionOrchestrator`, `agent_gateway/decision_path.py`, and
+   `application/paper_lite.py`, Dev-2/3-owned — mechanical fix applied
+   here, same as the AG-024 precedent) now resolves `config.risk_for
+   (canonical_symbol)`/`config.execution_for(canonical_symbol)`/
+   `calendar_for(market.asset_class)` once, at construction, and reads
+   from that resolved value everywhere — never `config.risk`/
+   `config.execution` directly, and never the default calendar for a
+   market whose config says otherwise. Full inventory in §3 below.
+2. **Fail closed, not open, on an unapproved session policy.**
+   `risk/trading_window.py::phase_at` previously resolved a calendar with
+   no weekly-close concept (`AlwaysOpenCalendar`, for a 24/7 asset class
+   with no owner-approved session policy) to `SessionPhase.OPEN` — treating
+   "no policy" the same as "policy disabled," on the reasoning that there
+   was nothing to measure `IntradayPolicy`'s offsets against. **The owner
+   rejected this**: absence of an approved policy must refuse entries, not
+   permit them by default. `phase_at` now resolves this case to
+   `SessionPhase.CLOSED` **unconditionally** — checked before
+   `policy.enabled`, so a globally-enabled `IntradayPolicy` cannot
+   accidentally permit entries on a calendar with no approved policy
+   either. See §3.4 (updated) and `review/DEVIATIONS.md` D-060 (updated).
+
+New regression tests proving both corrections, added this pass:
+`tests/unit/test_market_universe_wiring.py` (`ReplayOrchestrator`,
+`LiveDecisionOrchestrator`, `agent_gateway/decision_path.py` — a second
+market's own risk/execution overrides and calendar demonstrably reach
+each real orchestrator, proved behaviourally where the class has no
+inspectable attribute to reach into),
+`tests/integration/test_market_universe_wiring.py`
+(`ExecutionOrchestrator`, real PostgreSQL), and
+`tests/unit/test_risk_engine.py::TestMarketUniverseCalendarFailsClosed`
+(the core enforcement point: `policies.evaluate()` always refuses with
+`SESSION_BLACKOUT` on a calendar with no approved policy, regardless of
+whether the platform's `IntradayPolicy` is itself enabled). `PaperLiteOrchestrator`
+got the identical wiring fix (§3.5's per-call-site list) but not a
+dedicated construction-level unit test — its constructor needs a full
+`PaperLiteSettings`/`TradingAssignment`/`AgentGateway`/`DurablePaperBroker`
+graph, materially heavier than the other four call sites; the fix there
+is verified by mypy (identical `risk_for`/`execution_for`/`calendar_for`
+call shape, type-checked against the same signatures the tested call
+sites use) and the full test suite staying green, not by a dedicated
+proof. Named here rather than silently left uncovered.
 **Drivers:** Owner work order 2026-09-04 (verbatim, Dutch): "Dev 1 — Core /
 Market Universe / Risk & Policy... Maak Crumblr multi-market aan de
 Core-kant: expliciete approved Market Universe; per-market
@@ -107,6 +173,55 @@ confirmation via `scripts/mt5_probe.py --canonical-symbol "BTC/USD"
 --sanitized-json ...` is still outstanding before this market could ever
 be enabled.
 
+### 3.2a Real wiring: every orchestrator resolves its own market's config (2026-09-07 correction)
+
+`risk_for()`/`execution_for()`/`calendar_for()` existing was not the same
+claim as them being *called* by anything that runs — the owner's 2026-09-07
+review caught exactly this gap. Each of the following now resolves
+`self._risk_config`/`self._execution_config`/`self._calendar` once, at
+construction, from the orchestrator's own `canonical_symbol`, and reads
+from those resolved values everywhere in the class — never
+`config.risk`/`config.execution` directly, and never a bare default
+`calendar` on any `trading_window`/`policies` call:
+
+- `application/orchestration.py::ReplayOrchestrator` — `RiskContext`
+  construction, `AgentContext`'s risk hints, `ApprovedOrder.max_slippage_points`,
+  `recover_session()`'s loss/drawdown thresholds, the loss-gate check, and
+  `overnight_breach()`'s `calendar` argument.
+- `application/live_decision.py::LiveDecisionOrchestrator` — identical
+  shape (`RiskContext`, `AgentContext`, `recover_session()`, the loss
+  gate, `overnight_breach()`).
+- `application/execution.py::ExecutionOrchestrator` — `_risk_context()`,
+  `ApprovedOrder.max_slippage_points`, `recover_session()`'s thresholds,
+  `evaluate_execution_eligibility()`'s `calendar` argument, the automatic-
+  flatten machinery (`phase_at`/`requires_flat`/`has_crossed_weekly_close`/
+  `build_flatten_plan()`, all now calendar-aware — including the flatten
+  deadline itself, `self._calendar.weekly_close(now)`, guarded for `None`
+  rather than falling back to the bare FX `weekly_close()` function), and
+  every governance-field read (`approved_config_version`,
+  `flatten_submission_enabled`, `feedback_2_0_approved`,
+  `submission_enabled`, `approved_canary_account_ref`,
+  `max_market_data_age_ms`) — routed through the resolved config objects
+  for internal consistency, even though the four approval fields are
+  deliberately excluded from `RiskOverrides`/`ExecutionOverrides` (§3.2)
+  and so always equal the platform-wide value regardless of market.
+- `agent_gateway/decision_path.py::_risk_context` (Dev-2-owned,
+  mechanical fix) — gained a required `canonical_symbol` parameter,
+  called with `snapshot.symbol` at its one call site.
+- `application/paper_lite.py::PaperLiteOrchestrator` (Dev-2/3-owned,
+  mechanical fix, same pattern as the slice-4 `canonical_symbol` fix) —
+  `PolicyHints.min_stop_distance_points_hint`, `ApprovedOrder
+  .max_slippage_points`, `recover_session()`'s thresholds, and
+  `phase_at()`'s `calendar` argument.
+
+`risk/policies.py::RiskContext` gained a `calendar: TradingCalendar`
+field (default `FxWeekdayCalendar()`, matching every real call site's own
+default-preserving shape) — `evaluate()` passes `context.calendar` to
+`permits_new_entry()` and the (now calendar-aware) `overnight_breach()`.
+`risk/execution_eligibility.py::evaluate_execution_eligibility()` and
+`application/flatten_plan.py::build_flatten_plan()` each gained the same
+default-preserving `calendar` parameter.
+
 ### 3.3 Crumblr-owned, fail-closed broker-symbol resolution (`mt5_gateway/readonly.py`)
 
 Before this branch, **every** market's broker-symbol mapping — including
@@ -159,17 +274,24 @@ evidence if ever wrong), `CRYPTO` → `AlwaysOpenCalendar`.
 (`_DEFAULT_CALENDAR = FxWeekdayCalendar()`) — default-preserving, so every
 existing caller (`application/execution.py`, `application/flatten_plan
 .py`, `application/paper_lite.py`, `risk/execution_eligibility.py`,
-`risk/policies.py`) needs no change and no behaviour change. When
-`calendar.weekly_close()` returns `None`, `phase_at` resolves to `OPEN`
-whenever the market is open, without ever evaluating `IntradayPolicy`'s
-offsets — the same "a stated choice, not a default" discipline
-`IntradayPolicy.disabled()` already uses, for the same reason: there is
-nothing owner-approved to measure those offsets against yet.
-`time_until_weekly_close` now returns `timedelta | None` for the same
-reason. This is the one genuine owner-policy gap this branch leaves open
-on purpose, named here rather than papered over — every non-FX market's
-config implicitly behaves as `IntradayPolicy.disabled()` until an owner
-makes a real decision and a new `TradingCalendar` encodes it.
+`risk/policies.py`) needs no change and no behaviour change.
+
+**Fail-closed, corrected 2026-09-07 (see §0).** When
+`calendar.weekly_close()` returns `None`, `phase_at` now resolves to
+`SessionPhase.CLOSED` **unconditionally** — checked before
+`policy.enabled`, so a globally-enabled `IntradayPolicy` cannot
+accidentally permit entries on a calendar with no approved policy either.
+An earlier version of this branch resolved this case to `OPEN` (treating
+"no calendar policy" the same as "policy disabled" — nothing to measure
+offsets against). The owner rejected that reasoning outright: absence of
+an approved session policy must refuse entries, not permit them by
+default. `time_until_weekly_close` still returns `timedelta | None` (there
+genuinely is no boundary to report a remaining time against), but
+`permits_new_entry`/`requires_flat` now resolve through the corrected
+`phase_at`, so no asset class trades until an owner makes a real
+session-policy decision for it and a new `TradingCalendar` encodes it —
+every non-FX market's config is fail-closed by construction, not merely
+"behaves as disabled."
 
 ### 3.5 Per-market risk ledger (`persistence/schema.py`, migration `8801080869a6`, `risk/session.py`, `persistence/risk_session.py`)
 
@@ -235,16 +357,22 @@ still correctly wired.
 
 1. **The crypto (and any other 24/7 asset class) session policy.** §3.4:
    no owner-approved weekly-close/flatten concept exists for
-   `AlwaysOpenCalendar`. Every such market trades under an implicit
-   `IntradayPolicy.disabled()` until a real owner decision exists.
-2. **Registration-time Market Universe validation.**
-   `TradingAssignmentStore.register()` (Dev-2-owned,
-   `agent_gateway/gateway.py`/`stores.py`) never checks a proposed
-   `canonical_symbol` against `PlatformConfig.enabled_symbols()`/
-   `market_for()` at registration time — the only existing enforcement is
-   late, at intent-time (§3.6). Not fixed here (out of this branch's file
-   scope); a coordination message describing the gap and recommending
-   Dev 2 add the check in their own file was sent 2026-09-06 (see §5).
+   `AlwaysOpenCalendar`. Corrected 2026-09-07 (§0): every such market now
+   fails closed (`SessionPhase.CLOSED` unconditionally, not an implicit
+   `IntradayPolicy.disabled()`-style permissive default) until a real
+   owner decision exists and a new `TradingCalendar` encodes it.
+2. ~~**Registration-time Market Universe validation.**~~ **Closed
+   2026-09-06/07 by Dev 2 — AG-026.** `AgentGateway.issue_assignment()`
+   now requires `platform_config: PlatformConfig` and refuses (new
+   `MarketNotApprovedError`) any `canonical_symbol` that `PlatformConfig
+   .market_for()` doesn't resolve, or resolves to `enabled=False`, before
+   the assignment is ever durably registered — an earlier, additional
+   gate layered on top of `SYMBOL_NOT_ALLOWED`'s existing intent-time
+   check (§3.6), not a replacement for it. Pushed to `agent/contracts`
+   (`7b15c48`). `dev1/market-universe` will need to pass `platform_config=`
+   at its own `AgentGateway(...)` construction sites once it rebases on
+   or merges with a `main` that includes AG-026 — this branch currently
+   constructs none itself, confirmed by grep.
 3. **The BTC/USD fixture's real-terminal confirmation.** §3.2 — outstanding
    before that market can ever be `enabled: true`.
 4. **Concurrent multi-market orchestration in one process.** §2 — a
@@ -258,21 +386,29 @@ gap (item 2 above), the exact minimal mechanical fix already applied to
 `RiskSessionStore.load_latest(canonical_symbol=...)` signature, and a
 request to confirm `snapshot.symbol` is the correct value threaded there
 (mirrors the AG-012/AG-024 precedent: describe, do not unilaterally decide
-on Dev-2-owned semantics).
+on Dev-2-owned semantics). Dev 2 replied 2026-09-06/07: confirmed both
+mechanical fixes (`decision_path.py`'s `snapshot.symbol`,
+`paper_lite.py`'s `self._assignment.canonical_symbol`) are semantically
+correct against their own intent, and closed the registration-time gap
+themselves as AG-026 (item 2 above) — acknowledged, no further action
+needed on this branch until it converges with `agent/contracts`.
 
 ## 6. Verification
 
 ```
 uv run ruff check . && uv run ruff format --check .   # pass
-uv run mypy                                            # pass, 199 source files
-uv run pytest --ignore=tests/integration               # 1242 passed, 1 skipped (pre-existing, unrelated)
+uv run mypy                                            # pass, 201 source files
+uv run pytest --ignore=tests/integration               # 1253 passed, 1 skipped (pre-existing, unrelated)
 uv run pytest tests/integration                        # see status.md for the run this ADR shipped with
 uv run alembic heads                                   # single head: 8801080869a6
 ```
 
-Zero behaviour change for EUR/USD anywhere: `FxWeekdayCalendar` and
-`resolve_symbol()`'s pinned path both carry explicit regression tests
-proving this.
+Zero behaviour change for EUR/USD anywhere: `FxWeekdayCalendar`,
+`resolve_symbol()`'s pinned path, and every corrected orchestrator's
+own resolved config/calendar for EUR/USD specifically all carry explicit
+regression tests proving this (`test_market_universe_wiring.py`'s own
+"EUR/USD is unaffected" tests, alongside the pre-existing suite staying
+green unchanged).
 
 ## 7. Deliverable / stop point
 

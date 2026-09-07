@@ -11,6 +11,15 @@ Each entry is stable and citable (`D-001`). Status is one of:
 - **provisional** — correct enough for now, must change before a named gate
 - **pending** — specified but not yet built
 
+Last updated 2026-09-07 — D-060 corrected: the Market Universe
+config-layer functions (`risk_for()`/`execution_for()`/`calendar_for()`)
+were not actually wired into any real orchestrator when first recorded —
+fixed same day, along with a fail-closed correction to `phase_at`'s
+handling of a calendar with no approved session policy (was `OPEN`, now
+`CLOSED`, per explicit owner rejection of the original reasoning). Full
+detail in D-060's own "Correction, 2026-09-07" bullet and
+`review/adr/ADR-022-market-universe.md` §0.
+
 Last updated 2026-09-06 — D-060 added: Market Universe
 (`review/adr/ADR-022-market-universe.md`) built ahead of build.md §30
 recommendation #12's own "EUR/USD boring first" ordering, per explicit
@@ -1524,19 +1533,36 @@ mean anything should start here.
 - **Current state:** config/persistence/risk/calendar/broker-mapping
   layer is multi-market-capable (per-market `broker_symbol` pin,
   `risk_overrides`/`execution_overrides`, asset-class calendar,
-  per-market risk ledger). Exactly one market (EUR/USD) is
-  operationally enabled in any shipped config; a second (`BTC/USD`) is
-  seeded `enabled: false` from an owner-asserted, not repo-verified,
-  fixture (see the ADR §3.2). No process orchestrates more than one
-  market concurrently.
+  per-market risk ledger) **and, as of the 2026-09-07 owner corrective
+  review, actually wired into every real orchestrator** — see ADR-022
+  §0/§3.2a. Exactly one market (EUR/USD) is operationally enabled in any
+  shipped config; a second (`BTC/USD`) is seeded `enabled: false` from an
+  owner-asserted, not repo-verified, fixture (see the ADR §3.2). No
+  process orchestrates more than one market concurrently.
+- **Correction, 2026-09-07 (owner review):** the 2026-09-06 version of
+  this entry described the config-layer functions as done without
+  confirming anything actually called them — a real gap, not a wording
+  slip: every orchestrator still read `config.risk`/`config.execution`
+  directly and every calendar-aware call left `calendar` at its FX
+  default. Fixed same day (ADR-022 §0): every `RiskContext` construction
+  site now resolves `risk_for()`/`execution_for()`/`calendar_for()` for
+  its own market. Separately, `phase_at`'s handling of a calendar with no
+  approved session policy was corrected from `SessionPhase.OPEN` to
+  `SessionPhase.CLOSED` (fail-closed, unconditional) — the owner rejected
+  the original "no policy = nothing to measure offsets against, so OPEN"
+  reasoning outright.
 - **Watch for:** before enabling any second market, (1) real-terminal
   confirmation of its broker-symbol pin (`scripts/mt5_probe.py`), (2) an
   owner decision on that asset class's session/weekly-close policy if it
   is not FX/METAL (`risk/calendars.py`'s own module docstring — no
-  calendar invents one), (3) the Market Capability Matrix build.md §24
-  itself calls for, not skipped here. Registration-time Universe
-  validation (`TradingAssignmentStore.register()`, Dev-2-owned) remains
-  an open coordination item — see the ADR §4 item 2.
+  calendar invents one; until then the market fails closed and cannot
+  trade at all, not merely "behaves as disabled"), (3) the Market
+  Capability Matrix build.md §24 itself calls for, not skipped here.
+  ~~Registration-time Universe validation~~ closed 2026-09-06/07 by Dev 2
+  as AG-026 (ADR-022 §4 item 2) — `dev1/market-universe` will need to
+  pass `platform_config=` at any future `AgentGateway(...)` construction
+  site once it converges with a `main` that includes it; constructs none
+  itself today.
 - **Gate affected:** blocks nothing today (`order_send` NO-GO, no
   process trades concurrently on multiple markets); would block any
   future attempt to enable a second market without first closing the

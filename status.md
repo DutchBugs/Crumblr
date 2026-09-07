@@ -11198,6 +11198,121 @@ Otherwise idle pending a new work order.
 Copy this block whenever meaningful progress occurs.
 
 ```text
+## Update 2026-09-07 (eighty-ninth entry) — Market Universe corrective pass: real wiring + fail-closed correction
+
+```text
+Component: risk/{calendars,trading_window,policies,execution_eligibility}.py, application/{orchestration,live_decision,execution,flatten_plan,paper_lite}.py, agent_gateway/decision_path.py
+Milestone: owner corrective review 2026-09-07 on the eighty-eighth entry's Market Universe work
+Status before: config-layer risk_for()/execution_for()/calendar_for() existed and were tested in isolation, but no real orchestrator called them - every live/agent/execution path still read config.risk/config.execution directly and left every calendar argument at its FX default. A calendar with no owner-approved session policy resolved to SessionPhase.OPEN.
+Status after:  every real RiskContext construction site resolves the calling market's own risk/execution/calendar; a calendar with no approved policy fails closed (CLOSED, unconditionally) instead of defaulting open
+```
+
+**The owner caught a real gap, not a documentation slip.** The
+eighty-eighth entry's own language ("config/persistence/risk/calendar/
+broker-mapping layer is multi-market-capable") was true of the *config
+layer* but implied more than was actually true of the *runtime* — the
+functions existed and were correctly tested against each other, but
+nothing that runs ever called them. A second enabled market would have
+silently traded against EUR/USD's platform-default thresholds and
+calendar. The owner's exact instruction (Dutch, verbatim, in full in
+`review/adr/ADR-022-market-universe.md` §0) named both the wiring gap and
+a second, independent correctness error: `phase_at` resolved "no
+owner-approved session policy" to `SessionPhase.OPEN`, which the owner
+rejected outright — absence of a policy must fail closed, not permit
+entries by default.
+
+**Completed, two commits (see below):**
+
+- Every `policies.RiskContext` construction site
+  (`ReplayOrchestrator`, `LiveDecisionOrchestrator`, `ExecutionOrchestrator`,
+  `agent_gateway/decision_path.py::_risk_context`, and
+  `application/paper_lite.py`, Dev-2/3-owned — mechanical fix, same
+  pattern as the AG-024 precedent) now resolves `config.risk_for
+  (canonical_symbol)`/`config.execution_for(canonical_symbol)`/
+  `risk.calendars.calendar_for(market.asset_class)` once, at
+  construction, and reads from the resolved values everywhere in the
+  class — never `config.risk`/`config.execution` directly again, and
+  never a bare default `calendar` on any `trading_window`/`policies`
+  call. Full per-file inventory in ADR-022 §3.2a.
+- `risk/trading_window.py::phase_at`: the `calendar.weekly_close(moment)
+  is None` branch now returns `SessionPhase.CLOSED`, checked *before*
+  `policy.enabled` (so a globally-enabled `IntradayPolicy` cannot
+  accidentally permit entries on an unapproved calendar) — was `OPEN`.
+  `risk/calendars.py`'s module docstring and `AlwaysOpenCalendar`'s own
+  docstring corrected to match.
+- `risk/policies.py::RiskContext` gained a `calendar` field (default
+  `FxWeekdayCalendar()`); `evaluate()`/`overnight_breach()` both became
+  calendar-aware. `risk/execution_eligibility.py::evaluate_execution_eligibility()`
+  and `application/flatten_plan.py::build_flatten_plan()` gained the same
+  default-preserving `calendar` parameter.
+- `application/execution.py`'s automatic-flatten machinery: the bare
+  `trading_agent.sessions.weekly_close()` call (never calendar-aware) is
+  now `self._calendar.weekly_close(now)`, guarded for `None` (no
+  owner-approved boundary to schedule a flatten occurrence against,
+  mirrors `phase_at`'s own reasoning) rather than crashing or silently
+  using the FX calendar.
+- New regression tests: `tests/unit/test_market_universe_wiring.py`
+  (`ReplayOrchestrator`/`LiveDecisionOrchestrator` — direct attribute
+  proof that a second market's own `risk_overrides`/`execution_overrides`/
+  `AlwaysOpenCalendar` reach the constructed orchestrator, not
+  EUR/USD's platform defaults; `agent_gateway/decision_path.py` — proved
+  behaviourally through the public `evaluate_agent_trade_intent`, since
+  the wiring lives in a private function: a BTC/USD intent is always
+  refused with `SESSION_BLACKOUT`, and a recorded 2% prior-session loss
+  halts against BTC/USD's own 1% override while the platform default
+  (4%) would have tolerated it), `tests/integration/test_market_universe_wiring.py`
+  (`ExecutionOrchestrator`, real PostgreSQL, same attribute-level proof),
+  and `tests/unit/test_risk_engine.py::TestMarketUniverseCalendarFailsClosed`
+  (the core enforcement point: `policies.evaluate()` always refuses with
+  `SESSION_BLACKOUT` on `AlwaysOpenCalendar`, regardless of whether the
+  platform's `IntradayPolicy` is itself enabled — proving the fail-closed
+  fix does not depend on any other config value). `tests/unit
+  /test_trading_window.py`'s existing `AlwaysOpenCalendar` test class
+  rewritten from "never evaluates the policy" (asserting `OPEN`) to
+  "fails closed" (asserting `CLOSED`).
+- `PaperLiteOrchestrator` got the identical wiring fix but not a
+  dedicated construction-level unit test — its constructor needs a full
+  `PaperLiteSettings`/`TradingAssignment`/`AgentGateway`/
+  `DurablePaperBroker` graph, materially heavier than the other four call
+  sites. Verified by mypy (identical call shape, type-checked against the
+  same signatures) and the full suite staying green, not by a dedicated
+  proof — named explicitly rather than silently left uncovered
+  (ADR-022 §0).
+
+**Evidence:**
+- `uv run ruff check . && uv run ruff format --check .` — clean (223 files)
+- `uv run mypy` — clean, 201 source files (up from 199)
+- `uv run pytest --ignore=tests/integration` — **1253 passed, 1 skipped**
+  (pre-existing/unrelated MetaTrader5-import skip)
+- `uv run pytest tests/integration` — **264 passed, 2 skipped** (both
+  pre-existing filesystem-permission skips, unrelated), 275.65s. Includes
+  the two new `test_market_universe_wiring.py` tests
+- `uv run alembic heads` — single head, unchanged (`8801080869a6`) — this
+  pass touched no schema
+
+**Problems found:** the gap itself, described above — the eighty-eighth
+entry shipped real, tested config-layer functions that nothing actually
+called, and a real fail-open bug in `phase_at`'s handling of an
+unapproved calendar. Both are exactly the kind of thing a "does the API
+exist" check misses and a "does anything call it under a real scenario"
+check catches — recorded here plainly rather than glossed over, per
+CLAUDE.md's "report failures plainly" rule.
+
+**Risk impact:** `order_send` unaffected — stays NO-GO throughout. EUR/USD's
+own real behaviour is unchanged everywhere a regression test could prove
+it. The fail-closed correction has real (positive) risk impact for any
+future non-FX market: it now cannot trade at all until an owner makes a
+real session-policy decision, rather than trading permissively under an
+implicit "policy disabled" reading.
+
+**Decision:** apply both corrections as instructed; do not merge without
+further owner review, per this branch's own established cadence.
+
+**Next:** pushed to `origin/dev1/market-universe`. Not merged, not stacked
+on the dashboard branch — stop for owner review before merge.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
