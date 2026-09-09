@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crumblr Local Host Admin</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; color: #1a1a1a; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .25rem; }
+  .row { display: flex; align-items: center; gap: .5rem; margin: .4rem 0; }
+  .row label { width: 300px; font-family: monospace; font-size: .85rem; }
+  .row input[type=password], .row input[type=text] { flex: 1; padding: .25rem; }
+  .status { font-size: .8rem; color: #555; min-width: 220px; }
+  .configured { color: #0a7a2f; }
+  .missing { color: #a15c00; }
+  button { padding: .3rem .7rem; cursor: pointer; }
+  #token-banner { background: #fff3cd; padding: .5rem; border: 1px solid #e0c060; margin-bottom: 1rem; }
+  #token-banner input { width: 100%; margin-top: .3rem; }
+  .test-result { font-size: .85rem; margin-top: .3rem; white-space: pre-wrap; }
+  .ok { color: #0a7a2f; }
+  .fail { color: #b00020; }
+  .note { font-size: .8rem; color: #777; }
+</style>
+</head>
+<body>
+<h1>Crumblr Local Host Admin — localhost only</h1>
+<p class="note">
+  Not Dashboard v0 (read-only observability, separate process/port). This surface never
+  exposes submission_enabled, feedback_2_0_approved, flatten_submission_enabled,
+  live_trading_acknowledged, HALT reset, Risk/Policy authority, or TradingAssignment
+  mutation — there is no route for any of those here.
+</p>
+
+<div id="token-banner">
+  Admin token (printed to the console when this process started):
+  <input type="password" id="admin-token" placeholder="paste the console-printed token">
+</div>
+
+<h2>Secrets (Windows Credential Manager — write-only from this page)</h2>
+<div id="secrets"></div>
+
+<h2>Local host settings (non-secret)</h2>
+<div id="settings"></div>
+<div class="row"><button id="save-settings">Save settings</button></div>
+
+<h2>Read-only connectivity tests</h2>
+<div class="row"><button data-test="postgres">Test Postgres</button></div>
+<div class="row"><button data-test="mt5">Test MT5 (read-only)</button></div>
+<div class="row"><button data-test="static-agent">Test Static Agent</button></div>
+<div id="test-result" class="test-result"></div>
+
+<script>
+function token() { return document.getElementById('admin-token').value; }
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, { 'X-Local-Admin-Token': token(), 'Content-Type': 'application/json' });
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+  return r.json();
+}
+
+async function loadSecrets() {
+  const list = await api('/api/secrets');
+  const el = document.getElementById('secrets');
+  el.innerHTML = '';
+  for (const s of list) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const statusText = s.configured
+      ? `configured (last updated ${s.last_written_utc})`
+      : 'missing';
+    row.innerHTML = `
+      <label>${s.name}</label>
+      <input type="password" placeholder="new value (write-only)" data-name="${s.name}">
+      <button data-write="${s.name}">Save</button>
+      <button data-delete="${s.name}">Delete</button>
+      <span class="status ${s.configured ? 'configured' : 'missing'}">${statusText}</span>
+    `;
+    el.appendChild(row);
+  }
+}
+
+async function loadSettings() {
+  const settings = await api('/api/settings');
+  const el = document.getElementById('settings');
+  el.innerHTML = '';
+  for (const [key, value] of Object.entries(settings)) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<label>${key}</label><input type="text" data-setting="${key}" value="${value ?? ''}">`;
+    el.appendChild(row);
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  const writeName = e.target.getAttribute('data-write');
+  const deleteName = e.target.getAttribute('data-delete');
+  const testName = e.target.getAttribute('data-test');
+  try {
+    if (writeName) {
+      const input = document.querySelector(`input[data-name="${writeName}"]`);
+      if (!input.value) { alert('enter a value first'); return; }
+      await api(`/api/secrets/${writeName}`, { method: 'POST', body: JSON.stringify({ value: input.value }) });
+      input.value = '';
+      await loadSecrets();
+    } else if (deleteName) {
+      if (!confirm(`Delete ${deleteName}?`)) return;
+      await api(`/api/secrets/${deleteName}`, { method: 'DELETE' });
+      await loadSecrets();
+    } else if (testName) {
+      const out = document.getElementById('test-result');
+      out.textContent = 'running...';
+      const result = await api(`/api/test/${testName}`, { method: 'POST' });
+      out.textContent = `${testName}: ${result.ok ? 'OK' : 'FAIL'} — ${result.detail}`;
+      out.className = 'test-result ' + (result.ok ? 'ok' : 'fail');
+    } else if (e.target.id === 'save-settings') {
+      const updates = {};
+      document.querySelectorAll('[data-setting]').forEach((inp) => {
+        updates[inp.getAttribute('data-setting')] = inp.value;
+      });
+      await api('/api/settings', { method: 'PUT', body: JSON.stringify(updates) });
+      alert('settings saved');
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+loadSecrets();
+loadSettings();
+</script>
+</body>
+</html>

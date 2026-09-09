@@ -11,6 +11,12 @@ credentials/
 config/live.yaml
 config/*.local.yaml
 
+# Local Host Admin's own non-secret settings (Host Auto-Recovery / Local
+# Host Admin work order, 2026-09-09) -- generated per-machine, never a
+# fixture, never a secret (secrets live only in Windows Credential Manager,
+# never in a file at all).
+config/local_host_settings.json
+
 # Python
 __pycache__/
 *.py[cod]
