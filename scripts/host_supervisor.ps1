@@ -42,7 +42,16 @@ next one starts. This script:
   results, timestamps, PIDs -- never a credential value;
 - gives up (does not loop forever) if a stage never becomes healthy within
   its own bound, so a persistently broken dependency cannot spin this
-  script, or the Scheduled Task's own limited retry count, forever.
+  script, or the Scheduled Task's own limited retry count, forever;
+- issues PAPER_LITE's required --confirm-paper-incident-clear at most ONCE
+  per Windows boot session, not once per run of this script (owner
+  instruction, 2026-09-09) -- tracked via var\host_supervisor_boot_clear.json
+  against the OS's own LastBootUpTime. If PAPER_LITE is not running and
+  this boot has already used its one automatic CLEAR, this script blocks
+  and surfaces that rather than silently re-authorizing CLEAR and
+  restarting PAPER_LITE again. Every other stage (Postgres/MT5/Static
+  Agent/reader) may still retry with its own bounded backoff -- this
+  restriction is specific to re-authorizing PAPER_LITE's incident CLEAR.
 
 This script does not supervise already-running processes after the chain
 is up -- if PAPER_LITE (or anything else) later crashes, it stays crashed
@@ -134,6 +143,32 @@ function Get-CrumblrSecret {
     # stage and say so, never silently succeed off a stale plaintext copy.
     param([string]$Name)
     return [CrumblrCredManager]::Read($Name)
+}
+
+$BootClearMarkerPath = Join-Path $RepoRoot "var\host_supervisor_boot_clear.json"
+
+function Get-CurrentBootTimeUtc {
+    # Identifies "this Windows boot session" without needing any special
+    # OS-level reset-on-reboot storage -- LastBootUpTime changes exactly
+    # once per real boot, so comparing against a recorded value is an
+    # exact test for "has this specific boot already used its one
+    # automatic incident-CLEAR."
+    return (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")
+}
+
+function Test-BootClearAlreadyUsed {
+    $currentBoot = Get-CurrentBootTimeUtc
+    if (-not (Test-Path $BootClearMarkerPath)) { return $false }
+    $marker = Get-Content $BootClearMarkerPath -Raw | ConvertFrom-Json
+    return $marker.boot_time_utc -eq $currentBoot
+}
+
+function Set-BootClearMarker {
+    $marker = @{
+        boot_time_utc  = Get-CurrentBootTimeUtc
+        cleared_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $marker | ConvertTo-Json | Set-Content -Path $BootClearMarkerPath
 }
 
 function Get-CrumblrSetting {
@@ -341,7 +376,12 @@ function Start-PaperLiteStage {
 
     $env:CRUMBLR_DATABASE_URL = Get-CrumblrSecret "CRUMBLR_DATABASE_URL"
     Push-Location $RepoRoot
-    uv run python scripts\check_soak_safety_coherent.py var\agent_paper_soak.safety.json $env:CRUMBLR_DATABASE_URL
+    # The URL is never a CLI argument (Dev 1 finding, 2026-09-09): it is
+    # already in this process's own environment block above, and the child
+    # process inherits it from there -- a CLI argument would be visible to
+    # any other local process via Get-CimInstance Win32_Process | Select
+    # CommandLine.
+    uv run python scripts\check_soak_safety_coherent.py var\agent_paper_soak.safety.json
     $safetyOk = ($LASTEXITCODE -eq 0)
     Pop-Location
 
@@ -360,7 +400,19 @@ function Start-PaperLiteStage {
         return $false
     }
 
+    # --confirm-paper-incident-clear is required by paper_lite.py on every
+    # invocation, but this supervisor may supply it automatically at most
+    # ONCE per Windows boot session (owner instruction, 2026-09-09) -- not
+    # once per host_supervisor.ps1 run. A crashed/missing PAPER_LITE later
+    # in the same boot is a real failure to investigate, not something to
+    # paper over with another automatic CLEAR and a blind restart.
+    if (Test-BootClearAlreadyUsed) {
+        Write-SupervisorLog "paper-lite" "BLOCKED: this boot session already used its one automatic incident-CLEAR. PAPER_LITE is not running and this run will not re-authorize CLEAR or restart it automatically -- investigate why it stopped, then restart manually with an owner-supplied --confirm-paper-incident-clear if appropriate."
+        return $false
+    }
+
     Write-SupervisorLog "paper-lite" "starting continuous, external Supervisor enabled, real wall-clock (no --fixed-now, no --initialize-paper-safety)"
+    Write-SupervisorLog "paper-lite" "issuing this boot session's one automatic incident-CLEAR assertion -- all recovery preconditions passed (Postgres reachable, MT5 authorized, Static Agent READY, reader HEALTHY + exact spec pin, safety coherently RUNNING, zero prior PAPER_LITE writers)"
     $args = @(
         "run","python","scripts\paper_lite.py",
         "--agent-id",$AgentId,
@@ -374,8 +426,15 @@ function Start-PaperLiteStage {
         "--external-supervisor-min-confidence","0.5",
         "--confirm-paper-incident-clear",
         "--operator","host-supervisor",
-        "--incident-clear-note","automatic restart-on-reboot recovery; safety state unchanged, not reset"
+        "--incident-clear-note","owner-preauthorized host boot recovery; all recovery invariants passed; safety state unchanged and not reset"
     )
+    # The marker is written before the process is confirmed to stay running
+    # (not after the poll loop below): paper_lite.py records the CLEAR
+    # assertion durably as soon as it starts, before its main loop, so the
+    # boot's one allowance is spent by the attempt itself -- a crash
+    # moments later must not be read as "never happened" and silently
+    # allow a second automatic CLEAR.
+    Set-BootClearMarker
     Start-Process -FilePath "uv" -ArgumentList $args -WorkingDirectory $RepoRoot -WindowStyle Hidden
 
     for ($i = 0; $i -lt 12; $i++) {

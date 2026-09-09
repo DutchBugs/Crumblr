@@ -20,8 +20,9 @@ retries.
 
 No secret is written into the task definition -- the action is just "run
 this script", identical to running it by hand. host_supervisor.ps1 itself
-reads every credential from this Windows user's own environment-variable
-store at run time.
+reads every credential from Windows Credential Manager (DPAPI-encrypted,
+scoped to this Windows user account) at run time -- never a plaintext
+environment variable.
 
 Idempotent: re-running this replaces the existing task definition rather
 than erroring or duplicating it.

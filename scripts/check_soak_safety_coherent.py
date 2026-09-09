@@ -12,6 +12,14 @@ than RUNNING, or the two disagree, this exits non-zero and prints exactly why
 Never writes anything. Never resets, initializes, or clears a HALT -- that
 stays an exclusively human, `--initialize-paper-safety`-gated action, deliberately
 not reachable from here.
+
+The database URL is read only from this process's own `CRUMBLR_DATABASE_URL`
+environment variable, never accepted as a command-line argument (Dev 1
+finding, 2026-09-09 Local Host Admin review): a CLI argument is visible to
+any other local process via `Get-CimInstance Win32_Process | Select
+CommandLine`, which a credential-bearing connection string must never be.
+`host_supervisor.ps1` sets this in the child process's own environment
+block before launching it, the same way it seeds every other secret.
 """
 
 from __future__ import annotations
@@ -21,6 +29,8 @@ import sys
 from pathlib import Path
 
 import psycopg
+
+from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, database_url
 
 
 def _file_latch_state(path: Path) -> str | None:
@@ -64,14 +74,20 @@ def _postgres_state(database_url: str) -> str | None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: check_soak_safety_coherent.py <safety_latch.json path> <DATABASE_URL>")
+    if len(sys.argv) != 2:
+        print("usage: check_soak_safety_coherent.py <safety_latch.json path>")
+        print(f"  (reads the database URL from ${DATABASE_URL_ENV_VAR} -- never a CLI argument)")
         return 2
     latch_path = Path(sys.argv[1])
-    database_url = sys.argv[2]
+
+    try:
+        url = database_url()
+    except RuntimeError as error:
+        print(f"SAFETY_STATE_UNKNOWN: {error}")
+        return 1
 
     file_state = _file_latch_state(latch_path)
-    pg_state = _postgres_state(database_url)
+    pg_state = _postgres_state(url)
 
     if file_state is None or pg_state is None:
         print("SAFETY_STATE_UNKNOWN: could not read one or both stores")
