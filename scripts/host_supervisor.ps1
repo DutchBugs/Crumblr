@@ -45,13 +45,20 @@ next one starts. This script:
   script, or the Scheduled Task's own limited retry count, forever;
 - issues PAPER_LITE's required --confirm-paper-incident-clear at most ONCE
   per Windows boot session, not once per run of this script (owner
-  instruction, 2026-09-09) -- tracked via var\host_supervisor_boot_clear.json
-  against the OS's own LastBootUpTime. If PAPER_LITE is not running and
-  this boot has already used its one automatic CLEAR, this script blocks
-  and surfaces that rather than silently re-authorizing CLEAR and
-  restarting PAPER_LITE again. Every other stage (Postgres/MT5/Static
-  Agent/reader) may still retry with its own bounded backoff -- this
-  restriction is specific to re-authorizing PAPER_LITE's incident CLEAR.
+  instruction, 2026-09-09), and fails closed by construction (Dev 1
+  BLOCK, 2026-09-09): var\host_supervisor_boot_clear.json is eligible for
+  the current boot ONLY if it holds a valid, strictly-older boot's claim
+  (scripts\check_boot_clear_eligible.py -- unit-tested,
+  tests\unit\test_boot_clear_gate.py). Missing, unreadable, malformed,
+  schema-invalid, unparsable, future, or current-boot markers all block.
+  The claim (scripts\claim_boot_clear.py, atomic temp-file-then-replace)
+  happens before PAPER_LITE is even started, and PAPER_LITE is not
+  started at all if that claim fails. First installation needs
+  scripts\bootstrap_boot_clear_marker.ps1 run manually once -- never
+  automatically -- to establish a starting marker; see that script's own
+  docstring. Every other stage (Postgres/MT5/Static Agent/reader) may
+  still retry with its own bounded backoff -- this restriction is
+  specific to re-authorizing PAPER_LITE's incident CLEAR.
 
 This script does not supervise already-running processes after the chain
 is up -- if PAPER_LITE (or anything else) later crashes, it stays crashed
@@ -148,27 +155,39 @@ function Get-CrumblrSecret {
 $BootClearMarkerPath = Join-Path $RepoRoot "var\host_supervisor_boot_clear.json"
 
 function Get-CurrentBootTimeUtc {
-    # Identifies "this Windows boot session" without needing any special
-    # OS-level reset-on-reboot storage -- LastBootUpTime changes exactly
-    # once per real boot, so comparing against a recorded value is an
-    # exact test for "has this specific boot already used its one
-    # automatic incident-CLEAR."
+    # The one source of truth for "what is the current boot" -- passed as
+    # an argument to check_boot_clear_eligible.py/claim_boot_clear.py
+    # rather than rediscovered in Python, so PowerShell and Python never
+    # have two independent (and possibly disagreeing) ideas of "now."
     return (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")
 }
 
-function Test-BootClearAlreadyUsed {
-    $currentBoot = Get-CurrentBootTimeUtc
-    if (-not (Test-Path $BootClearMarkerPath)) { return $false }
-    $marker = Get-Content $BootClearMarkerPath -Raw | ConvertFrom-Json
-    return $marker.boot_time_utc -eq $currentBoot
+function Test-BootClearEligible {
+    # Fail-closed by construction (Dev 1 BLOCK, 2026-09-09): delegates the
+    # actual validation to scripts\check_boot_clear_eligible.py, which is
+    # unit-tested (tests\unit\test_boot_clear_gate.py) precisely because
+    # this decision is security-relevant and must not live only in
+    # PowerShell. See that script's own docstring for the exact rules --
+    # in short, eligible only when the marker holds a valid, older boot's
+    # claim; anything else (missing, invalid, current-boot) blocks.
+    param([string]$CurrentBootTimeUtc)
+    Push-Location $RepoRoot
+    uv run python scripts\check_boot_clear_eligible.py $BootClearMarkerPath $CurrentBootTimeUtc
+    $eligible = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    return $eligible
 }
 
 function Set-BootClearMarker {
-    $marker = @{
-        boot_time_utc  = Get-CurrentBootTimeUtc
-        cleared_at_utc = (Get-Date).ToUniversalTime().ToString("o")
-    }
-    $marker | ConvertTo-Json | Set-Content -Path $BootClearMarkerPath
+    # Atomically claims the marker for $CurrentBootTimeUtc via
+    # scripts\claim_boot_clear.py (temp-file-then-replace). Returns $false
+    # on any failure -- the caller must not start PAPER_LITE in that case.
+    param([string]$CurrentBootTimeUtc)
+    Push-Location $RepoRoot
+    uv run python scripts\claim_boot_clear.py $BootClearMarkerPath $CurrentBootTimeUtc
+    $claimed = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    return $claimed
 }
 
 function Get-CrumblrSetting {
@@ -402,17 +421,34 @@ function Start-PaperLiteStage {
 
     # --confirm-paper-incident-clear is required by paper_lite.py on every
     # invocation, but this supervisor may supply it automatically at most
-    # ONCE per Windows boot session (owner instruction, 2026-09-09) -- not
-    # once per host_supervisor.ps1 run. A crashed/missing PAPER_LITE later
-    # in the same boot is a real failure to investigate, not something to
-    # paper over with another automatic CLEAR and a blind restart.
-    if (Test-BootClearAlreadyUsed) {
-        Write-SupervisorLog "paper-lite" "BLOCKED: this boot session already used its one automatic incident-CLEAR. PAPER_LITE is not running and this run will not re-authorize CLEAR or restart it automatically -- investigate why it stopped, then restart manually with an owner-supplied --confirm-paper-incident-clear if appropriate."
+    # ONCE per Windows boot session (owner instruction, 2026-09-09), and
+    # fail-closed by construction (Dev 1 BLOCK, 2026-09-09): eligibility
+    # is delegated to check_boot_clear_eligible.py, which blocks unless
+    # the marker holds a valid, strictly-older boot's claim -- a missing,
+    # invalid, or current-boot marker always blocks. A crashed/missing
+    # PAPER_LITE later in the same boot is a real failure to investigate,
+    # not something to paper over with another automatic CLEAR.
+    $currentBootTimeUtc = Get-CurrentBootTimeUtc
+    if (-not (Test-BootClearEligible -CurrentBootTimeUtc $currentBootTimeUtc)) {
+        Write-SupervisorLog "paper-lite" "BLOCKED: this boot is not eligible for an automatic incident-CLEAR (see check_boot_clear_eligible.py output above -- missing/invalid/already-consumed marker). PAPER_LITE will not be started automatically; investigate, then use scripts\bootstrap_boot_clear_marker.ps1 or an owner-supplied manual start as appropriate."
         return $false
     }
 
     Write-SupervisorLog "paper-lite" "starting continuous, external Supervisor enabled, real wall-clock (no --fixed-now, no --initialize-paper-safety)"
-    Write-SupervisorLog "paper-lite" "issuing this boot session's one automatic incident-CLEAR assertion -- all recovery preconditions passed (Postgres reachable, MT5 authorized, Static Agent READY, reader HEALTHY + exact spec pin, safety coherently RUNNING, zero prior PAPER_LITE writers)"
+    Write-SupervisorLog "paper-lite" "claiming this boot session's one automatic incident-CLEAR -- all recovery preconditions passed (Postgres reachable, MT5 authorized, Static Agent READY, reader HEALTHY + exact spec pin, safety coherently RUNNING, zero prior PAPER_LITE writers)"
+
+    # The marker is claimed before the process is even started (not after
+    # the poll loop below, and not merely written best-effort): if this
+    # atomic claim fails for any reason, PAPER_LITE must not start at all.
+    # paper_lite.py records the CLEAR assertion durably as soon as it
+    # starts, before its main loop, so the boot's one allowance is spent
+    # by the attempt itself -- a crash moments later must not be read as
+    # "never happened" and silently permit a second automatic CLEAR.
+    if (-not (Set-BootClearMarker -CurrentBootTimeUtc $currentBootTimeUtc)) {
+        Write-SupervisorLog "paper-lite" "BLOCKED: could not durably claim the boot-clear marker -- PAPER_LITE will not be started"
+        return $false
+    }
+
     $args = @(
         "run","python","scripts\paper_lite.py",
         "--agent-id",$AgentId,
@@ -428,13 +464,6 @@ function Start-PaperLiteStage {
         "--operator","host-supervisor",
         "--incident-clear-note","owner-preauthorized host boot recovery; all recovery invariants passed; safety state unchanged and not reset"
     )
-    # The marker is written before the process is confirmed to stay running
-    # (not after the poll loop below): paper_lite.py records the CLEAR
-    # assertion durably as soon as it starts, before its main loop, so the
-    # boot's one allowance is spent by the attempt itself -- a crash
-    # moments later must not be read as "never happened" and silently
-    # allow a second automatic CLEAR.
-    Set-BootClearMarker
     Start-Process -FilePath "uv" -ArgumentList $args -WorkingDirectory $RepoRoot -WindowStyle Hidden
 
     for ($i = 0; $i -lt 12; $i++) {
