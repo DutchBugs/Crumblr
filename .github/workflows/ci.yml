@@ -23,17 +23,21 @@ jobs:
         env:
           POSTGRES_USER: crumblr
           POSTGRES_PASSWORD: crumblr
-          POSTGRES_DB: crumblr
+          # crumblr_test_dev1, not the bare "crumblr" (2026-09-09 incident,
+          # D-0XX): drop_schema() now refuses to run against any database
+          # not on its explicit disposable-test allow-list, and the
+          # ordinary/shared "crumblr" name is deliberately not on it.
+          POSTGRES_DB: crumblr_test_dev1
         ports:
           - 55432:5432
         options: >-
-          --health-cmd "pg_isready -U crumblr -d crumblr"
+          --health-cmd "pg_isready -U crumblr -d crumblr_test_dev1"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
 
     env:
-      CRUMBLR_DATABASE_URL: postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr
+      CRUMBLR_DATABASE_URL: postgresql+psycopg://crumblr:crumblr@localhost:55432/crumblr_test_dev1
 
     steps:
       - uses: actions/checkout@v4

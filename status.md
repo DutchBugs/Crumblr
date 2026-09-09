@@ -12255,6 +12255,113 @@ identified.
 
 ---
 
+## Update 2026-09-09 (ninety-seventh entry) — INCIDENT: destructive test-database boundary, `crumblr_soak` dropped; fail-closed hotfix
+
+```text
+Component: src/crumblr/persistence/engine.py (drop_schema, DEFAULT_TEST_URL), .github/workflows/ci.yml, tests/unit/test_persistence_engine.py (new)
+Milestone: incident response — destructive integration-test fixtures could target any database CRUMBLR_DATABASE_URL happened to resolve to, with no identity check before drop_schema()
+Status before: drop_schema() (called by tests/integration/conftest.py::engine and test_migrations.py::empty_database's _wipe) ran metadata.drop_all() against whatever database_url(DEFAULT_TEST_URL) resolved to, honouring CRUMBLR_DATABASE_URL from the environment first, with zero check on the target's identity. DEFAULT_TEST_URL itself pointed at the bare, ordinary/shared "crumblr" database.
+Status after: drop_schema() refuses to run at all unless the target database is exactly crumblr_test_dev1/crumblr_test_dev2/crumblr_test_dev3 -- an explicit named allow-list, not fuzzy matching -- checked via a local, un-connected engine.url.database read before any SQL is issued. DEFAULT_TEST_URL and CI both point at crumblr_test_dev1.
+```
+
+**Incident, confirmed real, not hypothetical.** Investigating the owner's
+report, found the exact mechanism: `tests/integration/conftest.py`'s
+`engine` fixture and `test_migrations.py`'s `empty_database` fixture both
+resolve their destructive target via `database_url(DEFAULT_TEST_URL)`,
+which reads `CRUMBLR_DATABASE_URL` from the environment first. A
+**Windows User-scope environment variable** — confirmed via
+`[System.Environment]::GetEnvironmentVariable("CRUMBLR_DATABASE_URL",
+"User")` — is set to the real `crumblr_soak` connection string (set for
+the Local Host Admin / Host Auto-Recovery work so `host_supervisor.ps1`
+and manual soak commands could reach it) and is inherited by *every* new
+process for this Windows account, including a plain `uv run pytest` in an
+unrelated worktree — nothing in this codebase auto-loads a worktree's own
+`.env` for a bare pytest invocation, so the ambient variable silently
+overrode it.
+
+**Confirmed via direct read-only query: `crumblr_soak` currently has zero
+tables.** Every table reviewed across the Technical Soak A, Controlled
+Recovery, and Stage B Full Session soak checkpoints this session
+(`risk_session_states`, `decision_capsules`, `market_ticks`,
+`market_bars`, `safety_state_events`, `agent_decision_outcomes`) is gone.
+The exact triggering command is not conclusively identified — this
+session's own earlier integration-test invocations (which included
+`tests/integration/test_migrations.py`, run without an explicit
+environment override) cannot be ruled out as a contributor, and that is
+stated plainly rather than assumed away. **No recovery/recreation
+performed** — explicitly out of scope for this fix, an owner decision.
+
+**Fix — central guard in `drop_schema()` itself, not per-fixture**, per
+the owner's own instruction to check whether the guard belonged
+centrally: `DISPOSABLE_TEST_DATABASE_NAMES` (exact-name frozenset:
+`crumblr_test_dev1`/`_dev2`/`_dev3`), `NotADisposableTestDatabaseError`,
+`require_disposable_test_database(engine)` — reads only
+`engine.url.database` (a local attribute, not a network call), so a
+wrong target is refused before a single connection opens. Wired directly
+into `drop_schema()`, the one choke point every destructive integration
+fixture already goes through — protects `conftest.py::engine` and
+`test_migrations.py::empty_database`'s `_wipe` (and any future caller)
+without a matching check needed at each call site. `DEFAULT_TEST_URL`
+renamed from `.../crumblr` (the ordinary/shared database, explicitly
+excluded from the allow-list per the owner's own instruction) to
+`.../crumblr_test_dev1`, already the de facto shared disposable database
+across two developer worktrees this session. `.github/workflows/ci.yml`
+updated to match (`POSTGRES_DB`, the health-check command, and
+`CRUMBLR_DATABASE_URL`) — confirmed via `grep` that no other hardcoded
+`crumblr` reference remained. Confirmed `scripts/reset_soak_database.py`
+(the deliberate, human-invoked `crumblr_soak` maintenance path) uses
+`downgrade_to_base()`, a separate Alembic-only mechanism that never calls
+`drop_schema()` — correctly untouched by this guard, by design.
+
+**Evidence:**
+
+- `uv run ruff check . && uv run ruff format --check . && uv run mypy` —
+  clean, 222 source files
+- 12 new unit tests (`tests/unit/test_persistence_engine.py`), all using
+  a deliberately unreachable `192.0.2.1` (RFC 5737 TEST-NET-1) host so a
+  passing rejection test also proves no connection was attempted before
+  the guard fired: `crumblr_soak` rejected, the ordinary/shared `crumblr`
+  rejected, an arbitrary other name rejected, a name merely *containing*
+  "test" (`crumblr_test_dev1_backup`) still rejected (no fuzzy matching),
+  a missing database component rejected, each of the three allow-listed
+  names accepted, `drop_schema()` itself (not just the standalone guard)
+  proven to refuse before touching anything, plus a guard-against-testing-
+  nothing check that the allow-list itself never contains `crumblr_soak`
+  or `crumblr`
+- **Live-fire proof, not only unit tests:** re-ran the full suite with
+  the ambient contaminated environment variable still present,
+  unmodified — every fixture that used to call `drop_schema()` correctly
+  errored with `NotADisposableTestDatabaseError: refusing a destructive
+  schema operation on 'crumblr_soak'...` (314 errors, 1395 unrelated
+  tests still passed) instead of silently dropping anything a second
+  time. Re-ran again with `CRUMBLR_DATABASE_URL` explicitly forced to
+  `crumblr_test_dev1` in the same command: **1709 passed, 3 skipped, 0
+  failed** (381.9s) — full suite green against the correct, allow-listed
+  target
+
+**Decision:** report `DESTRUCTIVE TEST DB BOUNDARY PASS` with the
+incident disclosed plainly. Proposed/implemented disposable-database
+names: `crumblr_test_dev1` (new default), `crumblr_test_dev2`,
+`crumblr_test_dev3` (all already-established, now formally allow-listed).
+Not committed — awaiting owner instruction, per standing practice this
+session.
+
+**Watch for:** the ambient Windows User-scope `CRUMBLR_DATABASE_URL` is
+still set to `crumblr_soak` as of this fix — the code-level guard now
+prevents it from reaching `drop_schema()`, but it remains a live footgun
+for any *other* future destructive helper that does not route through
+this same guard. Recommend the owner either accelerate
+`scripts/migrate_secrets_to_credential_manager.py` to Credential-Manager-
+only for `CRUMBLR_DATABASE_URL` specifically, or unset the Windows
+User-scope variable now that a code-level backstop exists — not done
+here, since it is host-level state adjacent to Dev 2's own in-progress
+Local Host Admin work, not touched unilaterally.
+
+**Next:** recovery/recreation of `crumblr_soak` is an explicit owner
+decision, not undertaken here.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
