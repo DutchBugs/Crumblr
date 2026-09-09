@@ -10,6 +10,22 @@ unmarked, and retention never touches it or any existing good backup
 (fail-closed: "on any dump/restore/read verification failure... keep
 existing good backups, perform no retention deletion").
 
+**Digest binding (Dev 1 BLOCK, 2026-09-09).** A marker used to mean only
+"a dump with this filename passed verification at some point" -- nothing
+tied it to the *current bytes* of the file. A `.verified.json` marker now
+records the dump's SHA-256 and byte size at the moment verification
+completed, and `select_verified_backups()` recomputes the hash of the
+*current* file on every call and requires it to still match -- a dump
+that was later truncated, mutated, or replaced (same name, different
+bytes, even the same size) is no longer "verified" the instant its bytes
+diverge from what was actually checked, with no separate re-scan step
+needed to notice. The hash is also taken twice around the restore/verify
+window itself (`create_verified_backup`): once right after the dump is
+written, once right after database verification finishes. If those two
+disagree, the file changed *during* its own verification and the run
+blocks -- no marker is written for a file that cannot be trusted to be
+the same bytes that were actually restored and checked.
+
 Two guards, both exact-name allowlists, never substring/pattern matching
 (mirrors `crumblr.persistence.engine.require_disposable_test_database`,
 the same discipline the 2026-09-09 incident hotfix (37a9190) established):
@@ -45,6 +61,7 @@ nothing but the bare name on the visible command line).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -101,6 +118,25 @@ _FILENAME_PATTERN = re.compile(
     rf"^{re.escape(BACKUP_FILENAME_PREFIX)}(\d{{8}}T\d{{6}}Z){re.escape(BACKUP_FILENAME_SUFFIX)}$"
 )
 
+MARKER_SCHEMA_VERSION = 1
+
+_MARKER_REQUIRED_FIELD_TYPES: dict[str, type] = {
+    "schema_version": int,
+    "dump_filename": str,
+    "sha256": str,
+    "size_bytes": int,
+    "verified_at_utc": str,
+    "alembic_revision": str,
+    "assignment_id": str,
+}
+"""Every field a marker must carry, and its expected JSON-decoded type --
+
+`bool` is deliberately excluded from `int`-typed fields by checking type
+exactly rather than via `isinstance` alone, since Python's `bool` is a
+subclass of `int` and `size_bytes: true` would otherwise pass silently."""
+
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
 
 class BackupSourceMismatchError(RuntimeError):
     """A backup was about to run against something other than crumblr_soak."""
@@ -143,6 +179,43 @@ def parse_backup_timestamp(filename: str) -> datetime | None:
 
 def verified_marker_path(dump_path: Path) -> Path:
     return dump_path.with_name(dump_path.name + VERIFIED_MARKER_SUFFIX)
+
+
+def sha256_and_size(path: Path) -> tuple[str, int]:
+    """The file's SHA-256 hex digest and byte size, read in chunks so an
+
+    arbitrarily large dump never needs to be held in memory whole just to
+    hash it."""
+    hasher = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+            size += len(chunk)
+    return hasher.hexdigest(), size
+
+
+def _parse_marker(raw: str) -> dict[str, object] | None:
+    """`None` for anything that is not valid JSON, not an object, or
+
+    missing/mistyped one of the required fields -- never partially
+    trusted."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for field_name, field_type in _MARKER_REQUIRED_FIELD_TYPES.items():
+        if field_name not in payload:
+            return None
+        value = payload[field_name]
+        # Exact type, not isinstance: bool is an int subclass in Python,
+        # so isinstance(True, int) is True -- a marker with
+        # "size_bytes": true must not pass an int-typed field check.
+        if type(value) is not field_type:
+            return None
+    return payload
 
 
 @dataclass(frozen=True)
@@ -305,6 +378,8 @@ def create_verified_backup(context: BackupContext) -> BackupResult:
     tmp_path.write_bytes(dump_proc.stdout)
     tmp_path.replace(final_path)
 
+    pre_sha256, pre_size = sha256_and_size(final_path)
+
     try:
         recreate_scratch_database(
             database_url=context.database_url, name=SCRATCH_VERIFY_DATABASE_NAME
@@ -314,13 +389,23 @@ def create_verified_backup(context: BackupContext) -> BackupResult:
             ok=False, detail=f"could not prepare scratch database: {error}", dump_path=final_path
         )
 
+    # Restored from the bytes actually sitting on disk right now, not the
+    # in-memory copy captured above -- what gets restored, and later
+    # digest-checked, is the real persisted artifact, not a snapshot that
+    # could theoretically have already diverged from it.
+    dump_bytes_on_disk = final_path.read_bytes()
+
     restore_command = build_pg_restore_command(
         container=context.container,
         username=context.username,
         database=SCRATCH_VERIFY_DATABASE_NAME,
     )
     restore_proc = subprocess.run(
-        restore_command, input=dump_proc.stdout, capture_output=True, env=child_env, check=False
+        restore_command,
+        input=dump_bytes_on_disk,
+        capture_output=True,
+        env=child_env,
+        check=False,
     )
     if restore_proc.returncode != 0:
         detail = restore_proc.stderr[-2000:].decode(errors="replace")
@@ -338,37 +423,158 @@ def create_verified_backup(context: BackupContext) -> BackupResult:
             ok=False, detail=verification.detail, dump_path=final_path, verification=verification
         )
 
-    verified_marker_path(final_path).write_text(
-        json.dumps(
-            {"verified_at_utc": datetime.now(UTC).isoformat(), "detail": verification.detail},
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    # The digest re-check that binds the marker to these exact bytes: if
+    # the file changed at any point between the two hashes -- during
+    # restore, during database verification, from any other process --
+    # this refuses to mark it verified rather than trust a snapshot that
+    # is no longer provably what was actually checked.
+    post_sha256, post_size = sha256_and_size(final_path)
+    if post_sha256 != pre_sha256 or post_size != pre_size:
+        return BackupResult(
+            ok=False,
+            detail=(
+                "dump file changed during verification -- refusing to mark it verified "
+                f"(pre: {pre_size} bytes, sha256 {pre_sha256[:12]}...; "
+                f"post: {post_size} bytes, sha256 {post_sha256[:12]}...)"
+            ),
+            dump_path=final_path,
+            verification=verification,
+        )
+
+    marker_payload = {
+        "schema_version": MARKER_SCHEMA_VERSION,
+        "dump_filename": final_path.name,
+        "sha256": post_sha256,
+        "size_bytes": post_size,
+        "verified_at_utc": datetime.now(UTC).isoformat(),
+        "alembic_revision": REQUIRED_ALEMBIC_REVISION,
+        "assignment_id": str(RUNTIME_ASSIGNMENT_ID),
+    }
+    marker_path = verified_marker_path(final_path)
+    marker_tmp_path = marker_path.with_suffix(marker_path.suffix + ".tmp")
+    marker_tmp_path.write_text(json.dumps(marker_payload, indent=2), encoding="utf-8")
+    marker_tmp_path.replace(marker_path)
+
     return BackupResult(
         ok=True,
-        detail="dump created and restore-verified",
+        detail="dump created, restore-verified, and digest-bound",
         dump_path=final_path,
         verification=verification,
     )
 
 
-def select_verified_backups(directory: Path) -> list[Path]:
-    """Every dump in `directory` matching this tool's own naming
+@dataclass(frozen=True)
+class BackupPairStatus:
+    """The outcome of re-verifying one dump+marker pair against the
 
-    convention AND carrying a `.verified.json` marker, newest first. A
-    dump that failed verification (no marker) or a stray unrelated file
-    is never returned -- retention only ever sees what this list contains."""
-    candidates: list[tuple[datetime, Path]] = []
-    for path in directory.glob(f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}"):
-        timestamp = parse_backup_timestamp(path.name)
-        if timestamp is None:
-            continue
-        if not verified_marker_path(path).exists():
-            continue
-        candidates.append((timestamp, path))
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    return [path for _, path in candidates]
+    dump's CURRENT bytes -- `reason` is always safe to print or log: it
+    only ever names a filename, a field, a size, or a hash prefix, never
+    a database URL, credential, or dump content."""
+
+    dump_path: Path
+    verified: bool
+    reason: str
+    timestamp: datetime | None = None
+
+
+def _inspect_backup_pair(dump_path: Path) -> BackupPairStatus:
+    timestamp = parse_backup_timestamp(dump_path.name)
+    if timestamp is None:
+        return BackupPairStatus(dump_path, False, "filename does not match the naming convention")
+
+    marker_path = verified_marker_path(dump_path)
+    if not marker_path.exists():
+        return BackupPairStatus(dump_path, False, "no marker file", timestamp)
+
+    try:
+        raw = marker_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return BackupPairStatus(dump_path, False, f"marker unreadable: {error}", timestamp)
+
+    payload = _parse_marker(raw)
+    if payload is None:
+        return BackupPairStatus(
+            dump_path, False, "marker is malformed or missing a required field", timestamp
+        )
+
+    recorded_filename = payload["dump_filename"]
+    if recorded_filename != dump_path.name:
+        return BackupPairStatus(
+            dump_path,
+            False,
+            f"marker dump_filename {recorded_filename!r} does not match this file's name",
+            timestamp,
+        )
+
+    recorded_sha256 = payload["sha256"]
+    assert isinstance(recorded_sha256, str)
+    if not _SHA256_PATTERN.match(recorded_sha256):
+        return BackupPairStatus(
+            dump_path, False, "marker sha256 is not structurally valid", timestamp
+        )
+
+    try:
+        current_size = dump_path.stat().st_size
+    except OSError as error:
+        return BackupPairStatus(dump_path, False, f"dump file unreadable: {error}", timestamp)
+
+    if payload["size_bytes"] != current_size:
+        return BackupPairStatus(
+            dump_path,
+            False,
+            f"marker size_bytes {payload['size_bytes']} != current file size {current_size}",
+            timestamp,
+        )
+
+    if payload["alembic_revision"] != REQUIRED_ALEMBIC_REVISION:
+        return BackupPairStatus(
+            dump_path,
+            False,
+            "marker alembic_revision does not match the canonical value",
+            timestamp,
+        )
+
+    if payload["assignment_id"] != str(RUNTIME_ASSIGNMENT_ID):
+        return BackupPairStatus(
+            dump_path, False, "marker assignment_id does not match the canonical value", timestamp
+        )
+
+    current_sha256, _ = sha256_and_size(dump_path)
+    if current_sha256 != recorded_sha256:
+        return BackupPairStatus(
+            dump_path, False, "current dump bytes do not match the recorded sha256", timestamp
+        )
+
+    return BackupPairStatus(dump_path, True, "verified", timestamp)
+
+
+def inspect_backup_directory(
+    directory: Path,
+) -> tuple[list[BackupPairStatus], list[BackupPairStatus]]:
+    """Every candidate dump in `directory`, classified verified or invalid
+
+    -- `(verified, invalid)`, verified newest first. Invalid/corrupt pairs
+    are reported here, not silently dropped: a caller (the CLI entrypoint)
+    can print `reason` for each without ever touching a secret."""
+    verified: list[BackupPairStatus] = []
+    invalid: list[BackupPairStatus] = []
+    for path in sorted(directory.glob(f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}")):
+        status = _inspect_backup_pair(path)
+        (verified if status.verified else invalid).append(status)
+    epoch = datetime.min.replace(tzinfo=UTC)
+    verified.sort(key=lambda status: status.timestamp or epoch, reverse=True)
+    return verified, invalid
+
+
+def select_verified_backups(directory: Path) -> list[Path]:
+    """Every dump in `directory` that re-verifies against its OWN current
+
+    bytes right now -- not a cached "a marker exists" check. A dump that
+    was truncated, mutated, or replaced since its marker was written no
+    longer appears here the moment its bytes diverge, with no separate
+    re-scan step required to notice."""
+    verified, _ = inspect_backup_directory(directory)
+    return [status.dump_path for status in verified]
 
 
 def select_files_to_delete_for_retention(

@@ -35,6 +35,7 @@ from crumblr.local_admin.backup import (
     BackupContext,
     apply_retention,
     create_verified_backup,
+    inspect_backup_directory,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -69,6 +70,15 @@ def main() -> int:
     deleted = apply_retention(context.backup_directory)
     if deleted:
         print(f"retention: removed {len(deleted)} older verified backup(s)")
+
+    # Reported, never silently dropped -- filenames and reasons only, no
+    # secret-derived content. Never deleted automatically: an invalid pair
+    # needs an owner to look at it, not this script guessing.
+    _, invalid = inspect_backup_directory(context.backup_directory)
+    if invalid:
+        print(f"WARNING: {len(invalid)} invalid/corrupt backup pair(s) (not counted, not deleted):")
+        for status in invalid:
+            print(f"  {status.dump_path.name}: {status.reason}")
     return 0
 
 
