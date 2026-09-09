@@ -1080,7 +1080,21 @@ class TestBrokerAccountPositionsAndPendingOrdersRenderInTheUi:
         assert len(api["broker"]["positions"]) == 1
         assert len(api["broker"]["pending_orders"]) == 1
         assert "EUR/USD" in page
-        assert "555" not in page  # ticket is not itself a displayed field
+
+        # Scoped to the rendered positions table itself (id="broker-positions-body"
+        # through the start of the pending-orders panel), not the whole page: a
+        # whole-page "555" not in page assertion is not safe here, because the
+        # page also renders a dynamic wall-clock-relative "Observed ... ago" age
+        # (a different card, before this one) whose hour count is real elapsed
+        # time since a fixture's fixed historical timestamp -- on any day where
+        # that number happens to be 555, an unrelated, correct rendering would
+        # fail this assertion. Scoping to the positions table's own markup makes
+        # this test's real claim -- the position's own row never renders a
+        # ticket field -- immune to what unrelated page text says right now.
+        positions_section = page.split('id="broker-positions-body"', 1)[1].split(
+            'id="broker-pending-orders-body"', 1
+        )[0]
+        assert "555" not in positions_section  # ticket is not itself a displayed field
         assert "777" in page  # order_id is displayed
 
     def test_zero_rows_with_a_complete_set_is_confirmed_empty_not_hidden(
