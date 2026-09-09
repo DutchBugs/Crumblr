@@ -23,6 +23,7 @@ from crumblr.application.paper_lite import (
     PaperLiteOrchestrator,
     PaperLiteOutcomeType,
     load_paper_lite_settings,
+    require_external_supervisor_policy,
     require_paper_lite_database_url,
 )
 from crumblr.application.recording import JournalRecorder
@@ -147,6 +148,12 @@ def main() -> None:
         raise SystemExit("the provisioned assignment belongs to another Agent")
     if assignment.canonical_symbol != args.symbol or assignment.timeframe != args.timeframe:
         raise SystemExit("runner symbol/timeframe does not match the provisioned assignment")
+    try:
+        require_external_supervisor_policy(
+            assignment, enable_external_supervisor=args.enable_external_supervisor
+        )
+    except PaperLiteConfigurationError as error:
+        raise SystemExit(str(error)) from error
 
     specs = InstrumentSpecStore(engine)
     spec = specs.latest(canonical_symbol=args.symbol)

@@ -50,16 +50,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--service-identity", default="paper-lite-local-toy-agent")
     parser.add_argument("--runtime-version", default="paper-lite-toy-v1")
     parser.add_argument("--max-proposals-per-hour", type=int, default=20)
+    parser.add_argument(
+        "--supervisor-policy-version",
+        required=True,
+        help=(
+            "explicit, no default -- must name the real policy this assignment "
+            "authorizes (e.g. reference-supervisor-policy-v1 for a deployment that "
+            "runs PAPER_LITE with --enable-external-supervisor)"
+        ),
+    )
+    parser.add_argument(
+        "--assignment-only",
+        action="store_true",
+        help=(
+            "issue only a new TradingAssignment for an ALREADY-registered, ACTIVE "
+            "AgentIdentity -- does not register a new AgentIdentity and does not "
+            "read, rotate, or reissue the Gateway credential (post-incident "
+            "rebaseline, 2026-09-09: re-provisioning an assignment for an Agent "
+            "identity/credential that already exist and were not lost)"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    credential = os.getenv(GATEWAY_CREDENTIAL_ENV)
-    if not credential:
-        raise SystemExit(
-            f"set {GATEWAY_CREDENTIAL_ENV}; the credential is never accepted in a CLI argument"
-        )
     try:
         configured_database_url = require_paper_lite_database_url(database_url())
     except PaperLiteConfigurationError as error:
@@ -80,17 +95,44 @@ def main() -> None:
             outcomes=PostgresAgentDecisionOutcomeStore(engine),
             feature_evidence=InMemoryFeatureEvidenceStore(),
         )
-        gateway.register_identity(
-            AgentIdentity(
-                agent_id=args.agent_id,
-                role=AgentRole.TRADER,
-                runtime_version=args.runtime_version,
-                service_identity=args.service_identity,
-                status=AgentStatus.ACTIVE,
-                registered_at_utc=args.valid_from,
-            ),
-            credential_secret=credential,
-        )
+
+        if args.assignment_only:
+            existing = identities.current(args.agent_id)
+            if existing is None:
+                raise SystemExit(
+                    f"--assignment-only requires an already-registered AgentIdentity for "
+                    f"{args.agent_id}; none found -- register one first (without "
+                    "--assignment-only) or correct --agent-id"
+                )
+            if existing.agent_id != args.agent_id:
+                # identities.current() is already keyed by agent_id -- this can only
+                # fail if the store itself disagrees with its own lookup key, kept as
+                # an explicit, named invariant rather than trusted implicitly.
+                raise SystemExit("existing AgentIdentity's agent_id does not match exactly")
+            if existing.status is not AgentStatus.ACTIVE:
+                raise SystemExit(
+                    f"--assignment-only requires an ACTIVE AgentIdentity; {args.agent_id} is "
+                    f"{existing.status.value}"
+                )
+        else:
+            credential = os.getenv(GATEWAY_CREDENTIAL_ENV)
+            if not credential:
+                raise SystemExit(
+                    f"set {GATEWAY_CREDENTIAL_ENV}; the credential is never accepted "
+                    "in a CLI argument"
+                )
+            gateway.register_identity(
+                AgentIdentity(
+                    agent_id=args.agent_id,
+                    role=AgentRole.TRADER,
+                    runtime_version=args.runtime_version,
+                    service_identity=args.service_identity,
+                    status=AgentStatus.ACTIVE,
+                    registered_at_utc=args.valid_from,
+                ),
+                credential_secret=credential,
+            )
+
         gateway.issue_assignment(
             TradingAssignment(
                 assignment_id=args.assignment_id,
@@ -106,7 +148,7 @@ def main() -> None:
                 allowed_risk_fraction_min=Decimal("0.0001"),
                 allowed_risk_fraction_max=Decimal("0.02"),
                 required_evidence_fields=(),
-                supervisor_policy_version="paper-lite-external-supervisor-skipped-v1",
+                supervisor_policy_version=args.supervisor_policy_version,
                 environment=Environment.PAPER,
                 champion_shadow_status=ChampionShadowStatus.SHADOW,
             )

@@ -29,6 +29,7 @@ from crumblr.agent_gateway.decision_path import ExternalSupervisorProvider
 from crumblr.agent_gateway.gateway import AgentGateway
 from crumblr.agent_gateway.market_context import AgentMarketContextV1
 from crumblr.agent_gateway.reference_supervisor import (
+    REFERENCE_SUPERVISOR_POLICY_VERSION,
     ReferenceSupervisor,
     ReferenceSupervisorConfig,
 )
@@ -47,6 +48,7 @@ from crumblr.application.paper_lite import (
     PaperLiteOutcomeType,
     PaperLiteSafetyError,
     PaperLiteSettings,
+    require_external_supervisor_policy,
     require_paper_lite_database_url,
 )
 from crumblr.application.recording import NullRecorder
@@ -484,6 +486,52 @@ class TestPaperLiteDatabaseWhitelist:
         snapshot, spec = compatible_snapshot()
         with pytest.raises(PaperLiteSafetyError, match="operator-bound"):
             process_clear(orchestrator, snapshot, spec)
+
+
+class TestExternalSupervisorPolicyBinding:
+    """Post-incident rebaseline (2026-09-09): an assignment issued under
+
+    the explicit-skip understanding (`supervisor_policy_version` anything
+    other than the canonical `REFERENCE_SUPERVISOR_POLICY_VERSION`) must
+    never be run with a real external Supervisor attached --
+    `scripts/paper_lite.py` only constructs one when
+    `--enable-external-supervisor` is passed, and `assignment()`'s own
+    default carries the pre-incident `"paper-lite-skip-v1"` value, exactly
+    the shape the real superseded assignment `b8e0c54c-...` carries."""
+
+    def test_disabled_flag_never_checks_the_policy_version(self) -> None:
+        # Not even a nonsense policy version raises when no external
+        # Supervisor is being attached at all -- nothing to police.
+        skipped = assignment().model_copy(update={"supervisor_policy_version": "anything-at-all"})
+        require_external_supervisor_policy(skipped, enable_external_supervisor=False)
+
+    def test_the_canonical_policy_version_is_accepted_when_enabled(self) -> None:
+        canonical = assignment().model_copy(
+            update={"supervisor_policy_version": REFERENCE_SUPERVISOR_POLICY_VERSION}
+        )
+        require_external_supervisor_policy(canonical, enable_external_supervisor=True)
+
+    def test_a_skipped_assignment_is_rejected_when_external_supervisor_is_enabled(self) -> None:
+        skipped = assignment()  # default supervisor_policy_version == "paper-lite-skip-v1"
+        with pytest.raises(PaperLiteConfigurationError, match=REFERENCE_SUPERVISOR_POLICY_VERSION):
+            require_external_supervisor_policy(skipped, enable_external_supervisor=True)
+
+    def test_the_real_superseded_assignments_own_policy_version_is_rejected(self) -> None:
+        """The exact string the actually-provisioned, non-runtime
+
+        assignment `b8e0c54c-8783-4f76-97c0-07b3ff984eda` carries
+        (post-incident rebaseline audit finding, 2026-09-09) -- not just
+        an arbitrary stand-in string."""
+        superseded = assignment().model_copy(
+            update={"supervisor_policy_version": "paper-lite-external-supervisor-skipped-v1"}
+        )
+        with pytest.raises(PaperLiteConfigurationError, match=REFERENCE_SUPERVISOR_POLICY_VERSION):
+            require_external_supervisor_policy(superseded, enable_external_supervisor=True)
+
+    def test_an_arbitrary_other_policy_version_is_rejected_when_enabled(self) -> None:
+        other = assignment().model_copy(update={"supervisor_policy_version": "some-other-v2"})
+        with pytest.raises(PaperLiteConfigurationError, match=REFERENCE_SUPERVISOR_POLICY_VERSION):
+            require_external_supervisor_policy(other, enable_external_supervisor=True)
 
 
 class TestSessionPolicy:

@@ -1,0 +1,26 @@
+# Owner-authorized PAPER_LITE runtime settings -- post-incident rebaseline
+# (2026-09-09). Identical to config/paper_lite.yaml except for
+# journal_path/safety_latch_path: this rebaselined runtime must never share
+# a journal or safety latch with the pre-incident evidence in
+# var/agent_paper_soak.journal.jsonl / var/agent_paper_soak.safety.json --
+# those are preserved, permanent incident evidence, not a starting point
+# for this runtime.
+#
+# This file contains no broker or Agent credentials.
+
+mode: PAPER_LITE
+starting_balance: '10000'
+journal_path: var/agent_paper_post_incident.journal.jsonl
+safety_latch_path: var/agent_paper_post_incident.safety.json
+account_currency: EUR
+leverage: 30
+
+operational_max_open_positions: 20
+
+max_risk_per_trade: '0.02'
+max_open_risk: '0.03'
+max_daily_loss: '0.04'
+max_drawdown: '0.08'
+
+friday_last_entry_minutes_before_close: 15
+friday_flatten_minutes_before_close: 5

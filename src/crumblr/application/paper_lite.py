@@ -71,6 +71,7 @@ from crumblr.agent_gateway.market_context import (
     AgentMarketContextV1,
     build_agent_market_context_v1,
 )
+from crumblr.agent_gateway.reference_supervisor import REFERENCE_SUPERVISOR_POLICY_VERSION
 from crumblr.application.recording import RunRecorder
 from crumblr.config import (
     AccountGuardConfig,
@@ -164,6 +165,35 @@ def require_paper_lite_database_url(url: str) -> str:
             f"PAPER_LITE requires one of the dedicated databases ({allowed}); got {database!r}"
         )
     return url
+
+
+def require_external_supervisor_policy(
+    assignment: TradingAssignment, *, enable_external_supervisor: bool
+) -> None:
+    """Refuse to run with a real external Supervisor against an assignment
+
+    that was never issued for one (post-incident rebaseline, 2026-09-09).
+    `--enable-external-supervisor` gates whether `scripts/paper_lite.py`
+    constructs a real `ReferenceSupervisor` at all -- but nothing
+    previously checked that the *assignment itself* was provisioned with
+    `supervisor_policy_version` set to the canonical
+    `REFERENCE_SUPERVISOR_POLICY_VERSION`. An assignment carrying the
+    older `"...skipped..."` value was issued under the explicit-skip
+    understanding (`SUPERVISOR_SKIPPED_PAPER_MODE`); running it with a
+    real Supervisor attached would silently upgrade what that assignment
+    actually authorized. A flag with no effect (`enable_external_supervisor=False`)
+    never reaches this function's raising path -- there is nothing to
+    police when no external Supervisor is being attached at all."""
+    if not enable_external_supervisor:
+        return
+    if assignment.supervisor_policy_version != REFERENCE_SUPERVISOR_POLICY_VERSION:
+        raise PaperLiteConfigurationError(
+            "--enable-external-supervisor requires the assignment's "
+            f"supervisor_policy_version to be {REFERENCE_SUPERVISOR_POLICY_VERSION!r}; "
+            f"got {assignment.supervisor_policy_version!r} -- provision a new assignment "
+            "carrying the canonical policy version rather than running external Supervisor "
+            "against one issued as explicitly skipped"
+        )
 
 
 @dataclass(frozen=True)

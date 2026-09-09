@@ -66,6 +66,43 @@ until the next real boot/logon runs this script again. That is deliberate:
 an aggressive respawn-on-crash loop is exactly the kind of thing that could
 quietly turn a real failure (e.g. the Agent being unreachable) into
 something that looks like nothing happened. A crash must stay visible.
+
+**Post-incident runtime binding patch (2026-09-09).** crumblr_soak's prior
+history was lost (2026-09-09 incident); this script now pins to the
+rebaselined runtime, not the pre-incident one:
+
+- $AssignmentId is a PRE-GENERATED UUID, not yet provisioned in
+  crumblr_soak -- provisioning is a separate, explicitly authorized step
+  after Dev 1 PASS + merge. Until then PAPER_LITE's own "assignment is not
+  provisioned" check correctly refuses to start against it.
+- No hard-coded --code-commit: Get-CrumblrHeadCommitOrBlock resolves
+  `git rev-parse HEAD` at run time and blocks (refuses to start
+  PAPER_LITE) if any tracked file is dirty (`git status --porcelain
+  --untracked-files=no`) -- PAPER_LITE's audit trail must name the exact
+  commit that produced its fills, which an uncommitted change would make
+  untrue. Untracked files do not block (they don't make HEAD itself
+  wrong).
+- Start-StaticAgentStage requires crumblr-static-agent-host's own
+  `git rev-parse HEAD` to equal $StaticAgentRequiredHead EXACTLY, checked
+  before anything else in that stage, and requires the running Static
+  Agent's own reported strategy_artifact_hash to equal
+  $RequiredStrategyArtifactHash EXACTLY (not merely "some hash exists") --
+  a READY response with the wrong hash blocks immediately rather than
+  waiting out the full poll bound, since waiting cannot fix a definite
+  mismatch.
+- PAPER_LITE's settings/journal/safety-latch paths are
+  $PaperLiteSettingsPath / $PaperLiteJournalPath / $PaperLiteSafetyLatchPath
+  (config\agent_paper_post_incident.yaml and the matching var\
+  agent_paper_post_incident.* files) -- never the preserved pre-incident
+  evidence (var\agent_paper_soak.journal.jsonl / .safety.json /
+  config\agent_paper_soak.yaml), which stays permanent incident evidence,
+  not a starting point for this runtime. The dashboard stage reads the
+  same post-incident paths.
+- config\local_host_settings.json's own `assignment_id` field (Local Host
+  Admin, display-only) is never read here -- $AssignmentId above is the
+  sole runtime-authoritative source; the local setting exists only for
+  the admin UI to show something back to the owner, never to select what
+  actually runs.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -74,13 +111,36 @@ $RepoRoot = "C:\Users\Levi's MacBook\Desktop\Projecten\Crumblr"
 $StaticAgentRoot = "C:\Users\Levi's MacBook\Desktop\Projecten\crumblr-static-agent-host"
 $LogFile = Join-Path $RepoRoot "var\host_supervisor.log"
 
+# Post-incident rebaseline pins (2026-09-09). $AssignmentId is PRE-GENERATED,
+# not yet provisioned in crumblr_soak -- provisioning happens only after Dev
+# 1 PASS + merge, as its own separate, explicitly authorized step. Until
+# then, PAPER_LITE's own "assignment is not provisioned" check
+# (scripts\paper_lite.py) will correctly refuse to start against it, which
+# is the intended state for this patch.
 $AgentId = "760e93be-117c-48a3-b997-f258055ec29b"
-$AssignmentId = "14255834-811d-4b19-8d57-8057d3e39424"
+$AssignmentId = "f98c0396-dd13-4a99-b1e9-b83ea0f15ed7"
 $CanonicalSymbol = "EUR/USD"
 $Timeframe = "M5"
-$CodeCommit = "c775333"
 $AgentUrl = "http://127.0.0.1:8765"
 $DashboardPort = 8050
+
+# crumblr-static-agent-host's exact required commit. Verified against the
+# real repo during this patch (not merely typed): `git -C
+# crumblr-static-agent-host rev-parse HEAD` reads dcc3770df67b5251d145c6f7fa08786ea85f8328.
+$StaticAgentRequiredHead = "dcc3770df67b5251d145c6f7fa08786ea85f8328"
+
+# The exact StrategyArtifact this deployment authorizes -- not merely "some
+# hash exists". Confirmed live against the real Static Agent's /health
+# response during the post-incident rebaseline base phase (2026-09-09).
+$RequiredStrategyArtifactHash = "81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5"
+
+# Post-incident settings: never the preserved pre-incident soak evidence
+# (var\agent_paper_soak.journal.jsonl / .safety.json / config\agent_paper_soak.yaml)
+# -- those are permanent incident evidence, not a starting point for this
+# runtime. See config\agent_paper_post_incident.yaml's own header.
+$PaperLiteSettingsPath = "config\agent_paper_post_incident.yaml"
+$PaperLiteSafetyLatchPath = "var\agent_paper_post_incident.safety.json"
+$PaperLiteJournalPath = "var\agent_paper_post_incident.journal.jsonl"
 
 function Write-SupervisorLog {
     param([string]$Stage, [string]$Message)
@@ -203,6 +263,27 @@ function Get-CrumblrSetting {
     return $settings.$Key
 }
 
+function Get-CrumblrHeadCommitOrBlock {
+    # Resolved at runtime, not hard-coded (post-incident rebaseline,
+    # 2026-09-09): a stale pinned commit could silently diverge from what
+    # is actually running. PAPER_LITE's own audit trail (--code-commit)
+    # must name the exact commit that produced the fills it records --
+    # an uncommitted local change to a tracked file would make that
+    # untrue, so this blocks (returns $null) rather than resolve HEAD
+    # against a dirty tree. --untracked-files=no deliberately: an
+    # untracked file (e.g. a not-yet-committed new script) does not make
+    # HEAD itself wrong, only a modified tracked one does.
+    Push-Location $RepoRoot
+    $dirty = (git status --porcelain --untracked-files=no 2>&1 | Out-String).Trim()
+    $head = (git rev-parse HEAD 2>&1 | Out-String).Trim()
+    Pop-Location
+    if ($dirty) {
+        Write-SupervisorLog "paper-lite" "BLOCKED: tracked files are dirty -- refusing to resolve a HEAD commit for PAPER_LITE's audit trail. git status --porcelain --untracked-files=no:`n$dirty"
+        return $null
+    }
+    return $head
+}
+
 function Test-ProcessRunning {
     param([string]$CommandLineMatch)
     $procs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
@@ -305,6 +386,14 @@ function Start-Mt5Stage {
 function Start-StaticAgentStage {
     Write-SupervisorLog "static-agent" "checking service"
 
+    Push-Location $StaticAgentRoot
+    $actualStaticAgentHead = (git rev-parse HEAD 2>&1 | Out-String).Trim()
+    Pop-Location
+    if ($actualStaticAgentHead -ne $StaticAgentRequiredHead) {
+        Write-SupervisorLog "static-agent" "BLOCKED: crumblr-static-agent-host HEAD is $actualStaticAgentHead, required exactly $StaticAgentRequiredHead"
+        return $false
+    }
+
     $alreadyUp = $false
     try {
         $health = Invoke-RestMethod -Uri "$AgentUrl/health" -TimeoutSec 3
@@ -332,14 +421,22 @@ function Start-StaticAgentStage {
     for ($i = 0; $i -lt 24; $i++) {
         try {
             $health = Invoke-RestMethod -Uri "$AgentUrl/health" -TimeoutSec 3
-            if ($health.status -eq "READY" -and $health.neutral_context_strategy.strategy_artifact_hash) {
-                Write-SupervisorLog "static-agent" "READY, artifact hash $($health.neutral_context_strategy.strategy_artifact_hash)"
+            $actualHash = $health.neutral_context_strategy.strategy_artifact_hash
+            if ($health.status -eq "READY" -and $actualHash -eq $RequiredStrategyArtifactHash) {
+                Write-SupervisorLog "static-agent" "READY, artifact hash matches the required pin exactly"
                 return $true
+            }
+            if ($health.status -eq "READY" -and $actualHash) {
+                # Fail fast rather than exhausting the poll bound: READY
+                # with a definite, wrong hash will not become correct by
+                # waiting longer.
+                Write-SupervisorLog "static-agent" "BLOCKED: READY but strategy_artifact_hash is $actualHash, required exactly $RequiredStrategyArtifactHash"
+                return $false
             }
         } catch {}
         Start-Sleep -Seconds 5
     }
-    Write-SupervisorLog "static-agent" "BLOCKED: never reached READY within bound"
+    Write-SupervisorLog "static-agent" "BLOCKED: never reached READY with the exact required artifact hash within bound"
     return $false
 }
 
@@ -393,14 +490,23 @@ function Start-PaperLiteStage {
         return $true
     }
 
+    # Resolved before anything with a side effect (secret reads, the
+    # boot-clear claim): a dirty tracked tree blocks outright, so there is
+    # no point doing any of that work first.
+    $codeCommit = Get-CrumblrHeadCommitOrBlock
+    if (-not $codeCommit) {
+        return $false
+    }
+
     $env:CRUMBLR_DATABASE_URL = Get-CrumblrSecret "CRUMBLR_DATABASE_URL"
     Push-Location $RepoRoot
     # The URL is never a CLI argument (Dev 1 finding, 2026-09-09): it is
     # already in this process's own environment block above, and the child
     # process inherits it from there -- a CLI argument would be visible to
     # any other local process via Get-CimInstance Win32_Process | Select
-    # CommandLine.
-    uv run python scripts\check_soak_safety_coherent.py var\agent_paper_soak.safety.json
+    # CommandLine. Never the preserved pre-incident soak latch -- see
+    # $PaperLiteSafetyLatchPath's own definition above.
+    uv run python scripts\check_soak_safety_coherent.py $PaperLiteSafetyLatchPath
     $safetyOk = ($LASTEXITCODE -eq 0)
     Pop-Location
 
@@ -454,10 +560,10 @@ function Start-PaperLiteStage {
         "--agent-id",$AgentId,
         "--assignment-id",$AssignmentId,
         "--agent-url",$AgentUrl,
-        "--code-commit",$CodeCommit,
+        "--code-commit",$codeCommit,
         "--symbol",$CanonicalSymbol,
         "--timeframe",$Timeframe,
-        "--settings","config\agent_paper_soak.yaml",
+        "--settings",$PaperLiteSettingsPath,
         "--enable-external-supervisor",
         "--external-supervisor-min-confidence","0.5",
         "--confirm-paper-incident-clear",
@@ -491,8 +597,8 @@ function Start-DashboardStage {
         "--timeframe",$Timeframe,
         "--reader-health","var\live_reader_health.json",
         "--agent-assignment-id",$AssignmentId,
-        "--paper-lite-journal-path","var\agent_paper_soak.journal.jsonl",
-        "--paper-lite-settings-path","config\agent_paper_soak.yaml",
+        "--paper-lite-journal-path",$PaperLiteJournalPath,
+        "--paper-lite-settings-path",$PaperLiteSettingsPath,
         "--port",$DashboardPort
     )
     Start-Process -FilePath "uv" -ArgumentList $args -WorkingDirectory $RepoRoot -WindowStyle Hidden
