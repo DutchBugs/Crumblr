@@ -199,6 +199,35 @@ class TestExactScratchDatabaseGuard:
             )
 
 
+class TestUrlWithDatabaseNeverMasksThePassword:
+    """A real bug, live-reproduced during the 2026-09-10 operational proof:
+
+    `str(sqlalchemy.engine.URL)` masks the password as the literal text
+    "***" by default. `recreate_scratch_database`'s admin connection and
+    `create_verified_backup`'s scratch-database connection both built
+    their DSN through `_url_with_database`, which used `str(...)` --
+    every real connection attempt authenticated with the literal string
+    "***" instead of the real password and failed. No prior test caught
+    this: every test exercising these code paths either mocked the
+    connection entirely or used a deliberately unreachable host that
+    never got far enough to notice a wrong password. This test asserts
+    on the actual string `_url_with_database` produces, not on whether a
+    connection succeeds, so it fails the same way with no real database
+    at all -- exactly why it was missing before."""
+
+    def test_the_real_password_survives_a_database_swap(self) -> None:
+        url = "postgresql+psycopg://crumblr:a-real-password-value@localhost:55432/crumblr_soak"
+        result = backup_module._url_with_database(url, "postgres")
+        assert "a-real-password-value" in result
+        assert "***" not in result
+
+    def test_the_database_component_is_actually_swapped(self) -> None:
+        url = "postgresql+psycopg://crumblr:secret@localhost:55432/crumblr_soak"
+        result = backup_module._url_with_database(url, "crumblr_backup_verify")
+        assert result.endswith("/crumblr_backup_verify")
+        assert "crumblr_soak" not in result
+
+
 class TestBackupFilenameConvention:
     def test_round_trips_through_parse(self) -> None:
         now = datetime(2026, 9, 9, 14, 30, 0, tzinfo=UTC)

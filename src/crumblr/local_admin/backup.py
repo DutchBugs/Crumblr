@@ -332,7 +332,15 @@ def _psycopg_dsn(url: str) -> str:
 
 
 def _url_with_database(url: str, database: str) -> str:
-    return str(make_url(url).set(database=database))
+    # str(URL) masks the password as "***" by default in SQLAlchemy --
+    # render_as_string(hide_password=False) is required to get the real
+    # password back. A real, live-reproduced bug (2026-09-10): str() here
+    # silently sent the literal text "***" as the password to Postgres,
+    # which fails authentication -- caught only by the real operational
+    # proof, never by a unit test, since every test exercising this path
+    # either mocked the connection entirely or used a deliberately
+    # unreachable host that never got far enough to notice.
+    return make_url(url).set(database=database).render_as_string(hide_password=False)
 
 
 def recreate_scratch_database(*, database_url: str, name: str) -> None:
