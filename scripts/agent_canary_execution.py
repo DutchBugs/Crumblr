@@ -94,7 +94,7 @@ from crumblr.domain.enums import Environment, IncidentStatus, SessionState
 from crumblr.domain.hashing import fingerprint
 from crumblr.domain.models import InstrumentSpec, MarketSnapshot
 from crumblr.domain.money import price_to_points
-from crumblr.domain.timeutils import utc_now
+from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
 from crumblr.mt5_gateway.client import MissingCredentialsError, Mt5Client, read_credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
@@ -220,6 +220,36 @@ def _apply_canary_config_overlay(config: PlatformConfig) -> PlatformConfig:
     if "execution" in overlay:
         updates["execution"] = config.execution.model_copy(update=overlay["execution"])
     return config.model_copy(update=updates)
+
+
+class MissingCanaryPermitError(Exception):
+    """The configured `--canary-permit-id` names no row in `canary_permits`.
+
+    Raised before any decision cycle or execution attempt is ever made --
+    never discovered lazily deep inside a poll iteration.
+    """
+
+
+def _resolve_canary_activation_watermark(
+    permit_store: CanaryPermitStore, permit_id: UUID
+) -> UtcDatetime:
+    """Eligibility wiring fix (Dev 1 review, post-BLOCK): a sealed capsule
+
+    must never be eligible before the owner actually issued the permit
+    authorizing this canary -- "owner issues permit -> activation begins
+    -> a sealed Agent capsule can be eligible after that point." Returns
+    exactly `permit.issued_at_utc`, deliberately never `utc_now()` (that
+    would make every already-sealed capsule retroactively eligible the
+    instant this process starts) and never a capsule's own timestamp minus
+    an offset (that would make eligibility a tautology -- every capsule
+    its own watermark). Read-only, called once, before the polling loop;
+    raises `MissingCanaryPermitError` -- never returns a fabricated
+    watermark -- when the permit does not exist.
+    """
+    permit = permit_store.permit_for(permit_id)
+    if permit is None:
+        raise MissingCanaryPermitError(f"canary permit {permit_id} does not exist")
+    return permit.issued_at_utc
 
 
 class _RealPortfolioStateProvider:
@@ -444,15 +474,26 @@ def main() -> int:
 
     entry_submission_adapter = None
     canary_permit_store = None
+    canary_activation_watermark = None
     if args.canary_permit_id is not None:
         from crumblr.mt5_gateway.demo_execution import DemoOrderSendMt5Gateway
 
         entry_submission_adapter = DemoOrderSendMt5Gateway(adapter, client)
         canary_permit_store = CanaryPermitStore(runtime.engine)
+        try:
+            canary_activation_watermark = _resolve_canary_activation_watermark(
+                canary_permit_store, args.canary_permit_id
+            )
+        except MissingCanaryPermitError as error:
+            print(f"error: {error}", file=sys.stderr)
+            runtime.dispose()
+            return 2
         print(
             f"  CANARY SUBMISSION WIRED — permit_id={args.canary_permit_id} — a real "
             "order_send is now reachable, for the exact one capsule each cycle seals, "
-            "if every gate and the permit's own exact scope check all pass.\n"
+            "if every gate and the permit's own exact scope check all pass. "
+            f"activation_watermark={canary_activation_watermark.isoformat()} "
+            "(permit.issued_at_utc)\n"
         )
     else:
         print("  preflight-only — order_send is not reachable from this run.\n")
@@ -479,10 +520,17 @@ def main() -> int:
             kill_switch=runtime.kill_switch,
             adapter=adapter,
             canonical_symbol=args.symbol,
+            activation_watermark=canary_activation_watermark,
             worker_id="agent_canary_execution",
             entry_submission_adapter=entry_submission_adapter,
             canary_permit_store=canary_permit_store,
             canary_config=canary_config,
+            # Eligibility wiring fix: an Agent-driven capsule's own
+            # strategy_version is the assignment's strategy_artifact_hash,
+            # never config.trading_agent.strategy_version (the *internal*
+            # ict_v1/baseline_v1 version) -- PlatformConfig itself is never
+            # mutated to make this true.
+            current_strategy_version=assignment.strategy_artifact_hash,
         )
 
     # Preflight-only mode needs no per-cycle capsule_id binding -- one

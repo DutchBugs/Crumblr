@@ -315,6 +315,7 @@ class ExecutionOrchestrator:
         entry_submission_adapter: EntrySubmissionSink | None = None,
         canary_permit_store: CanaryPermitStore | None = None,
         canary_config: CanaryEntrySubmissionConfig | None = None,
+        current_strategy_version: str | None = None,
     ) -> None:
         _canary_fields = (entry_submission_adapter, canary_permit_store, canary_config)
         if any(field is not None for field in _canary_fields) and not all(
@@ -327,6 +328,19 @@ class ExecutionOrchestrator:
                 "identity nothing will ever consume"
             )
         self._config = config
+        self._current_strategy_version = (
+            current_strategy_version or config.trading_agent.strategy_version
+        )
+        """FEEDBACK.2.0 DEMO EXECUTION eligibility wiring fix (Dev 1 review):
+
+        `evaluate_execution_eligibility()`'s own "current strategy version"
+        input, no longer hardcoded to `config.trading_agent.strategy_version`
+        (the *internal* strategy's version, e.g. `ict_v1`/`baseline_v1`) --
+        an Agent-driven capsule's `strategy_version` is the assignment's own
+        `strategy_artifact_hash`, a completely different value with no
+        relationship to the internal config field. `None` (every existing
+        caller/test) preserves the exact prior behaviour; a caller driving a
+        different strategy identity must pass its own version explicitly."""
         self._capsules = capsules
         self._requests = requests
         self._events = events
@@ -478,7 +492,7 @@ class ExecutionOrchestrator:
             capsule,
             activation_watermark=self._activation_watermark,
             now=now,
-            current_strategy_version=self._config.trading_agent.strategy_version,
+            current_strategy_version=self._current_strategy_version,
             current_risk_config_version=self._config.config_version,
             intraday=risk_context.intraday,
             calendar=risk_context.calendar,

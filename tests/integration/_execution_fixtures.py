@@ -506,6 +506,7 @@ def orchestrator(
     entry_submission_adapter: EntrySubmissionSink | None = None,
     canary_permit_store: CanaryPermitStore | None = None,
     canary_config: CanaryEntrySubmissionConfig | None = None,
+    current_strategy_version: str | None = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=LOGIN, password="x", server=SERVER))
@@ -534,4 +535,5 @@ def orchestrator(
         entry_submission_adapter=entry_submission_adapter,
         canary_permit_store=canary_permit_store,
         canary_config=canary_config,
+        current_strategy_version=current_strategy_version,
     )
