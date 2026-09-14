@@ -119,9 +119,16 @@ from crumblr.trading_agent.sessions import is_market_open
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATEWAY_CREDENTIAL_ENV = "CRUMBLR_PAPER_LITE_GATEWAY_CREDENTIAL"
 AGENT_TOKEN_ENV = "CRUMBLR_PAPER_LITE_AGENT_TOKEN"
-"""Same shared bearer contract `paper_lite.py` already uses -- one stored
+"""Same shared bearer contract `paper_lite.py` already uses for the
 
-secret, one env-var name, never a second independently-editable copy."""
+existing Stage C/ICT Agent -- also this script's own `--gateway-
+credential-env`/`--agent-token-env` defaults, so omitting both flags is
+byte-for-byte the prior, unparameterized behaviour. A run against a
+*different* registered AgentIdentity (Dev 1 review BLOCK fix -- the
+deterministic canary fixture has its own separately-provisioned
+credential/token, never this pair) must pass its own var names via those
+two flags; nothing here ever aliases one identity's secret onto
+another's env-var name."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,7 +175,40 @@ def parse_args() -> argparse.Namespace:
         "scoped to exactly this one permit -- omit to stay preflight-only (order_send "
         "unreachable), the same non-sending guarantee every other script here proves",
     )
+    parser.add_argument(
+        "--gateway-credential-env",
+        default=GATEWAY_CREDENTIAL_ENV,
+        help="env-var NAME (not the value) this run reads its AgentGateway credential from "
+        "-- defaults to the existing Stage C/ICT Agent's own var so omitting this flag is "
+        "the exact prior behaviour. A run against a different registered AgentIdentity "
+        "(e.g. the deterministic canary fixture) must pass its own credential's var name "
+        "here explicitly -- never left to default to another identity's credential",
+    )
+    parser.add_argument(
+        "--agent-token-env",
+        default=AGENT_TOKEN_ENV,
+        help="env-var NAME (not the value) this run reads its Agent-host bearer token from "
+        "-- defaults to the existing Stage C/ICT Agent's own var so omitting this flag is "
+        "the exact prior behaviour. A run against a different Agent host (e.g. the "
+        "deterministic canary fixture) must pass its own token's var name here explicitly",
+    )
     return parser.parse_args()
+
+
+def _resolve_gateway_secrets(
+    *, gateway_credential_env: str, agent_token_env: str
+) -> tuple[str, str] | None:
+    """Reads exactly the two named env vars -- never any other name, never a
+
+    fallback to `GATEWAY_CREDENTIAL_ENV`/`AGENT_TOKEN_ENV` when a caller
+    selected different ones. `None` (fail closed) if either is missing or
+    empty; never prints either value.
+    """
+    credential = os.getenv(gateway_credential_env)
+    agent_token = os.getenv(agent_token_env)
+    if not credential or not agent_token:
+        return None
+    return credential, agent_token
 
 
 def _apply_canary_config_overlay(config: PlatformConfig) -> PlatformConfig:
@@ -284,15 +324,18 @@ def main() -> int:
         )
         return 2
 
-    credential = os.getenv(GATEWAY_CREDENTIAL_ENV)
-    agent_token = os.getenv(AGENT_TOKEN_ENV)
-    if not credential or not agent_token:
+    secrets = _resolve_gateway_secrets(
+        gateway_credential_env=args.gateway_credential_env,
+        agent_token_env=args.agent_token_env,
+    )
+    if secrets is None:
         print(
-            f"error: set both {GATEWAY_CREDENTIAL_ENV} and {AGENT_TOKEN_ENV}; secrets are "
-            "never read from YAML or CLI arguments",
+            f"error: set both {args.gateway_credential_env} and {args.agent_token_env}; "
+            "secrets are never read from YAML or CLI arguments",
             file=sys.stderr,
         )
         return 2
+    credential, agent_token = secrets
 
     config = load_config(environment, config_dir=REPO_ROOT / "config")
     if args.apply_canary_config:
