@@ -37,6 +37,7 @@ GUARD = AccountGuardConfig.model_validate(
         "require_demo_account": True,
         "expected_currency": "EUR",
         "expected_leverage": 30,
+        "broker_account_ref": "pepperstone-demo-eurusd",
     }
 )
 
@@ -768,6 +769,119 @@ class TestScenario2WrongAccountFailsClosed:
 
         recovered = live.poll_once()
         assert recovered.status is ReaderStatus.HEALTHY
+
+
+class TestBrokerAccountRefAndConnectedIdentity:
+    """MT5 read-only account binding (2026-09-14): broker_account_ref is
+
+    config-sourced and always present, regardless of connection state;
+    connected_* fields are only ever set together, in the HEALTHY branch,
+    from the same account() call _verify_account has just approved."""
+
+    def test_broker_account_ref_is_present_before_any_connection(self) -> None:
+        fake = ScriptedMt5()
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+
+        assert live.health.broker_account_ref == "pepperstone-demo-eurusd"
+        assert live.health.connected_server is None
+        assert live.health.connected_masked_login is None
+
+    def test_a_healthy_connection_carries_the_ref_and_masked_connected_identity(
+        self,
+    ) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+
+        health = live.poll_once()
+
+        assert health.status is ReaderStatus.HEALTHY
+        assert health.broker_account_ref == "pepperstone-demo-eurusd"
+        assert health.connected_server == "PepperstoneUK-Demo"
+        assert health.connected_currency == "EUR"
+        assert health.connected_is_demo is True
+        # mask_login(5_000_123) keeps only the last three digits — the
+        # full login must never appear in this snapshot.
+        assert health.connected_masked_login == "***123"
+        assert "5000123" not in str(health.to_payload())
+        assert "5_000_123" not in str(health.to_payload())
+
+    def test_an_account_mismatch_clears_connected_identity_but_keeps_the_ref(
+        self,
+    ) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+        assert live.poll_once().status is ReaderStatus.HEALTHY
+
+        fake.tick_rows = None
+        live.poll_once()
+
+        fake.account = account_info(server="PepperstoneEU-Demo")
+        mismatched = live.poll_once()
+
+        assert mismatched.status is ReaderStatus.UNHEALTHY
+        assert mismatched.connected_server is None
+        assert mismatched.connected_currency is None
+        assert mismatched.connected_is_demo is None
+        assert mismatched.connected_masked_login is None
+        # The configured ref is not a live fact about the terminal — a
+        # mismatch does not erase what this reader was configured to want.
+        assert mismatched.broker_account_ref == "pepperstone-demo-eurusd"
+
+    def test_to_payload_includes_every_new_field(self) -> None:
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = reader(fake, sink, clock)
+
+        payload = live.poll_once().to_payload()
+
+        assert payload["broker_account_ref"] == "pepperstone-demo-eurusd"
+        assert payload["connected_server"] == "PepperstoneUK-Demo"
+        assert payload["connected_currency"] == "EUR"
+        assert payload["connected_is_demo"] is True
+        assert payload["connected_masked_login"] == "***123"
+
+    def test_a_missing_broker_account_ref_in_config_is_carried_as_none(self) -> None:
+        """The field is optional -- a deployment that has not set it yet
+
+        (or a config that predates this field) must not fail to load or
+        to connect; it simply reports no ref, honestly."""
+        guard_without_ref = AccountGuardConfig.model_validate(
+            {
+                "expected_server": "PepperstoneUK-Demo",
+                "expected_login": None,
+                "require_demo_account": True,
+                "expected_currency": "EUR",
+                "expected_leverage": 30,
+            }
+        )
+        fake = ScriptedMt5()
+        fake.tick_rows = (tick_row(),)
+        sink = RecordingSink()
+        clock = FakeClock(NOW)
+        live = LiveReader(
+            Mt5Client(fake),
+            Mt5Credentials(login=5_000_123, password="x", server="PepperstoneUK-Demo"),
+            guard_without_ref,
+            sink,
+            canonical_symbol="EUR/USD",
+            stale_after=timedelta(seconds=60),
+            clock=clock,
+            sleep=lambda _seconds: None,
+        )
+
+        health = live.poll_once()
+        assert health.status is ReaderStatus.HEALTHY
+        assert health.broker_account_ref is None
 
 
 class TestScenario6AcknowledgeIsNotRestoration:

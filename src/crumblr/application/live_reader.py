@@ -55,6 +55,7 @@ from crumblr.mt5_gateway.client import (
     Mt5Client,
     Mt5Credentials,
     Mt5UnavailableError,
+    mask_login,
 )
 from crumblr.mt5_gateway.readonly import (
     AccountGuardError,
@@ -200,6 +201,31 @@ class ReaderHealth:
     heartbeat_at_utc: UtcDatetime | None = None
     heartbeat_max_age_seconds: float | None = None
 
+    broker_account_ref: str | None = None
+    """The configured `AccountGuardConfig.broker_account_ref` -- present
+
+    regardless of connection state (it is config-sourced, not read from
+    the terminal), so a consumer always knows which account this reader
+    is *supposed* to be bound to, even while disconnected."""
+    connected_server: str | None = None
+    connected_currency: str | None = None
+    connected_is_demo: bool | None = None
+    connected_masked_login: str | None = None
+    """Non-secret evidence of the account MT5 actually reported on the
+
+    most recent successful revalidation (`mask_login` — last three digits
+    only, never the full login; see its own docstring, F-031). All four
+    `connected_*` fields are set together, only in the HEALTHY branch of
+    `_reconnect()` where `_verify_account` has just passed, and are
+    explicitly cleared back to `None` the instant an account-guard
+    mismatch is detected -- a stale "last known good" identity must never
+    linger and be mistaken for a currently-proven one. Comparing this
+    against `broker_account_ref` is a consumer's own business (a config
+    label is not itself a verified fact); the actual fail-closed
+    enforcement already happened in `_verify_account` before this snapshot
+    is ever written -- these fields exist for observability, not as a
+    second, unreviewed check."""
+
     def to_payload(self) -> dict[str, Any]:
         """A dashboard-safe rendering — no credential-shaped field exists here."""
         return {
@@ -222,6 +248,11 @@ class ReaderHealth:
                 self.heartbeat_at_utc.isoformat() if self.heartbeat_at_utc else None
             ),
             "heartbeat_max_age_seconds": self.heartbeat_max_age_seconds,
+            "broker_account_ref": self.broker_account_ref,
+            "connected_server": self.connected_server,
+            "connected_currency": self.connected_currency,
+            "connected_is_demo": self.connected_is_demo,
+            "connected_masked_login": self.connected_masked_login,
         }
 
 
@@ -348,7 +379,11 @@ class LiveReader:
         self._expected_margin_mode: int | None = None
         self._last_tick_at: UtcDatetime | None = None
         self._last_broker_state_at: UtcDatetime | None = None
-        self._health = ReaderHealth(status=ReaderStatus.DISCONNECTED, connected=False)
+        self._health = ReaderHealth(
+            status=ReaderStatus.DISCONNECTED,
+            connected=False,
+            broker_account_ref=guard.broker_account_ref,
+        )
         self._broker_state_health = BrokerStateHealth()
 
     @property
@@ -508,6 +543,16 @@ class LiveReader:
                 last_reconnect_at_utc=now,
                 last_error=str(error),
                 detail=f"account guard failed on reconnect: {error}",
+                # The one moment a stale "last known good" connected
+                # identity must not linger: this is the actual wrong-
+                # account case, so nothing here may keep looking verified.
+                # broker_account_ref (the configured, not connected, ref)
+                # is deliberately left as-is -- it never claimed to be a
+                # live fact about the terminal.
+                connected_server=None,
+                connected_currency=None,
+                connected_is_demo=None,
+                connected_masked_login=None,
             )
             return self._health
         except SymbolNotFoundError as error:
@@ -585,6 +630,15 @@ class LiveReader:
                 if spec_changed
                 else None
             ),
+            # Set together, only here: _verify_account (inside
+            # gateway.account() above) has just passed for this exact
+            # account, so this is the one moment these four are actually
+            # proven, not merely remembered from before.
+            broker_account_ref=self._guard.broker_account_ref,
+            connected_server=account.server,
+            connected_currency=account.currency,
+            connected_is_demo=account.is_demo,
+            connected_masked_login=mask_login(account.login),
         )
         _log.info(
             "live_reader.connected",

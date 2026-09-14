@@ -74,6 +74,10 @@ account_guard:
   require_demo_account: true
   expected_currency: EUR
   expected_leverage: 30
+  # Non-secret, descriptive-only label (2026-09-14) -- never checked by
+  # _verify_account(), never a source of execution authority. See
+  # AccountGuardConfig.broker_account_ref's own docstring.
+  broker_account_ref: pepperstone-demo-eurusd
 
 # F-055 (review 1.19 §4): the instrument-spec baseline reconciliation checks
 # against must be an explicit, approved pin — never inferred from whichever

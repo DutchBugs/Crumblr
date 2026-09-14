@@ -331,6 +331,21 @@ class AccountGuardConfig(ConfigSection):
     silent change moves how much of the account a position ties up without
     changing anything the strategy or the risk engine can see."""
 
+    broker_account_ref: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    """A non-secret, human-chosen, stable label for which broker account/
+    profile this deployment is bound to (e.g. "pepperstone-demo-eurusd") —
+    intended as the selector a future multi-account broker integration would
+    key off. Unlike every other field in this class, this one is deliberately
+    NOT a claim the guard checks: `mt5_gateway.readonly.ReadOnlyMt5Gateway
+    ._verify_account` reads only `expected_server`/`expected_login`/
+    `require_demo_account`/`expected_currency`/`expected_leverage` — this
+    field is never consulted there, and no code path may start treating it
+    as authoritative. It carries no password/token material and grants no
+    execution authority on its own; it exists purely so reader/runtime
+    health and a dashboard can show a stable, human-chosen name for the
+    account already verified by the fields above, not so a second,
+    unreviewed mechanism can decide anything on its own."""
+
 
 class PlatformConfig(ConfigSection):
     environment: Environment

@@ -47,6 +47,16 @@ class TestShippedConfiguration:
         config = load_config(Environment.PAPER, config_dir=REPO_CONFIG_DIR)
         assert config.account_guard.require_demo_account is True
 
+    def test_paper_config_carries_a_non_secret_broker_account_ref(self) -> None:
+        """2026-09-14: a stable, human-chosen label for the account this
+
+        deployment is bound to -- not itself a verified fact
+        (`_verify_account` never reads it), only a display/observability
+        convenience. Asserts on the exact shipped value so a silent,
+        accidental change is caught."""
+        config = load_config(Environment.PAPER, config_dir=REPO_CONFIG_DIR)
+        assert config.account_guard.broker_account_ref == "pepperstone-demo-eurusd"
+
     def test_no_live_config_is_shipped(self) -> None:
         """A live overlay is created deliberately at gate P4, not by default."""
         assert not (REPO_CONFIG_DIR / "live.yaml").exists()
