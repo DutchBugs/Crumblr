@@ -136,6 +136,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--environment", default=Environment.PAPER.value)
     parser.add_argument(
+        "--safety-state-file",
+        type=Path,
+        default=REPO_ROOT / "var" / "agent_paper_post_incident.safety.json",
+        help="the durable safety-latch file this run's kill switch checks against the "
+        "Postgres safety_state_events journal for agreement -- defaults to the exact "
+        "post-incident latch path every other Stage C process on this baseline uses "
+        "(config/agent_paper_post_incident.yaml's own safety_latch_path); "
+        "var/safety_state.json is a different, stale, pre-incident evidence-run latch "
+        "and must never be used here",
+    )
+    parser.add_argument(
         "--enable-external-supervisor",
         action="store_true",
         help="gate the sealed capsule on a real external-Supervisor review (the "
@@ -295,7 +306,7 @@ def main() -> int:
 
     runtime = build_durable_runtime(
         environment=environment,
-        state_file=REPO_ROOT / "var" / "safety_state.json",
+        state_file=args.safety_state_file,
         url=database_url,
     )
 
