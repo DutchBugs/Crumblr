@@ -61,7 +61,10 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from crumblr.application.broker_state import BrokerStateObservation, capture_broker_state
-from crumblr.application.execution_outcome import close_result_fully_closed
+from crumblr.application.execution_outcome import (
+    close_result_fully_closed,
+    normalize_execution_result,
+)
 from crumblr.application.expected_state import derive_expected_exposure
 from crumblr.application.flatten_plan import build_flatten_plan
 from crumblr.application.reconciliation import (
@@ -86,19 +89,25 @@ from crumblr.domain.enums import (
 )
 from crumblr.domain.hashing import fingerprint, mt5_magic_number
 from crumblr.domain.models import (
+    AccountState,
     ApprovedOrder,
+    CanaryPermit,
     DecisionCapsule,
     ExecutionResult,
     FlattenInstruction,
     MarketSnapshot,
     MarketTick,
     PositionState,
+    TradeIntent,
+    VersionTag,
 )
 from crumblr.domain.money import price_to_points
 from crumblr.domain.timeutils import UtcDatetime, utc_now
 from crumblr.market_data.synthetic import snapshot_id_for
+from crumblr.mt5_gateway.client import Mt5CallFailedError
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.observability.logging import get_logger
+from crumblr.persistence.canary_permit import CanaryPermitConsumeOutcome, CanaryPermitStore
 from crumblr.persistence.execution import (
     ExecutionEventStore,
     ExecutionRequestConflictError,
@@ -167,6 +176,65 @@ class FlattenCloseSink(Protocol):
     """
 
     def close_position(self, instruction: FlattenInstruction) -> ExecutionResult: ...
+
+
+class EntrySubmissionSink(Protocol):
+    """The one real capability a new-entry canary needs (FEEDBACK.2.0 DEMO
+
+    EXECUTION) — mirrors `FlattenCloseSink` exactly: a narrow structural
+    Protocol, never the concrete real demo-execution gateway class in
+    `mt5_gateway/demo_execution.py`. This module never names that class
+    (`tests/unit/test_demo_order_send_gateway.py
+    ::TestNotWiredIntoTheOrchestrator` already mechanically asserts this for
+    the module as a whole, covering this Protocol too) — only this one
+    entry capability is reachable, and only via this Protocol, only when a
+    caller explicitly constructs one and injects it alongside a matching
+    `CanaryEntrySubmissionConfig`/`CanaryPermitStore` (never by default).
+    """
+
+    def order_send(self, order: ApprovedOrder) -> ExecutionResult: ...
+
+
+@dataclass(frozen=True)
+class CanaryEntrySubmissionConfig:
+    """Fixes exactly one owner-authorized canary identity onto one
+
+    `ExecutionOrchestrator` instance (FEEDBACK.2.0 DEMO EXECUTION).
+    Constructed once by the caller that also submitted the real Agent
+    proposal this canary run is for — never derived, inferred, or looked
+    up from a capsule at request time, since `DecisionCapsule`/`TradeIntent`
+    carry no `agent_id`/`assignment_id` field of their own (Core is not
+    redesigned to add one for this). `agent_id`/`assignment_id`/
+    `strategy_artifact_hash` are `None` together for an internal-strategy
+    canary (`ict_v1`/`baseline_v1`), matching `CanaryPermit`'s own "set
+    together, or not at all" contract — see that model's docstring.
+
+    `permit_id` alone is not "the permit": the exact row it names is
+    re-read fresh from `CanaryPermitStore` on every attempt (never cached
+    on this object), so a permit that is later revoked by simply never
+    being issued, or that has expired, or that has already been consumed,
+    is refused at that fresh read — never from stale content carried here.
+
+    `capsule_id` binds this configuration to exactly one sealed
+    `DecisionCapsule` (Dev 1 review BLOCK, FEEDBACK.2.0 DEMO EXECUTION
+    fix): a caller obtains/constructs the Agent decision, seals that
+    exact capsule, reads back its real `capsule_id`, and only then
+    constructs this object from that id — never the reverse. Any other
+    capsule reaching `SUBMISSION_GATE_PASSED` in the same `run_once()`
+    pass — even one that matches every other field here, the same
+    account, the same EUR/USD MARKET shape, the same risk bounds — is
+    refused before the permit store is even read, let alone consumed.
+    `DecisionCapsule` itself gains no new field for this (no Core
+    schema/journal redesign): the binding lives entirely on this
+    orchestrator-side configuration object, compared against the
+    capsule actually being processed.
+    """
+
+    permit_id: UUID
+    capsule_id: UUID
+    agent_id: UUID | None = None
+    assignment_id: UUID | None = None
+    strategy_artifact_hash: VersionTag | None = None
 
 
 @dataclass(frozen=True)
@@ -244,7 +312,20 @@ class ExecutionOrchestrator:
         worker_id: str = "execution-orchestrator",
         clock: Callable[[], UtcDatetime] = utc_now,
         flatten_close_adapter: FlattenCloseSink | None = None,
+        entry_submission_adapter: EntrySubmissionSink | None = None,
+        canary_permit_store: CanaryPermitStore | None = None,
+        canary_config: CanaryEntrySubmissionConfig | None = None,
     ) -> None:
+        _canary_fields = (entry_submission_adapter, canary_permit_store, canary_config)
+        if any(field is not None for field in _canary_fields) and not all(
+            field is not None for field in _canary_fields
+        ):
+            raise ValueError(
+                "entry_submission_adapter, canary_permit_store and canary_config must be "
+                "given together or not at all -- a partially-configured canary path could "
+                "reach order_send without a permit store to check, or hold a permit "
+                "identity nothing will ever consume"
+            )
         self._config = config
         self._capsules = capsules
         self._requests = requests
@@ -272,6 +353,18 @@ class ExecutionOrchestrator:
         this default alone, independent of `flatten_submission_enabled`.
         A real caller must construct a `FlattenCloseSink` and pass it
         explicitly; nothing here ever constructs one itself."""
+        self._entry_submission_adapter = entry_submission_adapter
+        self._canary_permit_store = canary_permit_store
+        self._canary_config = canary_config
+        """FEEDBACK.2.0 DEMO EXECUTION. All three `None` in every existing
+
+        caller/test — the exact prior behaviour (`_start_submission` is the
+        last thing `_process()` ever does after `SUBMISSION_GATE_PASSED`,
+        `order_send` unreachable) is preserved by this default alone. A
+        real caller must construct all three explicitly and pass them
+        together (enforced above); nothing here ever constructs any of
+        them itself, and nothing here ever selects a permit other than
+        the one exact `canary_config.permit_id` given at construction."""
 
         # Market Universe (ADR-022): a second market must not silently
         # execute against EUR/USD's platform-default risk/execution
@@ -693,15 +786,31 @@ class ExecutionOrchestrator:
                 reason_codes=gate_reason_codes,
             )
 
-        # Core critical path item 3 (review 1.26 §6 / review 1.27 §8):
-        # the gate opened, so the platform now durably commits to
-        # attempting one broker submission. `order_send` is still not
-        # called — see `_start_submission`'s own docstring.
-        submission_event_type = self._start_submission(order_request_id, order, final_now)
-        return ExecutionAttemptOutcome(
-            order_request_id=order_request_id,
-            capsule_id=capsule.capsule_id,
-            event_type=submission_event_type,
+        if self._entry_submission_adapter is None:
+            # Core critical path item 3 (review 1.26 §6 / review 1.27 §8):
+            # the gate opened, so the platform now durably commits to
+            # attempting one broker submission. `order_send` is still not
+            # called — see `_start_submission`'s own docstring. Exact prior
+            # behaviour, unchanged: every existing caller/test constructs
+            # this class with no entry-submission adapter at all.
+            submission_event_type = self._start_submission(order_request_id, order, final_now)
+            return ExecutionAttemptOutcome(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                event_type=submission_event_type,
+            )
+
+        # FEEDBACK.2.0 DEMO EXECUTION: a real entry-submission adapter was
+        # explicitly constructed and injected (never the default) — the one
+        # owner-authorized canary path may now attempt a real order_send,
+        # gated behind its own one-shot permit on top of everything above.
+        return self._attempt_real_entry_submission(
+            order_request_id,
+            capsule,
+            order,
+            intent,
+            observation,
+            final_now,
         )
 
     def _start_submission(
@@ -727,6 +836,150 @@ class ExecutionOrchestrator:
             payload=order.model_dump(mode="json"),
         )
         return ExecutionEventType.SUBMISSION_STARTED
+
+    def _attempt_real_entry_submission(
+        self,
+        order_request_id: UUID,
+        capsule: DecisionCapsule,
+        order: ApprovedOrder,
+        intent: TradeIntent,
+        observation: BrokerStateObservation,
+        now: UtcDatetime,
+    ) -> ExecutionAttemptOutcome:
+        """FEEDBACK.2.0 DEMO EXECUTION — the one owner-authorized canary
+
+        path. Reached only when `self._entry_submission_adapter` (and, by
+        the constructor's own all-or-nothing check, `self
+        ._canary_permit_store`/`self._canary_config` too) were explicitly
+        constructed and injected — never by default.
+
+        Required ordering (owner work order, verbatim; capsule-identity
+        check added by the Dev 1 review BLOCK fix, checked before
+        everything else including the permit store read):
+
+            0. capsule.capsule_id == canary_config.capsule_id
+                                              -- the permit store is not
+                                                 even read otherwise.
+            1. SubmissionGate PASS            -- already true; the only
+                                                  caller of this method.
+            2. Validate exact permit scope    -- `_canary_permit_scope_mismatches`,
+                                                  a fresh, uncached read.
+            3. Begin DB transaction           -- `CanaryPermitStore.transaction()`.
+            4. consume(...) must return CONSUMED.
+            5. append SUBMISSION_STARTED      -- same connection, same transaction.
+            6. commit transaction             -- the `with` block's normal exit.
+            7. only then call real order_send.
+
+        A scope mismatch (including NOT_FOUND/EXPIRED/CAPSULE_MISMATCH,
+        all checked at this fresh read) never opens a transaction at all.
+        `ALREADY_CONSUMED` can only be discovered inside the transaction
+        (`consume()`'s own atomic insert) — checking it beforehand would
+        be a separate, racy read no different from the TOCTOU bug
+        idempotency exists to prevent elsewhere in this module.
+
+        If `consume()` does not return `CONSUMED`, or appending
+        `SUBMISSION_STARTED` itself raises, the `with` block either never
+        wrote anything worth committing or raises — either way `order_send`
+        is never reached and nothing durable survives beyond a harmless,
+        row-less commit or a real rollback (`CanaryPermitStore.transaction()`'s
+        own docstring). Only once that block exits normally with a `CONSUMED`
+        result does `order_send` get called at all.
+
+        A `Mt5CallFailedError` after the durable commitment leaves
+        `SUBMISSION_STARTED` as the last event on purpose — the existing
+        `_recover_ambiguous_submission` (item 6) already owns resolving
+        that state on the next pass; this method does not retry and does
+        not re-raise, so one canary attempt's transport failure cannot
+        abort the rest of this `run_once()` pass.
+        """
+        assert observation.account_state is not None
+        assert self._entry_submission_adapter is not None
+        assert self._canary_permit_store is not None
+        assert self._canary_config is not None
+
+        if capsule.capsule_id != self._canary_config.capsule_id:
+            # Dev 1 review BLOCK fix: any other capsule reaching this
+            # method -- even one that matches every other scope leg below
+            # -- is refused here, before the permit store is ever read,
+            # let alone consumed. This is the one check in this method
+            # that needs no permit read and no fresh account observation:
+            # it compares two already-known identities.
+            return self._refuse(
+                order_request_id,
+                capsule,
+                ExecutionEventType.CANARY_PERMIT_BLOCKED,
+                (ReasonCode.CANARY_PERMIT_CAPSULE_MISMATCH,),
+                now,
+            )
+
+        permit = self._canary_permit_store.permit_for(self._canary_config.permit_id)
+        mismatches = _canary_permit_scope_mismatches(
+            permit,
+            account=observation.account_state,
+            canonical_symbol=self._canonical_symbol,
+            order=order,
+            intent=intent,
+            canary_config=self._canary_config,
+            now=now,
+        )
+        if mismatches:
+            return self._refuse(
+                order_request_id,
+                capsule,
+                ExecutionEventType.CANARY_PERMIT_BLOCKED,
+                mismatches,
+                now,
+            )
+        assert permit is not None  # narrowed: no mismatch reason means the permit exists
+
+        consumed = False
+        with self._canary_permit_store.transaction() as connection:
+            consume_result = self._canary_permit_store.consume(
+                permit.permit_id,
+                order_request_id=order_request_id,
+                now=now,
+                connection=connection,
+            )
+            if consume_result.outcome is CanaryPermitConsumeOutcome.CONSUMED:
+                self._events.append(
+                    order_request_id=order_request_id,
+                    event_type=ExecutionEventType.SUBMISSION_STARTED,
+                    occurred_at_utc=now,
+                    payload=order.model_dump(mode="json"),
+                    connection=connection,
+                )
+                consumed = True
+
+        if not consumed:
+            return self._refuse(
+                order_request_id,
+                capsule,
+                ExecutionEventType.CANARY_PERMIT_BLOCKED,
+                (ReasonCode.CANARY_PERMIT_ALREADY_CONSUMED,),
+                now,
+            )
+
+        try:
+            result = self._entry_submission_adapter.order_send(order)
+        except Mt5CallFailedError as error:
+            _log.error(
+                "execution.entry_submission_transport_failed",
+                order_request_id=str(order_request_id),
+                error=str(error),
+            )
+            return ExecutionAttemptOutcome(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                event_type=ExecutionEventType.SUBMISSION_STARTED,
+            )
+
+        event_type, payload = normalize_execution_result(result)
+        self._append(order_request_id, event_type, self._clock(), payload=payload)
+        return ExecutionAttemptOutcome(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            event_type=event_type,
+        )
 
     def _recover_ambiguous_submission(
         self, order_request_id: UUID, capsule: DecisionCapsule
@@ -1758,3 +2011,51 @@ def _is_intent_time_approved(capsule: DecisionCapsule) -> bool:
         and capsule.supervisor_decision is not None
         and capsule.supervisor_decision.verdict is SupervisorVerdict.APPROVE
     )
+
+
+def _canary_permit_scope_mismatches(
+    permit: CanaryPermit | None,
+    *,
+    account: AccountState,
+    canonical_symbol: str,
+    order: ApprovedOrder,
+    intent: TradeIntent,
+    canary_config: CanaryEntrySubmissionConfig,
+    now: UtcDatetime,
+) -> tuple[ReasonCode, ...]:
+    """FEEDBACK.2.0 DEMO EXECUTION: every reason the one explicitly
+
+    injected `canary_config.permit_id` may not authorize this exact
+    request, right now. Pure — no I/O, no DB write, mirrors
+    `evaluate_submission_gate`'s own "collect every failing reason, never
+    short-circuit" philosophy so an operator sees every closed leg at
+    once. Never checks `ALREADY_CONSUMED` — that can only be discovered
+    by `CanaryPermitStore.consume()`'s own atomic insert, inside the
+    transaction this function's caller opens only when this returns
+    empty (see `ExecutionOrchestrator._attempt_real_entry_submission`'s
+    own docstring for why a separate prior read here would be racy).
+    """
+    if permit is None:
+        return (ReasonCode.CANARY_PERMIT_NOT_FOUND,)
+
+    reasons: list[ReasonCode] = []
+    if now > permit.valid_until_utc:
+        reasons.append(ReasonCode.CANARY_PERMIT_EXPIRED)
+    if permit.approved_account_ref != account.login_hash:
+        reasons.append(ReasonCode.CANARY_PERMIT_ACCOUNT_MISMATCH)
+    if permit.expected_server != account.server:
+        reasons.append(ReasonCode.CANARY_PERMIT_SERVER_MISMATCH)
+    if permit.canonical_symbol != canonical_symbol:
+        reasons.append(ReasonCode.CANARY_PERMIT_SYMBOL_MISMATCH)
+    if permit.entry_type != order.entry_type:
+        reasons.append(ReasonCode.CANARY_PERMIT_ENTRY_TYPE_MISMATCH)
+    if permit.agent_id != canary_config.agent_id:
+        reasons.append(ReasonCode.CANARY_PERMIT_AGENT_MISMATCH)
+    if permit.assignment_id != canary_config.assignment_id:
+        reasons.append(ReasonCode.CANARY_PERMIT_ASSIGNMENT_MISMATCH)
+    if permit.strategy_artifact_hash != canary_config.strategy_artifact_hash:
+        reasons.append(ReasonCode.CANARY_PERMIT_STRATEGY_ARTIFACT_MISMATCH)
+    assert intent.requested_risk_fraction is not None  # a directional intent always sets this
+    if intent.requested_risk_fraction > permit.max_requested_risk_fraction:
+        reasons.append(ReasonCode.CANARY_PERMIT_RISK_FRACTION_EXCEEDED)
+    return tuple(reasons)

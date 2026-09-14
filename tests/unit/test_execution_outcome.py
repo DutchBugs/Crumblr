@@ -115,19 +115,40 @@ class TestNormalizeExecutionResult:
             normalize_execution_result(result)
 
 
-class TestNotWiredIntoTheOrchestrator:
-    def test_execution_orchestrator_never_references_normalize_execution_result(self) -> None:
-        """Phase B item B3's own scope decision: this function exists,
+class TestNowWiredIntoTheOrchestratorButOnlyBehindTheCanaryPath:
+    def test_execution_orchestrator_now_references_normalize_execution_result(self) -> None:
+        """Superseded by FEEDBACK.2.0 DEMO EXECUTION: `_attempt_real_entry_submission`
 
-        fully real and tested, but nothing in `ExecutionOrchestrator`'s
-        own code calls it — wiring it in is deferred until Phase
-        C/AG-012 exists. Mirrors `test_demo_order_send_gateway.py
-        ::TestNotWiredIntoTheOrchestrator`'s own `inspect.getsource`
-        idiom.
+        (reached only when a caller explicitly constructs and injects an
+        `EntrySubmissionSink`/`CanaryPermitStore`/`CanaryEntrySubmissionConfig`
+        — never by default) now calls this function to normalize a real
+        `order_send` response into a durable `FILLED`/`REJECTED` event.
+        This test's own premise ("nothing in `ExecutionOrchestrator` calls
+        it") is exactly what this wiring changed — updated to assert the
+        new true invariant rather than silently dropped, the same
+        transparency `TestNotWiredIntoTheOrchestrator` below still
+        provides for the concrete demo gateway class itself, which this
+        module still never names."""
+        import inspect
+
+        from crumblr.application import execution
+
+        source = inspect.getsource(execution)
+        assert "normalize_execution_result" in source
+
+
+class TestNotWiredIntoTheOrchestrator:
+    def test_execution_orchestrator_never_names_the_concrete_demo_gateway(self) -> None:
+        """`normalize_execution_result` is now reachable (see the class
+
+        above), but the concrete `DemoOrderSendMt5Gateway` class itself is
+        still never named here — only the narrow `EntrySubmissionSink`
+        Protocol is. Mirrors `test_demo_order_send_gateway.py
+        ::TestNotWiredIntoTheOrchestrator`'s own `inspect.getsource` idiom.
         """
         import inspect
 
         from crumblr.application import execution
 
         source = inspect.getsource(execution)
-        assert "normalize_execution_result" not in source
+        assert "DemoOrderSendMt5Gateway" not in source

@@ -63,6 +63,7 @@ _EXPOSURE_BY_EVENT: Mapping[ExecutionEventType, _Exposure] = {
     ExecutionEventType.ORDER_CHECK_REJECTED: _Exposure.NONE,
     ExecutionEventType.SUBMISSION_GATE_PASSED: _Exposure.NONE,
     ExecutionEventType.SUBMISSION_GATE_BLOCKED: _Exposure.NONE,
+    ExecutionEventType.CANARY_PERMIT_BLOCKED: _Exposure.NONE,
     ExecutionEventType.SUBMISSION_STARTED: _Exposure.UNDETERMINED,
     ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED: _Exposure.DETERMINED,
     ExecutionEventType.RECONCILED: _Exposure.NOT_EXPOSURE_RELEVANT,

@@ -14,6 +14,8 @@ per permit, and the database itself — not application logic — is what makes
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -64,6 +66,22 @@ class CanaryPermitConsumeResult:
 class CanaryPermitStore:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    @contextmanager
+    def transaction(self) -> Iterator[Connection]:
+        """One shared transaction spanning `consume()` and a caller's own
+
+        write(s) against a different table (`application/execution.py
+        ::ExecutionOrchestrator`'s permit-consumption + `SUBMISSION_STARTED`
+        commitment, FEEDBACK.2.0 DEMO EXECUTION) — mirrors
+        `persistence/agent_gateway.py
+        ::PostgresAgentDecisionOutcomeStore.transaction()` exactly. Commits
+        on normal exit, rolls back on any exception raised inside the
+        `with` block, so a failure appending the caller's own event undoes
+        the permit consumption too.
+        """
+        with self._engine.begin() as connection:
+            yield connection
 
     def issue(self, permit: CanaryPermit, *, connection: Connection | None = None) -> AppendResult:
         if connection is not None:

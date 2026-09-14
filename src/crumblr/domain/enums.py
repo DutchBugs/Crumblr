@@ -434,6 +434,76 @@ class ReasonCode(StrEnum):
 
     is `False` — `feedback.2.0.md` has not given its GO yet."""
 
+    # FEEDBACK.2.0 DEMO EXECUTION (Phase B item B8/B2): the one-shot canary
+    # permit's own scope validation, evaluated *after* `SubmissionGate`
+    # already opened — a real broker submission on the canary path requires
+    # both. Every one of these is a refusal to consume the permit / start a
+    # real `order_send`, never a HALT — an operator can simply issue a
+    # fresh, correctly-scoped permit and retry.
+    CANARY_PERMIT_CAPSULE_MISMATCH = "CANARY_PERMIT_CAPSULE_MISMATCH"
+    """Dev 1 review BLOCK fix: the capsule reaching `SUBMISSION_GATE_PASSED`
+
+    is not the exact `DecisionCapsule` `CanaryEntrySubmissionConfig
+    .capsule_id` names. Checked first, before the permit store is even
+    read — any other capsule, even one that matches every other scope
+    leg below (same account, same EUR/USD MARKET shape, same risk
+    bounds), can never consume the permit or reach `order_send`."""
+
+    CANARY_PERMIT_NOT_FOUND = "CANARY_PERMIT_NOT_FOUND"
+    """The configured `permit_id` names no row in `canary_permits` at all —
+
+    never auto-selected, so this is the honest answer when the one
+    explicitly injected id simply does not exist (yet, or ever)."""
+
+    CANARY_PERMIT_EXPIRED = "CANARY_PERMIT_EXPIRED"
+    """`now` is past the permit's own `valid_until_utc`."""
+
+    CANARY_PERMIT_ALREADY_CONSUMED = "CANARY_PERMIT_ALREADY_CONSUMED"
+    """`CanaryPermitStore.consume()`'s atomic insert lost — a different
+
+    `order_request_id` already holds the one-shot consumption row for
+    this permit. Discovered only inside the permit-consumption
+    transaction (never by a separate racy read beforehand)."""
+
+    CANARY_PERMIT_ACCOUNT_MISMATCH = "CANARY_PERMIT_ACCOUNT_MISMATCH"
+    """The permit's `approved_account_ref` does not equal the currently
+
+    connected account's `login_hash`."""
+
+    CANARY_PERMIT_SERVER_MISMATCH = "CANARY_PERMIT_SERVER_MISMATCH"
+    """The permit's `expected_server` does not equal the currently connected
+
+    account's `server`."""
+
+    CANARY_PERMIT_SYMBOL_MISMATCH = "CANARY_PERMIT_SYMBOL_MISMATCH"
+    """The permit's `canonical_symbol` does not equal this worker's own
+
+    `canonical_symbol` — a permit issued for one market can never
+    authorize a submission on another."""
+
+    CANARY_PERMIT_ENTRY_TYPE_MISMATCH = "CANARY_PERMIT_ENTRY_TYPE_MISMATCH"
+    """The permit's `entry_type` does not equal the `ApprovedOrder`'s own
+
+    `entry_type` (the first canary is MARKET-only)."""
+
+    CANARY_PERMIT_AGENT_MISMATCH = "CANARY_PERMIT_AGENT_MISMATCH"
+    """The permit's `agent_id` does not equal the one fixed onto this
+
+    canary run's own configuration (`None` on both sides is a match — an
+    internal-strategy canary binds no agent identity at all)."""
+
+    CANARY_PERMIT_ASSIGNMENT_MISMATCH = "CANARY_PERMIT_ASSIGNMENT_MISMATCH"
+    """Same check as `CANARY_PERMIT_AGENT_MISMATCH`, for `assignment_id`."""
+
+    CANARY_PERMIT_STRATEGY_ARTIFACT_MISMATCH = "CANARY_PERMIT_STRATEGY_ARTIFACT_MISMATCH"
+    """Same check as `CANARY_PERMIT_AGENT_MISMATCH`, for `strategy_artifact_hash`."""
+
+    CANARY_PERMIT_RISK_FRACTION_EXCEEDED = "CANARY_PERMIT_RISK_FRACTION_EXCEEDED"
+    """The intent's own `requested_risk_fraction` exceeds the permit's
+
+    `max_requested_risk_fraction` — the owner-chosen cap for this one
+    attempt, never inferred from `RiskConfig.max_risk_per_trade`."""
+
     # Core critical path item 7 — `risk/flatten_gate.py`.
     POSITION_BOOK_INCOMPLETE = "POSITION_BOOK_INCOMPLETE"
     """`FlattenGate`: the position snapshot this pass observed is not
@@ -697,6 +767,19 @@ class ExecutionEventType(StrEnum):
     was never ambiguous, so naming it that way would misdescribe what
     actually happened. Exposure meaning is unconditionally zero — see
     `application/expected_state.py::_EXPOSURE_BY_EVENT`."""
+
+    CANARY_PERMIT_BLOCKED = "CANARY_PERMIT_BLOCKED"
+    """FEEDBACK.2.0 DEMO EXECUTION (Phase B item B8/B2): appended when
+
+    `SubmissionGate` opened but the one explicitly injected one-shot
+    canary permit does not exist, is expired, is already consumed, or
+    does not exactly match this request's own account/server/symbol/
+    entry-type/agent/assignment/StrategyArtifact/risk-fraction scope
+    (`ReasonCode.CANARY_PERMIT_*`). A refusal to consume the permit or
+    start a real submission — never a HALT, and never itself a decision
+    to retry. Carries the complete failing reason set, never only the
+    first, matching `SUBMISSION_GATE_BLOCKED`'s own "show every closed
+    leg" philosophy."""
 
 
 class FlattenEventType(StrEnum):

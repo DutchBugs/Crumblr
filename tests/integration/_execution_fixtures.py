@@ -12,10 +12,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import UUID, uuid4
 
 from sqlalchemy import Engine
 
-from crumblr.application.execution import ExecutionOrchestrator, FlattenCloseSink
+from crumblr.application.execution import (
+    CanaryEntrySubmissionConfig,
+    EntrySubmissionSink,
+    ExecutionOrchestrator,
+    FlattenCloseSink,
+)
 from crumblr.config import (
     AccountGuardConfig,
     ExecutionConfig,
@@ -28,10 +34,11 @@ from crumblr.config import (
 )
 from crumblr.domain.enums import AssetClass, Environment, OrderState
 from crumblr.domain.hashing import fingerprint
-from crumblr.domain.models import ExecutionResult, FlattenInstruction, InstrumentSpec
-from crumblr.mt5_gateway.client import Mt5Client, Mt5Credentials
+from crumblr.domain.models import ApprovedOrder, ExecutionResult, FlattenInstruction, InstrumentSpec
+from crumblr.mt5_gateway.client import Mt5CallFailedError, Mt5Client, Mt5Credentials
 from crumblr.mt5_gateway.execution import OrderCheckMt5Gateway
 from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.canary_permit import CanaryPermitStore
 from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
 from crumblr.persistence.flatten import FlattenEventStore, FlattenRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
@@ -316,6 +323,81 @@ class FakeFlattenCloseSink:
         )
 
 
+class FakeEntrySubmissionSink:
+    """A fake `EntrySubmissionSink` (FEEDBACK.2.0 DEMO EXECUTION) — proves
+
+    the canary-permit wiring end to end without a real MT5 terminal.
+    Configurable to return a fixed `state` (`FILLED`/`PARTIALLY_FILLED`/
+    `REJECTED`) or to raise `Mt5CallFailedError` (the transport-failure
+    path `_attempt_real_entry_submission` explicitly recovers from without
+    re-raising). `order_send_calls` proves a test's own "exactly one call"
+    assertion is watching the real call count, not merely the outcome.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: OrderState = OrderState.FILLED,
+        raise_transport_error: bool = False,
+    ) -> None:
+        self.state = state
+        self.raise_transport_error = raise_transport_error
+        self.order_send_calls = 0
+        self.orders_received: list[ApprovedOrder] = []
+
+    def order_send(self, order: ApprovedOrder) -> ExecutionResult:
+        self.order_send_calls += 1
+        self.orders_received.append(order)
+        if self.raise_transport_error:
+            raise Mt5CallFailedError("order_send", 10004, "simulated requote/timeout")
+        return ExecutionResult(
+            execution_id=uuid4(),
+            order_request_id=order.order_request_id,
+            intent_id=order.intent_id,
+            state=self.state,
+            mt5_order_ticket=555001 if self.state is not OrderState.REJECTED else None,
+            mt5_deal_ticket=555002 if self.state is not OrderState.REJECTED else None,
+            retcode=10009 if self.state is not OrderState.REJECTED else 10006,
+            requested_price=order.price,
+            executed_price=order.price,
+            requested_volume=order.volume,
+            executed_volume=order.volume if self.state is not OrderState.REJECTED else None,
+        )
+
+
+def canary_permit(
+    *,
+    permit_id: UUID | None = None,
+    approved_account_ref: str = APPROVED_CANARY_ACCOUNT_REF,
+    expected_server: str = SERVER,
+    canonical_symbol: str = "EUR/USD",
+    entry_type: str = "MARKET",
+    agent_id: UUID | None = None,
+    assignment_id: UUID | None = None,
+    strategy_artifact_hash: str | None = None,
+    max_requested_risk_fraction: str = "0.01",
+    valid_until_utc: datetime | None = None,
+) -> Any:
+    from crumblr.domain.enums import EntryType
+    from crumblr.domain.models import CanaryPermit
+
+    return CanaryPermit(
+        permit_id=permit_id or uuid4(),
+        approved_account_ref=approved_account_ref,
+        expected_server=expected_server,
+        canonical_symbol=canonical_symbol,
+        entry_type=EntryType(entry_type),
+        agent_id=agent_id,
+        assignment_id=assignment_id,
+        strategy_artifact_hash=strategy_artifact_hash,
+        max_requested_risk_fraction=Decimal(max_requested_risk_fraction),
+        issued_by="test-operator",
+        reason="integration test canary permit",
+        issued_at_utc=FIXED_NOW - timedelta(minutes=5),
+        valid_until_utc=valid_until_utc or (FIXED_NOW + timedelta(hours=1)),
+    )
+
+
 def guard() -> AccountGuardConfig:
     return AccountGuardConfig.model_validate(
         {
@@ -421,6 +503,9 @@ def orchestrator(
     kill_switch: KillSwitch | None = None,
     flatten_close_adapter: FlattenCloseSink | None = None,
     risk_ledger_lock: Any = None,
+    entry_submission_adapter: EntrySubmissionSink | None = None,
+    canary_permit_store: CanaryPermitStore | None = None,
+    canary_config: CanaryEntrySubmissionConfig | None = None,
 ) -> ExecutionOrchestrator:
     client = Mt5Client(fake)
     client.connect(Mt5Credentials(login=LOGIN, password="x", server=SERVER))
@@ -446,4 +531,7 @@ def orchestrator(
         worker_id="test-worker",
         clock=clock or (lambda: FIXED_NOW + timedelta(seconds=1)),
         flatten_close_adapter=flatten_close_adapter,
+        entry_submission_adapter=entry_submission_adapter,
+        canary_permit_store=canary_permit_store,
+        canary_config=canary_config,
     )

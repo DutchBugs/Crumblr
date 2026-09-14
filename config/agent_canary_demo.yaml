@@ -1,0 +1,42 @@
+# FEEDBACK.2.0 DEMO EXECUTION canary overlay (Phase B item B7/B8).
+#
+# NOT auto-loaded by crumblr.config.load_config() -- that function only
+# ever merges base.yaml + <environment>.yaml (config.py::load_config's own
+# docstring). This file is read and applied explicitly, only by
+# scripts/agent_canary_execution.py, only when an operator passes
+# --canary-permit-id -- never picked up by paper_lite.py, live_decision.py,
+# host_supervisor.ps1, or any other consumer of config/paper.yaml.
+#
+# Every value here is one of the four owner-approval fields F-049's
+# SubmissionGate reads (config.py::ExecutionConfig's own docstrings), plus
+# the risk-config-version approval F-049 also requires. Flipping any of
+# these is a deliberate, git-reviewed act -- exactly what this file's
+# existence, on a separate reviewed branch, is.
+#
+# approved_config_version must equal config/paper.yaml's own real
+# PlatformConfig.config_version -- computed live against the real shipped
+# config, 2026-09-14 (uv run python -c "from crumblr.config import
+# load_config; from crumblr.domain.enums import Environment; from pathlib
+# import Path; print(load_config(Environment.PAPER,
+# config_dir=Path('config')).config_version)"), not typed from memory.
+# ExecutionConfig/RiskConfig.config_version's own hash computation
+# deliberately excludes every field this file sets (config.py's own
+# docstring, "approving this exact version does not change it") so setting
+# these overrides never invalidates the very version they approve.
+risk:
+  approved_config_version: 0f92d6418858ecfbfc7072acdfb9a06a04dff8207e77d95797467f1c5291acba
+
+execution:
+  submission_enabled: true
+  feedback_2_0_approved: true
+  # fingerprint({"login": <the real MT5 account login>, "server":
+  # "PepperstoneUK-Demo"})[:16] -- the real PepperstoneUK-Demo account
+  # probed this session (var/stage_c_probe.sanitized.json). The raw login
+  # number is never written here or anywhere else in git -- only this
+  # non-secret, non-reversible fingerprint, matching AccountState
+  # .login_hash exactly.
+  approved_canary_account_ref: 4f857e6a72f9ad30
+  # flatten_submission_enabled is deliberately absent -- omitting it keeps
+  # the platform default (false) rather than restating it, so this file
+  # can never be the place that silently turns on automatic flatten
+  # submission alongside canary entry submission.
