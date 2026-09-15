@@ -115,11 +115,14 @@ def build_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, An
     (`ApprovedOrder.magic_number`).
 
     ICT LIMIT DEMO EXECUTION (Slice 1): `entry_type` decides the trade
-    action and order-type constant — `MARKET` is `TRADE_ACTION_DEAL` with
-    an immediate BUY/SELL type, unchanged from before this slice; `LIMIT`
-    is `TRADE_ACTION_PENDING` with a BUY_LIMIT/SELL_LIMIT type, and never
+    action, order-type constant, and filling mode — `MARKET` is
+    `TRADE_ACTION_DEAL` with an immediate BUY/SELL type and
+    `ORDER_FILLING_IOC`, unchanged from before this slice; `LIMIT` is
+    `TRADE_ACTION_PENDING` with a BUY_LIMIT/SELL_LIMIT type and
+    `ORDER_FILLING_RETURN` (Dev 1 review: `IOC` is a MARKET-fill
+    immediacy semantic a resting pending order does not share), and never
     carries `deviation` (a market-fill slippage-tolerance concept a
-    resting pending order has no use for). Any other `entry_type`
+    resting pending order has no use for either). Any other `entry_type`
     (`STOP`) is refused here — a deliberate, separate scope decision, not
     a silent fallthrough. `price` (required for a non-MARKET order by
     `ApprovedOrder`'s own validator, optional and normally absent for
@@ -128,9 +131,11 @@ def build_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, An
     if order.entry_type is EntryType.MARKET:
         action = module.TRADE_ACTION_DEAL
         order_type_constant = _MARKET_ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+        filling_mode = module.ORDER_FILLING_IOC
     elif order.entry_type is EntryType.LIMIT:
         action = module.TRADE_ACTION_PENDING
         order_type_constant = _LIMIT_ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+        filling_mode = module.ORDER_FILLING_RETURN
     else:
         raise ValueError(
             f"{order.entry_type} orders are not supported: ICT LIMIT DEMO EXECUTION "
@@ -148,7 +153,7 @@ def build_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, An
         "magic": order.magic_number,
         "sl": float(order.stop_loss_price),
         "type_time": module.ORDER_TIME_GTC,
-        "type_filling": module.ORDER_FILLING_IOC,
+        "type_filling": filling_mode,
     }
     if order.entry_type is EntryType.MARKET:
         request["deviation"] = order.max_slippage_points

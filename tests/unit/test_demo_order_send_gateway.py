@@ -148,6 +148,7 @@ class FakeMt5:
     ORDER_TYPE_SELL = 1
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
+    ORDER_FILLING_RETURN = 2
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
     TRADE_ACTION_PENDING = 5
@@ -435,6 +436,17 @@ class TestOrderSendLimit:
         assert sent["type"] == FakeMt5.ORDER_TYPE_BUY_LIMIT
         assert sent["price"] == pytest.approx(1.08000)
         assert "deviation" not in sent
+        # Dev 1 review: a resting pending order uses ORDER_FILLING_RETURN,
+        # never the MARKET-fill-only ORDER_FILLING_IOC.
+        assert sent["type_filling"] == FakeMt5.ORDER_FILLING_RETURN
+
+    def test_a_market_order_send_still_uses_ioc_filling_unchanged(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+
+        gate.order_send(approved_order())
+
+        assert fake.order_send_requests[0]["type_filling"] == FakeMt5.ORDER_FILLING_IOC
 
     def test_a_successful_placement_decodes_as_submitted(self) -> None:
         fake = FakeMt5(

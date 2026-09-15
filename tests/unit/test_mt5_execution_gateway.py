@@ -98,6 +98,7 @@ class FakeMt5:
     ORDER_TYPE_SELL = 1
     ORDER_TIME_GTC = 0
     ORDER_FILLING_IOC = 1
+    ORDER_FILLING_RETURN = 2
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
     TRADE_ACTION_PENDING = 5
@@ -351,6 +352,37 @@ class TestOrderCheckLimitRequests:
         gate.order_check(order)
 
         assert fake.order_check_requests[0]["deviation"] == order.max_slippage_points
+
+    def test_a_market_request_uses_ioc_filling_unchanged(self) -> None:
+        """Dev 1 review: MARKET must remain exactly as today with IOC."""
+        fake = FakeMt5()
+        gate = gateway(fake)
+
+        gate.order_check(approved_order())
+
+        assert fake.order_check_requests[0]["type_filling"] == FakeMt5.ORDER_FILLING_IOC
+
+    def test_a_limit_request_uses_return_filling_not_ioc(self) -> None:
+        """Dev 1 review: a resting pending order uses ORDER_FILLING_RETURN,
+
+        never IOC -- IOC is a MARKET-fill immediacy semantic a pending
+        order does not share.
+        """
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(
+            entry_type=EntryType.LIMIT,
+            side=Side.BUY,
+            price="1.08000",
+            stop_loss_price="1.07800",
+            take_profit_price="1.08400",
+        )
+
+        gate.order_check(order)
+
+        request = fake.order_check_requests[0]
+        assert request["type_filling"] == FakeMt5.ORDER_FILLING_RETURN
+        assert request["type_filling"] != FakeMt5.ORDER_FILLING_IOC
 
     def test_a_stop_entry_type_is_refused_not_silently_mis_built(self) -> None:
         """ICT LIMIT DEMO EXECUTION Slice 1 adds LIMIT only -- STOP stays a

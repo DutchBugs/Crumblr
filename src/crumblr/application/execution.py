@@ -1944,19 +1944,29 @@ class ExecutionOrchestrator:
 
         FILLED resolver. For every request whose last durable event is
         `SUBMITTED` (a real, resting pending order this platform placed),
-        checks whether a broker position matching this request's own
-        `mt5_magic_number` now exists. If exactly one does, the pending
-        order has triggered and filled — appends `FILLED` durably,
-        attributing that exact position (the payload shape
-        `_recover_ambiguous_submission`'s own fill-detection already
-        uses). If none does, the order is still resting or has otherwise
-        left the book (cancelled, expired, broker-side rejected) — this
-        deliberately does nothing in either case; disambiguating "still
-        resting" from "gone, and why" needs `history_orders_get()`
-        (unused anywhere in this platform today) and is Slice 2's own,
-        separate mechanism. More than one matching position is the same
-        integrity ambiguity `_recover_ambiguous_submission` already
-        treats it as, handled identically here.
+        recovers the broker pending-order ticket that event's own payload
+        recorded (`mt5_order_ticket`, from the real `TRADE_RETCODE_PLACED`
+        response) and checks a fresh `pending_orders()` read for it.
+
+        **Never appends `FILLED` while that exact pending ticket is still
+        resting** — even if a position sharing this request's magic
+        already exists. Two real submissions from the same platform run
+        can share a magic-adjacent coincidence far less plausibly than a
+        still-open pending order can coexist with an unrelated position;
+        the durable, broker-confirmed pending-order id is the authority
+        here, not the magic search alone. `FILLED` is appended, and that
+        exact position attributed, only once the submitted ticket is no
+        longer resting *and* exactly one position matches the request's
+        magic. If neither the ticket's own payload nor a fresh
+        `pending_orders()` read can establish it is genuinely gone, or if
+        it is gone but zero positions match, this deliberately does
+        nothing — still resting, or gone for a reason this minimal
+        resolver cannot yet name (cancelled, expired, broker-side
+        rejected — `history_orders_get()`, unused anywhere in this
+        platform today, is Slice 2's own, separate mechanism). More than
+        one matching position is the same integrity ambiguity
+        `_recover_ambiguous_submission` already treats it as, handled
+        identically here.
 
         Never calls `order_send`/`close_position`/`cancel_pending_order` —
         read-only broker observation and a durable append, the same
@@ -1973,12 +1983,28 @@ class ExecutionOrchestrator:
 
         now = self._clock()
         positions = self._adapter.positions()
+        pending_orders = self._adapter.pending_orders()
         outcomes: list[PendingResolutionOutcome] = []
         for order_request_id in submitted_ids:
             events = self._events.events_for(order_request_id)
             if not events or events[-1].event_type is not ExecutionEventType.SUBMITTED:
                 # Already resolved further by an earlier pass -- nothing
                 # left for this one to determine.
+                continue
+
+            submitted_payload = events[-1].payload
+            raw_ticket = submitted_payload.get("mt5_order_ticket") if submitted_payload else None
+            if raw_ticket is None:
+                # Cannot safely establish which pending order this request
+                # placed -- never guess from magic alone. Left unresolved.
+                continue
+            submitted_ticket = int(raw_ticket)
+
+            still_resting = any(order.order_id == submitted_ticket for order in pending_orders)
+            if still_resting:
+                # The exact broker-confirmed pending ticket is still on
+                # the book -- never FILLED yet, whatever else might share
+                # this request's magic.
                 continue
 
             magic = mt5_magic_number(order_request_id)
@@ -2013,6 +2039,7 @@ class ExecutionOrchestrator:
                     now,
                     payload={
                         "resolved_from": ExecutionEventType.SUBMITTED.value,
+                        "submitted_pending_order_id": submitted_ticket,
                         "ticket": position.ticket,
                         "broker_symbol": position.broker_symbol,
                         "side": position.side.value,
@@ -2029,8 +2056,9 @@ class ExecutionOrchestrator:
                         ticket=position.ticket,
                     )
                 )
-            # len(matches) == 0: still resting, or gone for a reason this
-            # minimal resolver cannot yet name -- Slice 2's job.
+            # len(matches) == 0: the pending ticket is gone but no position
+            # matches either -- gone for a reason this minimal resolver
+            # cannot yet name. Slice 2's job.
         return tuple(outcomes)
 
     def _evaluate_submission_readiness(

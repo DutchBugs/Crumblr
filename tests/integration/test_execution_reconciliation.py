@@ -27,6 +27,7 @@ from tests.conftest import FIXED_NOW
 from tests.integration._execution_fixtures import (
     APPROVED_CANARY_ACCOUNT_REF,
     FakeMt5,
+    fake_pending_order,
     fake_position,
     orchestrator,
     platform_config,
@@ -394,6 +395,55 @@ class TestResolvePendingOnce:
         assert outcomes == ()
         events = ExecutionEventStore(engine).events_for(order_request_id)
         assert events[-1].event_type == ExecutionEventType.SUBMITTED
+
+    def test_the_submitted_pending_ticket_still_resting_blocks_filled_even_with_a_position_match(
+        self, engine: Engine
+    ) -> None:
+        """Dev 1 review, the exact regression this fix closes: a position
+
+        sharing this request's magic must never be enough on its own. The
+        durable `SUBMITTED` event recorded pending-order ticket 800001 —
+        as long as that exact ticket is still resting, `FILLED` must not
+        be appended, whatever else shares the magic.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        magic = mt5_magic_number(order_request_id)
+        fake = FakeMt5()
+        fake.open_pending_orders = (fake_pending_order(magic=magic, ticket=800001),)
+        fake.open_positions = (fake_position(magic=magic, ticket=900042),)
+
+        outcomes = orch_resolve(engine, config, fake)
+
+        assert outcomes == ()
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        assert events[-1].event_type == ExecutionEventType.SUBMITTED
+
+    def test_the_pending_ticket_no_longer_resting_with_a_position_match_resolves_to_filled(
+        self, engine: Engine
+    ) -> None:
+        """Once the exact submitted ticket (800001) is confirmed gone from
+
+        `pending_orders()`, the existing magic-based position match
+        resolves normally."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        magic = mt5_magic_number(order_request_id)
+        fake = FakeMt5()
+        fake.open_pending_orders = ()  # ticket 800001 no longer resting
+        fake.open_positions = (fake_position(magic=magic, ticket=900042),)
+
+        outcomes = orch_resolve(engine, config, fake)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.FILLED
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        assert events[-1].payload is not None
+        assert events[-1].payload["submitted_pending_order_id"] == 800001
 
     def test_two_matching_positions_is_an_integrity_ambiguity(self, engine: Engine) -> None:
         the_spec = spec()

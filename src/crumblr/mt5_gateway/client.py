@@ -89,6 +89,11 @@ class Mt5Module(Protocol):
     TRADE_ACTION_PENDING: int
     ORDER_TYPE_BUY_LIMIT: int
     ORDER_TYPE_SELL_LIMIT: int
+    # A pending order's own filling-mode constant, distinct from
+    # ORDER_FILLING_IOC (Dev 1 review, ICT LIMIT DEMO EXECUTION Slice 1):
+    # IOC is a MARKET-fill immediacy semantic; a resting pending order
+    # uses ORDER_FILLING_RETURN instead.
+    ORDER_FILLING_RETURN: int
     # order_send result constant: a pending order was successfully placed
     # on the broker's book (not yet filled) -- distinct from
     # TRADE_RETCODE_DONE, which means an immediate MARKET fill.
