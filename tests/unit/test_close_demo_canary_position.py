@@ -14,13 +14,15 @@ from uuid import UUID, uuid4
 
 from scripts.close_demo_canary_position import (
     _build_close_instruction,
+    _decide_outcome,
     _find_target_position,
     _verify_target_position,
 )
 
-from crumblr.domain.enums import Side
+from crumblr.domain.enums import OrderState, Side
 from crumblr.domain.hashing import mt5_magic_number
-from crumblr.domain.models import PositionState
+from crumblr.domain.models import ExecutionResult, PositionState
+from crumblr.mt5_gateway.client import Mt5CallFailedError
 
 _NOW = datetime(2026, 9, 15, 9, 38, 23, tzinfo=UTC)
 _ORDER_REQUEST_ID = UUID("e845ddac-028e-5bf7-9f86-785119674752")
@@ -159,3 +161,74 @@ class TestBuildCloseInstruction:
         second = _build_close_instruction(position)
         assert first.flatten_request_id != second.flatten_request_id
         assert isinstance(first.flatten_request_id, type(uuid4()))
+
+
+def _execution_result(*, state: OrderState) -> ExecutionResult:
+    return ExecutionResult(execution_id=uuid4(), order_request_id=uuid4(), state=state)
+
+
+def _transport_error() -> Mt5CallFailedError:
+    return Mt5CallFailedError("close_position", 1, "no reply from terminal")
+
+
+class TestDecideOutcome:
+    """The one-shot close's PASS/BLOCKED verdict must come from the fresh
+
+    post-close readback, never from the close response alone -- and a
+    transport-ambiguous close must never report PASS/0, however flat that
+    readback happens to look (review: EXPLICIT CLOSE RUNNER -- ONE REVIEW
+    BLOCKER).
+    """
+
+    def test_confirmed_filled_plus_flat_readback_is_pass(self) -> None:
+        code, message = _decide_outcome(
+            _execution_result(state=OrderState.FILLED), None, readback_flat=True
+        )
+        assert code == 0
+        assert "PASS" in message
+
+    def test_confirmed_filled_but_readback_not_flat_is_blocked(self) -> None:
+        """A confirmed FILLED response is not enough on its own -- if the
+
+        fresh readback still shows the ticket open (or the symbol not
+        flat, or an opposite position), this must not report PASS.
+        """
+        code, message = _decide_outcome(
+            _execution_result(state=OrderState.FILLED), None, readback_flat=False
+        )
+        assert code != 0
+        assert "PASS" not in message
+
+    def test_rejected_close_is_blocked_even_with_a_flat_readback(self) -> None:
+        code, message = _decide_outcome(
+            _execution_result(state=OrderState.REJECTED), None, readback_flat=True
+        )
+        assert code != 0
+        assert "PASS" not in message
+
+    def test_transport_ambiguous_with_a_flat_readback_is_never_pass(self) -> None:
+        """The exact defect this review found: a transport-ambiguous close
+
+        used to short-circuit before any post-close readback ran at all.
+        Now that it runs, a flat readback after an ambiguous transport
+        response must still never be reported as PASS/0 -- an ambiguous
+        response is not proof this close is what produced that flat state.
+        """
+        code, message = _decide_outcome(None, _transport_error(), readback_flat=True)
+        assert code != 0
+        assert "PASS" not in message
+        assert "TRANSPORT AMBIGUOUS" in message
+        assert "FLAT" in message
+        assert "NOT FLAT" not in message
+
+    def test_transport_ambiguous_with_a_non_flat_readback_says_so_explicitly(self) -> None:
+        code, message = _decide_outcome(None, _transport_error(), readback_flat=False)
+        assert code != 0
+        assert "PASS" not in message
+        assert "TRANSPORT AMBIGUOUS" in message
+        assert "NOT FLAT" in message
+
+    def test_transport_ambiguous_report_names_the_actual_error(self) -> None:
+        error = _transport_error()
+        _, message = _decide_outcome(None, error, readback_flat=True)
+        assert str(error) in message

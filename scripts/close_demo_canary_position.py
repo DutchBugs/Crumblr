@@ -51,7 +51,7 @@ from uuid import UUID, uuid4
 from crumblr.config import load_config
 from crumblr.domain.enums import Environment, OrderState, Side
 from crumblr.domain.hashing import mt5_magic_number
-from crumblr.domain.models import FlattenInstruction, PositionState
+from crumblr.domain.models import ExecutionResult, FlattenInstruction, PositionState
 from crumblr.domain.timeutils import utc_now
 from crumblr.mt5_gateway.client import (
     MissingCredentialsError,
@@ -165,6 +165,37 @@ def _build_close_instruction(position: PositionState) -> FlattenInstruction:
     )
 
 
+def _decide_outcome(
+    result: ExecutionResult | None,
+    transport_error: Mt5CallFailedError | None,
+    *,
+    readback_flat: bool,
+) -> tuple[int, str]:
+    """Pure: the exit code and final report line, from the close attempt's
+
+    outcome and the fresh post-close readback -- never from either alone.
+
+    Exactly one of `result`/`transport_error` is non-`None` (`main()`'s own
+    single `close_position()` call produces one or the other, never both,
+    never neither). A transport-ambiguous close (`transport_error` set)
+    never returns exit 0/PASS, even when `readback_flat` is `True` -- an
+    ambiguous broker response is not the same thing as a confirmed FILLED
+    response, and this runner must not conflate a reassuring readback with
+    proof the close it just attempted is what produced it.
+    """
+    if transport_error is not None:
+        verdict = "FLAT" if readback_flat else "NOT FLAT"
+        return 3, (
+            f"DEMO CANARY EXPLICIT CLOSE -- TRANSPORT AMBIGUOUS -- BROKER READBACK {verdict} "
+            f"(close_position transport error: {transport_error})"
+        )
+
+    assert result is not None  # no transport_error means close_position returned normally
+    if result.state is OrderState.FILLED and readback_flat:
+        return 0, "DEMO CANARY EXPLICIT CLOSE -- PASS"
+    return 3, "DEMO CANARY EXPLICIT CLOSE -- BLOCKED (post-close state not flat / not clean)"
+
+
 def main() -> int:
     args = parse_args()
     environment = Environment(args.environment)
@@ -234,24 +265,34 @@ def main() -> int:
             f"  closing: flatten_request_id={instruction.flatten_request_id} "
             f"close_side={instruction.close_side.value} volume={instruction.volume}"
         )
+        result: ExecutionResult | None = None
+        transport_error: Mt5CallFailedError | None = None
         try:
             result = gateway.close_position(instruction)
         except Mt5CallFailedError as error:
-            print(f"BLOCKED: close_position transport failure: {error}")
-            return 3
+            # Never retried -- exactly one close_position() call happened
+            # above, transport-ambiguous or not. The fresh readback below
+            # still runs: an ambiguous transport response is not knowledge
+            # of broker state, and this is the only way to get any.
+            transport_error = error
+            print(f"  close_position transport failure: {error}")
 
-        print(
-            f"  close_position result: state={result.state.value} retcode={result.retcode} "
-            f"comment={result.retcode_comment!r}"
-        )
-        print(
-            f"  mt5_order_ticket={result.mt5_order_ticket} mt5_deal_ticket={result.mt5_deal_ticket}"
-        )
-        print(f"  executed_price={result.executed_price} executed_volume={result.executed_volume}")
+        if result is not None:
+            print(
+                f"  close_position result: state={result.state.value} retcode={result.retcode} "
+                f"comment={result.retcode_comment!r}"
+            )
+            print(
+                f"  mt5_order_ticket={result.mt5_order_ticket} "
+                f"mt5_deal_ticket={result.mt5_deal_ticket}"
+            )
+            print(
+                f"  executed_price={result.executed_price} executed_volume={result.executed_volume}"
+            )
 
-        # Fresh broker readback after the close call, regardless of its
-        # outcome -- this, not the close response alone, is what decides
-        # PASS/BLOCKED below.
+        # Fresh broker readback after the close attempt, regardless of its
+        # outcome (including a transport-ambiguous failure) -- this, not
+        # the close response alone, is what decides PASS/BLOCKED below.
         post_positions = gateway.positions()
         still_open = [p for p in post_positions if p.ticket == args.ticket]
         symbol_count = sum(
@@ -264,25 +305,16 @@ def main() -> int:
             and p.side is not args.expected_side
             and p.ticket != args.ticket
         ]
+        readback_flat = not still_open and symbol_count == 0 and not opposite_side_opened
 
         print(f"  post-close open positions (fresh read) = {len(post_positions)}")
         print(f"  ticket {args.ticket} still open? {bool(still_open)}")
         print(f"  {args.expected_broker_symbol} open position count = {symbol_count}")
         print(f"  opposite-side position accidentally opened? {bool(opposite_side_opened)}")
 
-        success = (
-            result.state is OrderState.FILLED
-            and not still_open
-            and symbol_count == 0
-            and not opposite_side_opened
-        )
-
-        if success:
-            print("\nDEMO CANARY EXPLICIT CLOSE -- PASS")
-            return 0
-
-        print("\nDEMO CANARY EXPLICIT CLOSE -- BLOCKED (post-close state not flat / not clean)")
-        return 3
+        exit_code, message = _decide_outcome(result, transport_error, readback_flat=readback_flat)
+        print(f"\n{message}")
+        return exit_code
     finally:
         client.disconnect()
 
