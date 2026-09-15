@@ -44,9 +44,15 @@ MIGRATABLE_NAMES = (
 
 
 def _read_user_env_registry_value(name: str) -> str | None:
+    # winreg's Windows-only members (HKEY_CURRENT_USER/OpenKey/QueryValueEx)
+    # are only defined in typeshed's win32 platform view; this helper is
+    # only ever called from main(), after main()'s own sys.platform guard.
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            value, _ = winreg.QueryValueEx(key, name)
+        with winreg.OpenKey(  # type: ignore[attr-defined]
+            winreg.HKEY_CURRENT_USER,  # type: ignore[attr-defined]
+            "Environment",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, name)  # type: ignore[attr-defined]
     except FileNotFoundError:
         return None
     return str(value) if value else None
@@ -57,7 +63,7 @@ def main() -> int:
         print("error: this migration only makes sense on Windows", file=sys.stderr)
         return 2
 
-    migrated = []
+    migrated = []  # type: ignore[unreachable]  # win32-only; the guard above already returned on every other platform
     missing = []
     for name in MIGRATABLE_NAMES:
         value = _read_user_env_registry_value(name)

@@ -33,7 +33,7 @@ def main() -> int:
         print("error: this only makes sense on Windows", file=sys.stderr)
         return 2
 
-    removed = []
+    removed = []  # type: ignore[unreachable]  # win32-only; the guard above already returned on every other platform
     already_absent = []
     for name in LEGACY_NAMES:
         with winreg.OpenKey(
