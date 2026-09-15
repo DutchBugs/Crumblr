@@ -118,6 +118,11 @@ class FakeMt5:
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
+    TRADE_ACTION_PENDING = 5
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_ACTION_REMOVE = 8
 
     def __init__(
         self,
@@ -752,6 +757,20 @@ class TestPendingOrders:
 
     def test_a_none_result_with_success_reads_as_no_pending_orders(self) -> None:
         assert gateway(FakeMt5(orders=None, error=(1, "Success"))).pending_orders() == ()
+
+    def test_magic_is_read_and_decoded(self) -> None:
+        """D-049 / ICT LIMIT DEMO EXECUTION Slice 1: `magic` was not tracked
+
+        for pending orders at any layer before this slice -- mirrors
+        `positions()`'s own `magic=int(position.magic) if
+        getattr(position, "magic", None) else None` exactly.
+        """
+        orders = gateway(FakeMt5(orders=(a_pending_order(magic=284152424),))).pending_orders()
+        assert orders[0].magic == 284152424
+
+    def test_a_zero_magic_reads_as_none_not_zero(self) -> None:
+        orders = gateway(FakeMt5(orders=(a_pending_order(magic=0),))).pending_orders()
+        assert orders[0].magic is None
 
 
 # --------------------------------------------------------------------------- #

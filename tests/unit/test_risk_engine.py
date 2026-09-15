@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 
 from crumblr.config import ExecutionConfig, RiskConfig
-from crumblr.domain.enums import DataQuality, ReasonCode, RiskVerdict, Side
+from crumblr.domain.enums import DataQuality, EntryType, ReasonCode, RiskVerdict, Side
 from crumblr.domain.models import (
     AccountState,
     InstrumentSpec,
@@ -1260,3 +1260,101 @@ class TestExecutionTimeComparesAgainstTheRealBudgetNotAFreshSizingArtifact:
                 now=FIXED_NOW + timedelta(milliseconds=100),
             )
             assert result.approved_volume in (None, prior_decision.approved_volume)
+
+
+class TestExecutionTimeRevalidationForLimitEntries:
+    """ICT LIMIT DEMO EXECUTION (Slice 1): a resting LIMIT order fills at
+
+    its own specified price if and when triggered, never at whatever the
+    market happens to be doing right now -- FINAL Risk must price the
+    stop from `intent.reference_price` (the limit level), not from the
+    fresh ask/bid, unlike the MARKET path.
+    """
+
+    def _limit_intent(self, **overrides: object) -> TradeIntent:
+        fields: dict[str, object] = {
+            "entry_type": EntryType.LIMIT,
+            "reference_price": Decimal("1.08500"),
+            "stop_loss_price": Decimal("1.08300"),
+        }
+        fields.update(overrides)
+        return healthy_intent(**fields)
+
+    def test_stop_distance_is_priced_from_the_limit_level_not_the_fresh_ask(self) -> None:
+        """The fresh ask sits far from the limit price -- if FINAL Risk
+
+        priced from it (the MARKET behaviour), this would compute a wildly
+        different, wrong stop distance. Pricing from `reference_price`
+        instead reproduces the exact same 200-point distance intent time
+        already approved.
+        """
+        intent = self._limit_intent()
+        prior_decision = evaluate(intent=intent)
+        assert prior_decision.verdict is RiskVerdict.PASS
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.09490"), ask=Decimal("1.09500")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.approved_volume == prior_decision.approved_volume
+        assert result.stop_distance_points == 200
+
+    def test_a_market_entry_still_prices_from_the_fresh_ask_unchanged(self) -> None:
+        """Control: the existing MARKET behaviour is unaffected by this slice."""
+        intent = healthy_intent(entry_type=EntryType.MARKET)
+        prior_decision = evaluate(intent=intent)
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08560"), ask=Decimal("1.08575")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.RISK_PER_TRADE_LIMIT in result.reason_codes
+
+    def test_a_sell_limit_also_prices_from_the_reference_price(self) -> None:
+        intent = self._limit_intent(
+            side=Side.SELL,
+            reference_price=Decimal("1.08500"),
+            stop_loss_price=Decimal("1.08700"),
+            take_profit_price=Decimal("1.08000"),
+        )
+        prior_decision = policies.evaluate(
+            intent,
+            make_snapshot(event_time_utc=FIXED_NOW),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert prior_decision.verdict is RiskVerdict.PASS
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            # Fresh bid/ask far from the limit price -- must not be used.
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.07490"), ask=Decimal("1.07500")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.stop_distance_points == 200

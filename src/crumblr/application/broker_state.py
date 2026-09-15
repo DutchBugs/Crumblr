@@ -157,6 +157,7 @@ def capture_broker_state(
             stop_loss_price=order.stop_loss_price,
             take_profit_price=order.take_profit_price,
             expires_at_utc=order.expires_at_utc,
+            magic=order.magic,
         )
         for order in pending_orders
     )

@@ -20,11 +20,13 @@ be given explicitly (all three, or none for an internal-strategy canary),
 `--login`/`--server` must be given explicitly, and every other field has
 no default that could silently authorize more than the operator typed.
 
-`canonical_symbol` is always `EUR/USD` and `entry_type` is always
-`MARKET` — `CanaryPermit`'s own model validator enforces this ("the
-first canary is EUR/USD only" / "the first canary is MARKET-entry
-only"), so there is no flag for either; widening either is a new,
-separate, reviewed engineering decision, not a CLI option.
+`canonical_symbol` is always `EUR/USD` — `CanaryPermit`'s own model
+validator enforces this ("the first canary is EUR/USD only"), so there
+is no flag for it; widening it is a new, separate, reviewed engineering
+decision, not a CLI option. `entry_type` defaults to `MARKET` and also
+accepts `LIMIT` (ICT LIMIT DEMO EXECUTION, Slice 1) via `--entry-type`
+— `CanaryPermit`'s own validator enforces MARKET-or-LIMIT-only; `STOP`
+remains refused there too, deliberately, not a CLI option either.
 
 `--login`/`--server` are converted to the same `login_hash`-style
 fingerprint `AccountState.login_hash`/`ExecutionConfig
@@ -71,6 +73,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--assignment-id", type=UUID, default=None)
     parser.add_argument("--strategy-artifact-hash", default=None)
+    parser.add_argument(
+        "--entry-type",
+        type=EntryType,
+        default=EntryType.MARKET,
+        choices=(EntryType.MARKET, EntryType.LIMIT),
+        help="MARKET (default) or LIMIT (ICT LIMIT DEMO EXECUTION, Slice 1) -- "
+        "CanaryPermit's own validator refuses anything else",
+    )
     parser.add_argument(
         "--max-requested-risk-fraction",
         type=Decimal,
@@ -127,7 +137,7 @@ def main() -> int:
         approved_account_ref=approved_account_ref,
         expected_server=args.server,
         canonical_symbol="EUR/USD",
-        entry_type=EntryType.MARKET,
+        entry_type=args.entry_type,
         agent_id=args.agent_id,
         assignment_id=args.assignment_id,
         strategy_artifact_hash=args.strategy_artifact_hash,

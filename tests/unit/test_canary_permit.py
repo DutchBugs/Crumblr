@@ -45,9 +45,16 @@ class TestCanaryPermitValidation:
         with pytest.raises(ValidationError, match="EUR/USD"):
             permit(canonical_symbol="GBP/USD")
 
-    def test_a_non_market_entry_type_is_refused(self) -> None:
-        with pytest.raises(ValidationError, match="MARKET"):
-            permit(entry_type=EntryType.LIMIT)
+    def test_a_limit_entry_type_now_constructs(self) -> None:
+        """ICT LIMIT DEMO EXECUTION (Slice 1): a canary permit may scope a
+
+        LIMIT entry, not only MARKET.
+        """
+        assert permit(entry_type=EntryType.LIMIT).entry_type is EntryType.LIMIT
+
+    def test_a_stop_entry_type_is_still_refused(self) -> None:
+        with pytest.raises(ValidationError, match="MARKET or LIMIT"):
+            permit(entry_type=EntryType.STOP)
 
     def test_a_fully_agent_driven_permit_constructs(self) -> None:
         result = permit(

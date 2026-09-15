@@ -151,6 +151,30 @@ def fake_position(**overrides: Any) -> Any:
     return SimpleNamespace(**fields)
 
 
+def fake_pending_order(**overrides: Any) -> Any:
+    """A raw MT5 pending order, shaped the way `readonly.py::pending_orders()`
+
+    decodes it (ICT LIMIT DEMO EXECUTION, Slice 1) — mirrors `fake_position`
+    exactly, so a test can simulate a broker-side pending-order match for a
+    specific `magic` number."""
+    from types import SimpleNamespace
+
+    fields: dict[str, Any] = {
+        "ticket": 800001,
+        "symbol": BROKER_SYMBOL,
+        "type": 2,  # ORDER_TYPE_BUY_LIMIT
+        "state": 1,  # ORDER_STATE_PLACED
+        "volume_current": 0.05,
+        "price_open": 1.08000,
+        "sl": 1.07800,
+        "tp": 1.08400,
+        "time_expiration": 0,
+        "magic": 0,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 class FakeMt5:
     """A flat demo account, a stable EUR/USD spec, and an accepting
 
@@ -174,6 +198,11 @@ class FakeMt5:
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
+    TRADE_ACTION_PENDING = 5
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_ACTION_REMOVE = 8
 
     def __init__(self, *, tick_bid: float = 1.08500, tick_ask: float = 1.08512) -> None:
         self._tick_bid = tick_bid
@@ -191,6 +220,12 @@ class FakeMt5:
 
         broker-side position matching a specific magic number — never
         populated by order_send itself, which stays unreachable."""
+        self.orders_get_calls = 0
+        self.open_pending_orders: tuple[Any, ...] = ()
+        """ICT LIMIT DEMO EXECUTION (Slice 1): settable so a test can
+
+        simulate a broker-side pending order matching a specific magic
+        number — mirrors `open_positions` exactly."""
 
     def initialize(self, *_a: Any, **_k: Any) -> bool:
         return True
@@ -256,7 +291,8 @@ class FakeMt5:
         return self.open_positions
 
     def orders_get(self, *_a: Any, **_k: Any) -> tuple[Any, ...]:
-        return ()
+        self.orders_get_calls += 1
+        return self.open_pending_orders
 
     def order_check(self, request: dict[str, Any]) -> Any:
         self.order_check_requests.append(request)

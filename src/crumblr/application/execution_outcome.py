@@ -5,22 +5,22 @@ no I/O, no clock of its own, mirroring `application/expected_state.py`/
 `application/flatten_plan.py`'s own "pure derivation, the driver decides
 what to do with it" discipline applied one step further.
 
-**Not called by `ExecutionOrchestrator` yet.** Nothing in
-`application/execution.py` constructs an `ExecutionResult` in the first
-place — `DemoOrderSendMt5Gateway.order_send()` (Phase B item B1) is real
-and tested, but genuinely unreachable from the live orchestrator (Phase
-C/AG-012's shared execution/Risk authority does not exist yet, same
-reasoning as every Phase B slice before this one). This module exists,
-real and tested, ahead of the wiring that will eventually call it.
-
-Narrowed deliberately to what a MARKET IOC `order_send` response can
-actually produce — `FILLED` (full or partial, distinguished by payload,
-not a separate event type) or `REJECTED`. `SUBMITTED`/`BROKER_ACK` stay
-reserved: a market order has no separate "acked, not yet filled" phase
-the way a pending LIMIT/STOP order would, and pending-order support is
-out of scope for the first, MARKET-only canary (the same boundary
+**Now called by `ExecutionOrchestrator`** (FEEDBACK.2.0 DEMO EXECUTION):
 `application/execution.py::ExecutionOrchestrator
-._recover_ambiguous_submission`'s own docstring already names).
+._attempt_real_entry_submission()` constructs a real `ExecutionResult` via
+the canary-scoped `EntrySubmissionSink`/`DemoOrderSendMt5Gateway.order_send()`
+and consults this classification directly. This module's own contents
+stay pure regardless of who calls it.
+
+Originally narrowed to what a MARKET IOC `order_send` response can
+produce — `FILLED` (full or partial, distinguished by payload, not a
+separate event type) or `REJECTED`. ICT LIMIT DEMO EXECUTION (Slice 1)
+adds the one case a resting pending order needs: `OrderState.SUBMITTED`
+(a LIMIT order successfully placed on the book, not yet filled) normalizes
+to `ExecutionEventType.SUBMITTED` — the event `domain/enums.py` has
+reserved for exactly this since before either existed. `BROKER_ACK` stays
+reserved: nothing in this slice produces a distinct "acknowledged, not yet
+placed" phase to normalize.
 
 **`FILLED`'s own exposure meaning stays `UNDETERMINED`, unchanged by this
 module** (`application/expected_state.py::_EXPOSURE_BY_EVENT`).
@@ -71,11 +71,14 @@ def normalize_execution_result(
         event_type = ExecutionEventType.FILLED
     elif result.state is OrderState.REJECTED:
         event_type = ExecutionEventType.REJECTED
+    elif result.state is OrderState.SUBMITTED:
+        event_type = ExecutionEventType.SUBMITTED
     else:
         raise ValueError(
             f"order_send never produces OrderState.{result.state.value} -- only "
-            "FILLED, PARTIALLY_FILLED and REJECTED are reachable from a real "
-            "MARKET order_send response"
+            "FILLED, PARTIALLY_FILLED, REJECTED (MARKET) and SUBMITTED (LIMIT, "
+            "ICT LIMIT DEMO EXECUTION Slice 1) are reachable from a real "
+            "order_send response"
         )
 
     payload: dict[str, Any] = {

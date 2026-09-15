@@ -19,6 +19,7 @@ from crumblr.domain.models import (
     ApprovedOrder,
     ExecutionResult,
     InstrumentSpec,
+    PendingOrderState,
     PositionState,
 )
 
@@ -47,6 +48,12 @@ class BrokerPort(Protocol):
 
     def positions(self) -> tuple[PositionState, ...]:
         """Open positions according to the broker."""
+        ...
+
+    def pending_orders(self) -> tuple[PendingOrderState, ...]:
+        """Resting (not-yet-filled) pending orders according to the broker
+
+        (ICT LIMIT DEMO EXECUTION, Slice 1)."""
         ...
 
     def order_check(self, order: ApprovedOrder) -> OrderCheckCompleted:

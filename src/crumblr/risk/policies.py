@@ -18,6 +18,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from crumblr.config import ExecutionConfig, RiskConfig
 from crumblr.domain.enums import (
     TRADEABLE_DATA_QUALITY,
+    EntryType,
     ReasonCode,
     RiskVerdict,
     Side,
@@ -313,9 +314,15 @@ def revalidate_fixed_volume_at_execution_time(
     silently shrink into.
 
     `evaluate()` derives stop distance from `intent.reference_price`, which
-    is intent-time and may now be stale. This function prices the stop
-    against the current executable side of the book instead (point 7): a BUY
-    fills at the ask, a SELL at the bid.
+    is intent-time and may now be stale. For a `MARKET` intent this function
+    prices the stop against the current executable side of the book instead
+    (point 7): a BUY fills at the ask, a SELL at the bid. For a `LIMIT`
+    intent (ICT LIMIT DEMO EXECUTION, Slice 1) that basis does not apply —
+    a resting pending order fills at its own specified price if and when
+    triggered, never at whatever the market happens to be doing right now,
+    so the stop is priced against `intent.reference_price` (the limit level
+    itself) instead. Equity can still have moved since intent time; the
+    current market price has not moved the limit order's own fill price.
 
     **Caller responsibility.** `fresh_portfolio.seen_decision_hashes` must
     exclude `intent.decision_hash` itself — this call is deliberately
@@ -328,7 +335,10 @@ def revalidate_fixed_volume_at_execution_time(
 
     fresh = evaluate(intent, fresh_snapshot, spec, fresh_portfolio, context, kill_switch, now=now)
 
-    executable_price = fresh_snapshot.ask if intent.side is Side.BUY else fresh_snapshot.bid
+    if intent.entry_type is EntryType.MARKET:
+        executable_price = fresh_snapshot.ask if intent.side is Side.BUY else fresh_snapshot.bid
+    else:
+        executable_price = intent.reference_price
     fresh_stop_distance = abs(executable_price - intent.stop_loss_price)
     fresh_stop_distance_points = price_to_points(fresh_stop_distance, spec.point)
 

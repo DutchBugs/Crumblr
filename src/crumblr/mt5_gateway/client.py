@@ -82,6 +82,19 @@ class Mt5Module(Protocol):
     TRADE_RETCODE_DONE: int
     # order_send result constant (Phase B item B1).
     TRADE_RETCODE_DONE_PARTIAL: int
+    # Pending-order (LIMIT) request-parameter constants (ICT LIMIT DEMO
+    # EXECUTION, Slice 1). A LIMIT entry is a *pending* order, not an
+    # immediate deal: a different trade action and order-type pair, read
+    # off the real module the same way as every constant above it.
+    TRADE_ACTION_PENDING: int
+    ORDER_TYPE_BUY_LIMIT: int
+    ORDER_TYPE_SELL_LIMIT: int
+    # order_send result constant: a pending order was successfully placed
+    # on the broker's book (not yet filled) -- distinct from
+    # TRADE_RETCODE_DONE, which means an immediate MARKET fill.
+    TRADE_RETCODE_PLACED: int
+    # Exact-ticket pending-order cancel request-parameter constant.
+    TRADE_ACTION_REMOVE: int
 
 
 class Mt5UnavailableError(RuntimeError):

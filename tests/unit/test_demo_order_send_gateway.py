@@ -2,17 +2,21 @@
 
 **What these tests prove and what they do not.** They exercise the adapter:
 a real `order_send` call reaches the fake module and its result decodes
-correctly, reads/`order_check` delegate to the wrapped `OrderCheckMt5Gateway`
-unchanged, a non-demo/mismatched account is refused before any broker write
-is attempted, `close_position`/`close_all_positions` are real (Phase B item
-B5, `review/adr/ADR-020-real-flatten-close.md`), and `cancel_pending_orders`
-stays unconditionally refused (no pending-order support exists anywhere in
-this platform). They prove nothing about how Pepperstone's real
-`order_send`/close actually behaves — that stays unproven until this adapter
-runs against the real demo account. **This class is not constructed or
+correctly (including a LIMIT placement decoding as `SUBMITTED` — ICT LIMIT
+DEMO EXECUTION Slice 1), reads/`order_check` delegate to the wrapped
+`OrderCheckMt5Gateway` unchanged, a non-demo/mismatched account is refused
+before any broker write is attempted, `close_position`/`close_all_positions`
+are real (Phase B item B5, `review/adr/ADR-020-real-flatten-close.md`),
+`cancel_pending_order` (exact-ticket, Slice 1) is real, and
+`cancel_pending_orders` (plural, cancel-all) stays unconditionally refused —
+a deliberate scope decision, not a claim that pending orders remain
+unsupported. They prove nothing about how Pepperstone's real `order_send`/
+close/cancel actually behaves — that stays unproven until this adapter runs
+against the real demo account. **This class is not constructed or
 referenced anywhere in `application/execution.py` by name — see
-`TestNotWiredIntoTheOrchestrator` below; a narrow `FlattenCloseSink` Protocol
-is how B5's real close reaches the orchestrator instead.**
+`TestNotWiredIntoTheOrchestrator` below; a narrow `FlattenCloseSink`/
+`EntrySubmissionSink` Protocol is how B5/B1's real capabilities reach the
+orchestrator instead.**
 """
 
 from __future__ import annotations
@@ -146,6 +150,11 @@ class FakeMt5:
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
+    TRADE_ACTION_PENDING = 5
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_ACTION_REMOVE = 8
 
     def __init__(
         self,
@@ -398,6 +407,69 @@ class TestOrderSend:
 
 
 # --------------------------------------------------------------------------- #
+# ICT LIMIT DEMO EXECUTION (Slice 1) -- LIMIT order_send
+# --------------------------------------------------------------------------- #
+
+
+class TestOrderSendLimit:
+    def _limit_order(self, **overrides: Any) -> ApprovedOrder:
+        fields: dict[str, Any] = {
+            "entry_type": EntryType.LIMIT,
+            "side": Side.BUY,
+            "price": "1.08000",
+            "stop_loss_price": "1.07800",
+            "take_profit_price": "1.08400",
+        }
+        fields.update(overrides)
+        return approved_order(**fields)
+
+    def test_a_buy_limit_reaches_order_send_as_a_pending_request(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = self._limit_order()
+
+        gate.order_send(order)
+
+        sent = fake.order_send_requests[0]
+        assert sent["action"] == FakeMt5.TRADE_ACTION_PENDING
+        assert sent["type"] == FakeMt5.ORDER_TYPE_BUY_LIMIT
+        assert sent["price"] == pytest.approx(1.08000)
+        assert "deviation" not in sent
+
+    def test_a_successful_placement_decodes_as_submitted(self) -> None:
+        fake = FakeMt5(
+            order_send_response=order_send_result(
+                retcode=FakeMt5.TRADE_RETCODE_PLACED,
+                order=800001,
+                deal=0,
+                volume=0.0,
+                price=0.0,
+                comment="Request placed",
+            )
+        )
+        gate = gateway(fake)
+
+        result = gate.order_send(self._limit_order())
+
+        assert result.state is OrderState.SUBMITTED
+        assert result.retcode == FakeMt5.TRADE_RETCODE_PLACED
+        assert result.mt5_order_ticket == 800001
+        # Not yet a deal or a fill price -- the order is only resting.
+        assert result.mt5_deal_ticket is None
+        assert result.executed_price is None
+
+    def test_a_rejected_limit_placement_still_decodes_as_rejected(self) -> None:
+        fake = FakeMt5(
+            order_send_response=order_send_result(retcode=10_016, comment="Invalid stops", order=0)
+        )
+        gate = gateway(fake)
+
+        result = gate.order_send(self._limit_order())
+
+        assert result.state is OrderState.REJECTED
+
+
+# --------------------------------------------------------------------------- #
 # The demo-only guard — B1's central safety requirement
 # --------------------------------------------------------------------------- #
 
@@ -590,6 +662,73 @@ class TestCloseAllPositions:
 
         assert closed == ()
         assert fake.order_send_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# ICT LIMIT DEMO EXECUTION (Slice 1) -- exact-ticket pending-order cancel
+# --------------------------------------------------------------------------- #
+
+
+class TestCancelPendingOrder:
+    def test_a_successful_cancel_is_reported_accepted(self) -> None:
+        fake = FakeMt5(
+            order_send_response=order_send_result(
+                retcode=FakeMt5.TRADE_RETCODE_DONE, order=0, deal=0, comment="Request executed"
+            )
+        )
+        gate = gateway(fake)
+
+        result = gate.cancel_pending_order(800001)
+
+        assert result.order_id == 800001
+        assert result.accepted is True
+        assert result.retcode_comment == "Request executed"
+        sent = fake.order_send_requests[0]
+        assert sent["action"] == FakeMt5.TRADE_ACTION_REMOVE
+        assert sent["order"] == 800001
+
+    def test_a_rejected_cancel_is_reported_not_accepted(self) -> None:
+        fake = FakeMt5(
+            order_send_response=order_send_result(
+                retcode=10_004, order=0, deal=0, comment="Requote"
+            )
+        )
+        gate = gateway(fake)
+
+        result = gate.cancel_pending_order(800001)
+
+        assert result.accepted is False
+        assert result.retcode == 10_004
+
+    def test_a_missing_response_raises_with_the_terminal_reason(self) -> None:
+        fake = FakeMt5(order_send_response=_MISSING, error=(4, "No connection"))
+        gate = gateway(fake)
+
+        with pytest.raises(Mt5CallFailedError, match="cancel_pending_order"):
+            gate.cancel_pending_order(800001)
+
+    def test_a_live_account_is_refused_before_any_cancel_is_attempted(self) -> None:
+        fake = FakeMt5(account=account_info(trade_mode=ACCOUNT_TRADE_MODE_REAL))
+        gate = gateway(fake)
+
+        with pytest.raises(AccountGuardError):
+            gate.cancel_pending_order(800001)
+
+        assert fake.order_send_calls == 0
+
+    def test_never_touches_more_than_the_one_named_order(self) -> None:
+        """No sweep semantics -- exactly one order_send call, naming exactly
+
+        the one order_id passed in, never anything discovered by reading
+        pending_orders() first.
+        """
+        fake = FakeMt5()
+        gate = gateway(fake)
+
+        gate.cancel_pending_order(800001)
+
+        assert fake.order_send_calls == 1
+        assert fake.order_send_requests[0]["order"] == 800001
 
 
 # --------------------------------------------------------------------------- #

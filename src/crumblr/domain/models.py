@@ -846,6 +846,12 @@ class BrokerPendingOrderSnapshot(Contract):
     .ORDER_TYPES`/`ORDER_STATES`), not this platform's own `EntryType`/
     `OrderState` — those describe an `ApprovedOrder` this platform submitted,
     which a broker-observed pending order need not be.
+
+    `magic` (D-049, ICT LIMIT DEMO EXECUTION Slice 1) mirrors
+    `BrokerPositionSnapshot.magic` — the durable record of the same field
+    `PendingOrderState.magic` now carries, so a stored snapshot can answer
+    "does any pending order belong to this request" without a live broker
+    read.
     """
 
     snapshot_id: UUID
@@ -860,6 +866,7 @@ class BrokerPendingOrderSnapshot(Contract):
     stop_loss_price: Price | None = None
     take_profit_price: Price | None = None
     expires_at_utc: UtcDatetime | None = None
+    magic: int | None = None
 
 
 class PendingOrderState(Contract):
@@ -868,6 +875,14 @@ class PendingOrderState(Contract):
     for why this is not what gets persisted (`BrokerPendingOrderSnapshot` is).
     `order_type`/`state` are decoded MT5 enum names, not this platform's own
     `EntryType`/`OrderState`.
+
+    `magic` (D-049, ICT LIMIT DEMO EXECUTION Slice 1): absent until this
+    slice — confirmed by direct search before implementation, `magic` was
+    not tracked at any layer for pending orders. Added so a submitted
+    `EntryType.LIMIT` order sitting pending can be found by magic the same
+    way `PositionState.magic` already lets a filled one be found —
+    ambiguous-outcome recovery and the pending-order resolver both depend
+    on this.
     """
 
     order_id: int
@@ -879,6 +894,7 @@ class PendingOrderState(Contract):
     stop_loss_price: Price | None = None
     take_profit_price: Price | None = None
     expires_at_utc: UtcDatetime | None = None
+    magic: int | None = None
     observed_at_utc: UtcDatetime
 
 
@@ -1031,8 +1047,11 @@ class CanaryPermit(Contract):
     def _check_permit(self) -> Self:
         if self.canonical_symbol != "EUR/USD":
             raise ValueError("the first canary is EUR/USD only")
-        if self.entry_type is not EntryType.MARKET:
-            raise ValueError("the first canary is MARKET-entry only")
+        if self.entry_type not in (EntryType.MARKET, EntryType.LIMIT):
+            raise ValueError(
+                "canary permits are MARKET or LIMIT only (ICT LIMIT DEMO EXECUTION, "
+                "Slice 1) -- STOP remains a later, separate scope decision"
+            )
         agent_fields = (self.agent_id, self.assignment_id, self.strategy_artifact_hash)
         if any(agent_fields) and not all(agent_fields):
             raise ValueError(

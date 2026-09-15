@@ -97,6 +97,7 @@ from crumblr.domain.models import (
     FlattenInstruction,
     MarketSnapshot,
     MarketTick,
+    PendingOrderState,
     PositionState,
     TradeIntent,
     VersionTag,
@@ -282,6 +283,21 @@ class ReconciliationAttemptOutcome:
     event_type: ExecutionEventType = ExecutionEventType.RECONCILED
     book_status: ReconciliationStatus = ReconciliationStatus.UNKNOWN
     accounted_ticket_count: int = 0
+
+
+@dataclass(frozen=True)
+class PendingResolutionOutcome:
+    """What happened to one resting `SUBMITTED` pending order during one
+
+    `resolve_pending_once()` pass (ICT LIMIT DEMO EXECUTION, Slice 1).
+    Deliberately not `ExecutionAttemptOutcome`, the same reasoning
+    `ReconciliationAttemptOutcome` already gives: this walks requests by
+    magic, never reads `CapsuleStore`, so there is no `capsule_id` to
+    carry."""
+
+    order_request_id: UUID
+    event_type: ExecutionEventType
+    ticket: int | None = None
 
 
 class ExecutionOrchestrator:
@@ -1018,27 +1034,38 @@ class ExecutionOrchestrator:
         recovery never re-runs or re-reads the broker for an
         already-resolved request.
 
-        Scoped to open positions only, not pending orders — `magic` is
-        not tracked for pending orders at any layer today
-        (`review/DEVIATIONS.md`); a submitted `EntryType.LIMIT` order
-        sitting pending, not yet filled, would not be found by this
-        check. Named as a real, separate gap, not silently ignored.
+        ICT LIMIT DEMO EXECUTION (Slice 1): also searches `pending_orders()`
+        by magic, now that `PendingOrderState.magic` exists (D-049's own
+        named prerequisite). A crash between `SUBMISSION_STARTED` and a
+        real broker response, for a `LIMIT` request, could leave a live
+        pending order this platform has not yet durably recorded — zero
+        position matches must not be read as "never reached the broker"
+        without also checking for that. When no position exists but a
+        pending order does, this deliberately records nothing and returns
+        `None`: the request is genuinely still open (resting, not yet
+        filled/cancelled/expired), not "resolved" one way or the other,
+        so it is correctly re-examined next pass rather than durably
+        (and wrongly) recorded as `submitted=False`. Full pending-order
+        fate resolution (fill/cancel/expire/reject) is Slice 2's own,
+        separate mechanism — this only prevents Slice 1 from recording a
+        false negative in the meantime.
 
-        Phase B item B4: more than one matching position is an integrity
-        ambiguity, not a stronger form of "submitted" — see the `>1`
-        branch below and `_trip_submission_integrity_ambiguous`.
+        Phase B item B4: more than one matching position (or, as of this
+        slice, pending order) sharing one magic is an integrity ambiguity,
+        not a stronger form of "submitted" — see the `>1` branches below
+        and `_trip_submission_integrity_ambiguous`.
         """
         events = self._events.events_for(order_request_id)
         if not events or events[-1].event_type is not ExecutionEventType.SUBMISSION_STARTED:
             return None
 
         magic = mt5_magic_number(order_request_id)
-        matches = tuple(
+        position_matches = tuple(
             position for position in self._adapter.positions() if position.magic == magic
         )
         now = self._clock()
 
-        if len(matches) > 1:
+        if len(position_matches) > 1:
             self._append(
                 order_request_id,
                 ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
@@ -1046,18 +1073,49 @@ class ExecutionOrchestrator:
                 payload={
                     "magic_number": magic,
                     "integrity_ambiguity": True,
-                    "matching_position_count": len(matches),
-                    "matching_tickets": [position.ticket for position in matches],
+                    "matching_position_count": len(position_matches),
+                    "matching_tickets": [position.ticket for position in position_matches],
                 },
             )
-            self._trip_submission_integrity_ambiguous(order_request_id, matches, now)
+            self._trip_submission_integrity_ambiguous(order_request_id, position_matches, now)
             return ExecutionAttemptOutcome(
                 order_request_id=order_request_id,
                 capsule_id=capsule.capsule_id,
                 event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
             )
 
-        submitted = len(matches) == 1
+        if len(position_matches) == 0:
+            pending_matches = tuple(
+                order for order in self._adapter.pending_orders() if order.magic == magic
+            )
+            if len(pending_matches) > 1:
+                self._append(
+                    order_request_id,
+                    ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                    now,
+                    payload={
+                        "magic_number": magic,
+                        "integrity_ambiguity": True,
+                        "matching_pending_order_count": len(pending_matches),
+                        "matching_pending_order_ids": [order.order_id for order in pending_matches],
+                    },
+                )
+                self._trip_submission_integrity_ambiguous_pending(
+                    order_request_id, pending_matches, now
+                )
+                return ExecutionAttemptOutcome(
+                    order_request_id=order_request_id,
+                    capsule_id=capsule.capsule_id,
+                    event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                )
+            if len(pending_matches) == 1:
+                # Genuinely still open at the broker, not yet decided —
+                # never recorded as submitted=False. Left at
+                # SUBMISSION_STARTED for the next pass (or Slice 2's
+                # resolver) to determine the real, final outcome.
+                return None
+
+        submitted = len(position_matches) == 1
         self._append(
             order_request_id,
             ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
@@ -1065,8 +1123,8 @@ class ExecutionOrchestrator:
             payload={
                 "magic_number": magic,
                 "submitted": submitted,
-                "matching_position_count": len(matches),
-                "matching_tickets": [position.ticket for position in matches],
+                "matching_position_count": len(position_matches),
+                "matching_tickets": [position.ticket for position in position_matches],
             },
         )
         return ExecutionAttemptOutcome(
@@ -1098,6 +1156,32 @@ class ExecutionOrchestrator:
                     f"order_request_id {order_request_id}: {len(matches)} broker "
                     f"positions share magic number {mt5_magic_number(order_request_id)} "
                     f"(tickets={tickets}) -- cannot safely attribute any of them"
+                ),
+            )
+
+    def _trip_submission_integrity_ambiguous_pending(
+        self,
+        order_request_id: UUID,
+        matches: tuple[PendingOrderState, ...],
+        now: UtcDatetime,
+    ) -> None:
+        """ICT LIMIT DEMO EXECUTION (Slice 1) — the pending-order analogue
+
+        of `_trip_submission_integrity_ambiguous`: more than one resting
+        pending order shares this request's magic number, a magic-number
+        collision or corrupted broker/platform state, never a legitimate
+        outcome of one submission. Same idempotent-trip shape.
+        """
+        if not self._kill_switch.is_halted:
+            order_ids = [order.order_id for order in matches]
+            self._kill_switch.trip(
+                reason_codes=(ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS,),
+                tripped_by="ambiguous_recovery_driver",
+                occurred_at_utc=now,
+                detail=(
+                    f"order_request_id {order_request_id}: {len(matches)} pending "
+                    f"orders share magic number {mt5_magic_number(order_request_id)} "
+                    f"(order_ids={order_ids}) -- cannot safely attribute any of them"
                 ),
             )
 
@@ -1853,6 +1937,100 @@ class ExecutionOrchestrator:
                     accounted_ticket_count=len(attributed),
                 )
             )
+        return tuple(outcomes)
+
+    def resolve_pending_once(self) -> tuple[PendingResolutionOutcome, ...]:
+        """ICT LIMIT DEMO EXECUTION (Slice 1) — the minimal SUBMITTED ->
+
+        FILLED resolver. For every request whose last durable event is
+        `SUBMITTED` (a real, resting pending order this platform placed),
+        checks whether a broker position matching this request's own
+        `mt5_magic_number` now exists. If exactly one does, the pending
+        order has triggered and filled — appends `FILLED` durably,
+        attributing that exact position (the payload shape
+        `_recover_ambiguous_submission`'s own fill-detection already
+        uses). If none does, the order is still resting or has otherwise
+        left the book (cancelled, expired, broker-side rejected) — this
+        deliberately does nothing in either case; disambiguating "still
+        resting" from "gone, and why" needs `history_orders_get()`
+        (unused anywhere in this platform today) and is Slice 2's own,
+        separate mechanism. More than one matching position is the same
+        integrity ambiguity `_recover_ambiguous_submission` already
+        treats it as, handled identically here.
+
+        Never calls `order_send`/`close_position`/`cancel_pending_order` —
+        read-only broker observation and a durable append, the same
+        discipline `reconcile_once()` and `_recover_ambiguous_submission`
+        already hold to.
+        """
+        submitted_ids = self._events.request_ids_with_event(
+            ExecutionEventType.SUBMITTED,
+            environment=self._config.environment,
+            canonical_symbol=self._canonical_symbol,
+        )
+        if not submitted_ids:
+            return ()
+
+        now = self._clock()
+        positions = self._adapter.positions()
+        outcomes: list[PendingResolutionOutcome] = []
+        for order_request_id in submitted_ids:
+            events = self._events.events_for(order_request_id)
+            if not events or events[-1].event_type is not ExecutionEventType.SUBMITTED:
+                # Already resolved further by an earlier pass -- nothing
+                # left for this one to determine.
+                continue
+
+            magic = mt5_magic_number(order_request_id)
+            matches = tuple(position for position in positions if position.magic == magic)
+
+            if len(matches) > 1:
+                self._append(
+                    order_request_id,
+                    ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                    now,
+                    payload={
+                        "magic_number": magic,
+                        "integrity_ambiguity": True,
+                        "matching_position_count": len(matches),
+                        "matching_tickets": [position.ticket for position in matches],
+                    },
+                )
+                self._trip_submission_integrity_ambiguous(order_request_id, matches, now)
+                outcomes.append(
+                    PendingResolutionOutcome(
+                        order_request_id=order_request_id,
+                        event_type=ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED,
+                    )
+                )
+                continue
+
+            if len(matches) == 1:
+                position = matches[0]
+                self._append(
+                    order_request_id,
+                    ExecutionEventType.FILLED,
+                    now,
+                    payload={
+                        "resolved_from": ExecutionEventType.SUBMITTED.value,
+                        "ticket": position.ticket,
+                        "broker_symbol": position.broker_symbol,
+                        "side": position.side.value,
+                        "volume": str(position.volume),
+                        "open_price": str(position.open_price),
+                        "opened_at_utc": position.opened_at_utc.isoformat(),
+                        "magic_number": magic,
+                    },
+                )
+                outcomes.append(
+                    PendingResolutionOutcome(
+                        order_request_id=order_request_id,
+                        event_type=ExecutionEventType.FILLED,
+                        ticket=position.ticket,
+                    )
+                )
+            # len(matches) == 0: still resting, or gone for a reason this
+            # minimal resolver cannot yet name -- Slice 2's job.
         return tuple(outcomes)
 
     def _evaluate_submission_readiness(

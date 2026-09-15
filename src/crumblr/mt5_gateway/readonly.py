@@ -540,6 +540,7 @@ class ReadOnlyMt5Gateway:
                 expires_at_utc=(
                     self._to_utc(int(order.time_expiration)) if order.time_expiration else None
                 ),
+                magic=int(order.magic) if getattr(order, "magic", None) else None,
                 observed_at_utc=observed,
             )
             for order in raw

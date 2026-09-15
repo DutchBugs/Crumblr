@@ -23,14 +23,19 @@ account pin (B7), the permit (B8) and AG-012 actually exist.
 `close_position`/`close_all_positions` are real (Phase B item B5,
 `review/adr/ADR-020-real-flatten-close.md`) — the same demo-only guard, the
 same "genuinely unreachable until a real caller wires it in" discipline.
-`cancel_pending_orders` still refuses: no pending-order support exists
-anywhere in this platform yet (MARKET-only canary, the same boundary
-`application/execution.py::ExecutionOrchestrator._recover_ambiguous_submission`'s
-own docstring already names), so there is nothing for it to honestly act on.
+
+`cancel_pending_order` (ICT LIMIT DEMO EXECUTION, Slice 1) is real: an
+exact-ticket cancel for one named, already-verified pending order —
+operational cleanup for a LIMIT entry that never triggers, never a broad
+sweep. `cancel_pending_orders` (plural, the `BrokerPort` cancel-all) still
+unconditionally refuses: this slice deliberately does not build cancel-all
+semantics, per its own scope decision, not because pending orders remain
+unsupported.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -42,6 +47,7 @@ from crumblr.domain.models import (
     ExecutionResult,
     FlattenInstruction,
     InstrumentSpec,
+    PendingOrderState,
     PositionState,
 )
 from crumblr.domain.timeutils import utc_now
@@ -50,13 +56,30 @@ from crumblr.mt5_gateway.execution import (
     MissingFinalRiskDecisionError,
     OrderCheckMt5Gateway,
     build_close_order_request,
-    build_market_order_request,
+    build_order_request,
     decimal_from_mt5,
 )
 from crumblr.mt5_gateway.readonly import ReadOnlyMt5Gateway
 from crumblr.observability.logging import get_logger
 
 _log = get_logger("mt5_gateway")
+
+
+@dataclass(frozen=True)
+class PendingOrderCancelResult:
+    """The real, decoded outcome of one `cancel_pending_order()` call.
+
+    Deliberately not `ExecutionResult`: a cancel is not an entry or a
+    close, and stretching `OrderState`'s FILLED/PARTIALLY_FILLED/REJECTED/
+    SUBMITTED vocabulary to also describe "removed" would misdescribe
+    what actually happened, the same objection this codebase's other
+    retcode-conflation fixes already established.
+    """
+
+    order_id: int
+    retcode: int
+    retcode_comment: str | None
+    accepted: bool
 
 
 class DemoOrderSendMt5Gateway:
@@ -88,6 +111,9 @@ class DemoOrderSendMt5Gateway:
     def positions(self) -> tuple[PositionState, ...]:
         return self._order_check_gateway.positions()
 
+    def pending_orders(self) -> tuple[PendingOrderState, ...]:
+        return self._order_check_gateway.pending_orders()
+
     def order_check(self, order: ApprovedOrder) -> OrderCheckCompleted:
         return self._order_check_gateway.order_check(order)
 
@@ -108,9 +134,11 @@ class DemoOrderSendMt5Gateway:
         mechanism exists — this reuses the one every other real call
         already trusts.
 
-        `state` is a best-effort three-way classification
-        (FILLED/PARTIALLY_FILLED/REJECTED), matching `order_check`'s own
-        DONE-vs-not-DONE precision level — Phase B item B3 is the
+        `state` is a best-effort classification
+        (FILLED/PARTIALLY_FILLED/REJECTED for a MARKET response, plus
+        SUBMITTED for a successfully placed LIMIT pending order — ICT
+        LIMIT DEMO EXECUTION Slice 1), matching `order_check`'s own
+        accepted-vs-not precision level — Phase B item B3 is the
         separate, later slice that turns a real broker response into
         full, durable, orchestrator-level outcome semantics (including
         transport exceptions/timeouts as distinct from a broker
@@ -131,7 +159,7 @@ class DemoOrderSendMt5Gateway:
             )
 
         module = self._client.module
-        request = build_market_order_request(module, order)
+        request = build_order_request(module, order)
 
         _log.info(
             "mt5.order_send",
@@ -263,9 +291,16 @@ class DemoOrderSendMt5Gateway:
         between `order_send` (an entry) and `close_position` (a close) —
         both are the same MT5 call shape, differing only in the request
         dict's content, so this is one decode, not two similar-looking
-        copies (`mt5_gateway/execution.py::build_market_order_request`'s own
+        copies (`mt5_gateway/execution.py::build_order_request`'s own
         "one function, not two dict literals" reasoning, applied to the
-        response side)."""
+        response side).
+
+        ICT LIMIT DEMO EXECUTION (Slice 1): `TRADE_RETCODE_PLACED` decodes
+        to `OrderState.SUBMITTED` — a real broker response distinct from
+        `TRADE_RETCODE_DONE`, meaning a LIMIT order was accepted onto the
+        book, not filled. Unreachable from `close_position` (always a
+        MARKET opposite-side deal), so this adds no ambiguity there.
+        """
         if result is None:
             code, message = module.last_error()
             raise Mt5CallFailedError(operation, code, message)
@@ -276,6 +311,8 @@ class DemoOrderSendMt5Gateway:
             state = OrderState.FILLED
         elif retcode == module.TRADE_RETCODE_DONE_PARTIAL:
             state = OrderState.PARTIALLY_FILLED
+        elif retcode == module.TRADE_RETCODE_PLACED:
+            state = OrderState.SUBMITTED
         else:
             state = OrderState.REJECTED
         comment = str(getattr(result, "comment", "")) or None
@@ -315,6 +352,61 @@ class DemoOrderSendMt5Gateway:
             completed_at_utc=now,
             order_send_payload=payload,
             request_payload=request,
+        )
+
+    # ------------------------------------------------------------------ #
+    # cancel_pending_order — real, live, mutating; exact-ticket only
+    # ------------------------------------------------------------------ #
+
+    def cancel_pending_order(self, order_id: int) -> PendingOrderCancelResult:
+        """Cancel exactly one named pending order at the broker (ICT LIMIT
+
+        DEMO EXECUTION, Slice 1) — operational cleanup for a LIMIT entry
+        that never triggered. Same demo-only guard as every other real
+        call: `self.account()` runs first, unconditionally. Deliberately
+        scoped to one named `order_id`, never a sweep — there is no
+        cancel-all here; `cancel_pending_orders` (plural, below) stays
+        unconditionally refused.
+
+        Not decoded through `_decode_order_send_result`: a cancel's
+        success retcode is not `TRADE_RETCODE_DONE`/`_PLACED`/`_DONE_PARTIAL`
+        with the same meaning those carry for an entry or a close — MT5
+        documents `TRADE_RETCODE_DONE` as the generic "request completed"
+        code, reused for removal too, so this decodes independently rather
+        than reusing `OrderState`'s entry/close-shaped vocabulary for a
+        cancel it was never meant to describe. The caller's own fresh
+        `pending_orders()` readback afterward, not this result alone, is
+        what proves the ticket is actually gone (mirrors
+        `close_demo_canary_position.py`'s own "never trust the response
+        alone" discipline).
+        """
+        self.account()
+        module = self._client.module
+        request: dict[str, Any] = {
+            "action": module.TRADE_ACTION_REMOVE,
+            "order": order_id,
+        }
+
+        _log.info("mt5.cancel_pending_order", order_id=order_id)
+        result = module.order_send(request)
+        if result is None:
+            code, message = module.last_error()
+            raise Mt5CallFailedError("cancel_pending_order", code, message)
+
+        retcode = int(result.retcode)
+        comment = str(getattr(result, "comment", "")) or None
+        accepted = retcode == module.TRADE_RETCODE_DONE
+        _log.info(
+            "mt5.cancel_pending_order_result",
+            order_id=order_id,
+            retcode=retcode,
+            accepted=accepted,
+        )
+        return PendingOrderCancelResult(
+            order_id=order_id,
+            retcode=retcode,
+            retcode_comment=comment,
+            accepted=accepted,
         )
 
     # ------------------------------------------------------------------ #

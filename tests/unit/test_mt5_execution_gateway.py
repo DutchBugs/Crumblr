@@ -100,6 +100,11 @@ class FakeMt5:
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
+    TRADE_ACTION_PENDING = 5
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_ACTION_REMOVE = 8
 
     def __init__(
         self,
@@ -276,6 +281,95 @@ class TestOrderCheck:
 
         with pytest.raises(Mt5CallFailedError, match="order_check"):
             gate.order_check(approved_order())
+
+
+# --------------------------------------------------------------------------- #
+# ICT LIMIT DEMO EXECUTION (Slice 1) -- LIMIT request building
+# --------------------------------------------------------------------------- #
+
+
+class TestOrderCheckLimitRequests:
+    def test_a_buy_limit_requests_pending_action_and_buy_limit_type(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(
+            entry_type=EntryType.LIMIT,
+            side=Side.BUY,
+            price="1.08000",
+            stop_loss_price="1.07800",
+            take_profit_price="1.08400",
+        )
+
+        gate.order_check(order)
+
+        request = fake.order_check_requests[0]
+        assert request["action"] == FakeMt5.TRADE_ACTION_PENDING
+        assert request["type"] == FakeMt5.ORDER_TYPE_BUY_LIMIT
+        assert request["price"] == pytest.approx(1.08000)
+        assert request["magic"] == order.magic_number
+
+    def test_a_sell_limit_requests_the_sell_limit_type(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(
+            entry_type=EntryType.LIMIT,
+            side=Side.SELL,
+            price="1.09000",
+            stop_loss_price="1.09200",
+            take_profit_price="1.08600",
+        )
+
+        gate.order_check(order)
+
+        assert fake.order_check_requests[0]["type"] == FakeMt5.ORDER_TYPE_SELL_LIMIT
+
+    def test_a_limit_request_never_carries_deviation(self) -> None:
+        """`deviation` is a MARKET-fill slippage-tolerance concept -- a
+
+        resting pending order has no use for it, and including it could
+        confuse or be rejected by the broker's own pending-order validation.
+        """
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(
+            entry_type=EntryType.LIMIT,
+            side=Side.BUY,
+            price="1.08000",
+            stop_loss_price="1.07800",
+            take_profit_price="1.08400",
+        )
+
+        gate.order_check(order)
+
+        assert "deviation" not in fake.order_check_requests[0]
+
+    def test_a_market_request_still_carries_deviation_unchanged(self) -> None:
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order()
+
+        gate.order_check(order)
+
+        assert fake.order_check_requests[0]["deviation"] == order.max_slippage_points
+
+    def test_a_stop_entry_type_is_refused_not_silently_mis_built(self) -> None:
+        """ICT LIMIT DEMO EXECUTION Slice 1 adds LIMIT only -- STOP stays a
+
+        later, separate scope decision, refused here rather than built as
+        if it were already supported.
+        """
+        fake = FakeMt5()
+        gate = gateway(fake)
+        order = approved_order(
+            entry_type=EntryType.STOP,
+            side=Side.BUY,
+            price="1.09000",
+            stop_loss_price="1.08800",
+            take_profit_price="1.09400",
+        )
+
+        with pytest.raises(ValueError, match="not supported"):
+            gate.order_check(order)
 
     def test_order_send_is_never_called_by_order_check(self) -> None:
         fake = FakeMt5()

@@ -118,6 +118,11 @@ class FakeMt5:
     ORDER_FILLING_IOC = 1
     TRADE_RETCODE_DONE = 0
     TRADE_RETCODE_DONE_PARTIAL = 1
+    TRADE_ACTION_PENDING = 5
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_ACTION_REMOVE = 8
 
     def __init__(
         self, *, symbols: tuple[str, ...] = ("EURUSD.a", "EURUSD.a.cfd", "GBPUSD.a")

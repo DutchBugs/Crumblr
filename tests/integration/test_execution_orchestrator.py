@@ -34,6 +34,7 @@ from tests.integration._execution_fixtures import (
     BROKER_SYMBOL,
     STRATEGY_VERSION,
     FakeMt5,
+    fake_pending_order,
     fake_position,
     orchestrator,
     order_check_result,
@@ -492,6 +493,160 @@ class TestEndToEnd:
         recovery_event = events[-1]
         assert recovery_event.payload is not None
         assert recovery_event.payload["matching_position_count"] == 3
+
+    def test_a_matching_pending_order_leaves_the_request_genuinely_open(
+        self, engine: Engine
+    ) -> None:
+        """ICT LIMIT DEMO EXECUTION (Slice 1): zero position matches but a
+
+        real, resting pending order with this request's own magic must
+        never be recorded as `submitted=False` — that would be a false
+        negative for a request that genuinely reached the broker. Nothing
+        is appended; the request stays at `SUBMISSION_STARTED` for a
+        later pass (or Slice 2's own resolver) to determine the real,
+        final outcome.
+        """
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        fake.open_pending_orders = (
+            fake_pending_order(magic=mt5_magic_number(request_id), ticket=800001),
+        )
+
+        second = orch.run_once()
+
+        assert second == ()
+        assert fake.order_send_calls == 0
+        events = ExecutionEventStore(engine).events_for(request_id)
+        assert events[-1].event_type == ExecutionEventType.SUBMISSION_STARTED
+
+    def test_the_pending_order_later_filling_resolves_as_submitted_normally(
+        self, engine: Engine
+    ) -> None:
+        """Once the resting order this platform found triggers and becomes
+
+        a real position, ordinary recovery (the existing position-match
+        path, unchanged) resolves it on the very next pass."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+
+        orch = orchestrator(
+            engine, config, fake, activation_watermark=FIXED_NOW - timedelta(seconds=1)
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        magic = mt5_magic_number(request_id)
+        fake.open_pending_orders = (fake_pending_order(magic=magic, ticket=800001),)
+
+        still_pending = orch.run_once()
+        assert still_pending == ()
+
+        fake.open_pending_orders = ()
+        fake.open_positions = (fake_position(magic=magic, ticket=900042),)
+
+        filled = orch.run_once()
+        assert len(filled) == 1
+        assert filled[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+
+        events = ExecutionEventStore(engine).events_for(request_id)
+        recovery_event = next(
+            e for e in events if e.event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        )
+        assert recovery_event.payload is not None
+        assert recovery_event.payload["submitted"] is True
+        assert recovery_event.payload["matching_tickets"] == [900042]
+
+    def test_two_matching_pending_orders_is_also_an_integrity_ambiguity(
+        self, engine: Engine
+    ) -> None:
+        """The same magic-collision defence as positions, applied to
+
+        pending orders too (Slice 1)."""
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        base_config = platform_config(expected_spec_version=the_spec.spec_version)
+        version = base_config.config_version
+        config = base_config.model_copy(
+            update={
+                "risk": base_config.risk.model_copy(update={"approved_config_version": version}),
+                "execution": base_config.execution.model_copy(
+                    update={
+                        "submission_enabled": True,
+                        "feedback_2_0_approved": True,
+                        "approved_canary_account_ref": APPROVED_CANARY_ACCOUNT_REF,
+                    }
+                ),
+            }
+        )
+        sealed_capsule(engine, config)
+        fake = FakeMt5()
+        kill_switch = KillSwitch()
+
+        orch = orchestrator(
+            engine,
+            config,
+            fake,
+            activation_watermark=FIXED_NOW - timedelta(seconds=1),
+            kill_switch=kill_switch,
+        )
+        first = orch.run_once()
+        request_id = first[0].order_request_id
+        magic = mt5_magic_number(request_id)
+        fake.open_pending_orders = (
+            fake_pending_order(magic=magic, ticket=800001),
+            fake_pending_order(magic=magic, ticket=800002),
+        )
+
+        second = orch.run_once()
+        assert len(second) == 1
+        assert second[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert fake.order_send_calls == 0
+        assert kill_switch.is_halted
+        assert ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS in kill_switch.active_reasons
+
+        events = ExecutionEventStore(engine).events_for(request_id)
+        recovery_event = events[-1]
+        assert recovery_event.payload is not None
+        assert recovery_event.payload["integrity_ambiguity"] is True
+        assert recovery_event.payload["matching_pending_order_count"] == 2
+        assert set(recovery_event.payload["matching_pending_order_ids"]) == {800001, 800002}
 
     def test_a_broker_rejected_order_never_reaches_the_submission_gate(
         self, engine: Engine

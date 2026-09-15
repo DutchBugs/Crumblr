@@ -93,6 +93,30 @@ class TestNormalizeExecutionResult:
         assert payload["mt5_order_ticket"] is None
         assert payload["executed_volume"] is None
 
+    def test_a_pending_placement_normalizes_to_submitted(self) -> None:
+        """ICT LIMIT DEMO EXECUTION (Slice 1): a real, resting LIMIT order
+
+        placed on the book -- not filled, not rejected -- decodes to the
+        event `domain/enums.py` reserved for exactly this.
+        """
+        result = execution_result(
+            state=OrderState.SUBMITTED,
+            mt5_order_ticket=800001,
+            mt5_deal_ticket=None,
+            retcode=10_008,
+            retcode_comment="Request placed",
+            executed_price=None,
+            executed_volume=None,
+        )
+
+        event_type, payload = normalize_execution_result(result)
+
+        assert event_type is ExecutionEventType.SUBMITTED
+        assert payload["state"] == "SUBMITTED"
+        assert payload["mt5_order_ticket"] == 800001
+        assert payload["mt5_deal_ticket"] is None
+        assert payload["retcode"] == 10_008
+
     @pytest.mark.parametrize(
         "state",
         [
@@ -100,7 +124,6 @@ class TestNormalizeExecutionResult:
             OrderState.RISK_APPROVED,
             OrderState.SUPERVISOR_APPROVED,
             OrderState.ORDER_CHECKED,
-            OrderState.SUBMITTED,
             OrderState.ACKNOWLEDGED,
             OrderState.RECONCILED,
             OrderState.CLOSED,

@@ -18,8 +18,8 @@ structurally rather than as a promise: see
 Phase B item B1 (`review/adr/ADR-016-demo-order-send-adapter.md`) adds a
 real, but separate and unwired, `order_send` in `mt5_gateway
 /demo_execution.py::DemoOrderSendMt5Gateway` — this module exports
-`build_market_order_request`/`decimal_from_mt5` for that class to reuse
-so `order_check` validates the exact request `order_send` would submit,
+`build_order_request`/`decimal_from_mt5` for that class to reuse so
+`order_check` validates the exact request `order_send` would submit,
 never a similar-looking duplicate. Neither of those two functions
 themselves sends anything; they only build a request dict / decode a
 result field.
@@ -32,13 +32,14 @@ from decimal import Decimal
 from typing import Any, NoReturn
 
 from crumblr.config import AccountGuardConfig
-from crumblr.domain.enums import Side
+from crumblr.domain.enums import EntryType, Side
 from crumblr.domain.events import OrderCheckCompleted
 from crumblr.domain.models import (
     AccountState,
     ApprovedOrder,
     FlattenInstruction,
     InstrumentSpec,
+    PendingOrderState,
     PositionState,
 )
 from crumblr.domain.timeutils import UtcDatetime, utc_now
@@ -63,7 +64,7 @@ class MissingFinalRiskDecisionError(RuntimeError):
     """
 
 
-_ORDER_TYPE_CONSTANT_BY_SIDE: dict[Side, str] = {
+_MARKET_ORDER_TYPE_CONSTANT_BY_SIDE: dict[Side, str] = {
     Side.BUY: "ORDER_TYPE_BUY",
     Side.SELL: "ORDER_TYPE_SELL",
 }
@@ -73,6 +74,16 @@ Read off the real module at call time by name (D-037 discipline: values
 passed *to* MT5 get the same "never hardcode the integer" treatment as
 values decoded *from* it) — see `Mt5Module.ORDER_TYPE_BUY`/`ORDER_TYPE_SELL`
 in `mt5_gateway/client.py`.
+"""
+
+_LIMIT_ORDER_TYPE_CONSTANT_BY_SIDE: dict[Side, str] = {
+    Side.BUY: "ORDER_TYPE_BUY_LIMIT",
+    Side.SELL: "ORDER_TYPE_SELL_LIMIT",
+}
+"""ICT LIMIT DEMO EXECUTION (Slice 1). LIMIT only — `EntryType.STOP` is a
+
+deliberate, separate scope decision, not silently folded in here (see
+`build_order_request`'s own `ValueError` for any other entry type).
 """
 
 
@@ -89,7 +100,7 @@ def decimal_from_mt5(value: Any) -> Decimal:
     return Decimal(repr(float(value)))
 
 
-def build_market_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, Any]:
+def build_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[str, Any]:
     """The MT5 request dict for `order`, shared between `order_check`
 
     (below) and `mt5_gateway/demo_execution.py`'s real `order_send`.
@@ -102,22 +113,45 @@ def build_market_order_request(module: Mt5Module, order: ApprovedOrder) -> dict[
     `order_send` cannot omit it — every reconciliation/ambiguous-recovery
     read since item 6 searches broker positions by this exact value
     (`ApprovedOrder.magic_number`).
+
+    ICT LIMIT DEMO EXECUTION (Slice 1): `entry_type` decides the trade
+    action and order-type constant — `MARKET` is `TRADE_ACTION_DEAL` with
+    an immediate BUY/SELL type, unchanged from before this slice; `LIMIT`
+    is `TRADE_ACTION_PENDING` with a BUY_LIMIT/SELL_LIMIT type, and never
+    carries `deviation` (a market-fill slippage-tolerance concept a
+    resting pending order has no use for). Any other `entry_type`
+    (`STOP`) is refused here — a deliberate, separate scope decision, not
+    a silent fallthrough. `price` (required for a non-MARKET order by
+    `ApprovedOrder`'s own validator, optional and normally absent for
+    MARKET) is included whenever set, unchanged from before this slice.
     """
-    order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+    if order.entry_type is EntryType.MARKET:
+        action = module.TRADE_ACTION_DEAL
+        order_type_constant = _MARKET_ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+    elif order.entry_type is EntryType.LIMIT:
+        action = module.TRADE_ACTION_PENDING
+        order_type_constant = _LIMIT_ORDER_TYPE_CONSTANT_BY_SIDE.get(order.side)
+    else:
+        raise ValueError(
+            f"{order.entry_type} orders are not supported: ICT LIMIT DEMO EXECUTION "
+            "Slice 1 adds LIMIT only, alongside the existing MARKET path -- STOP "
+            "remains a later, separate scope decision"
+        )
     if order_type_constant is None:
-        raise ValueError(f"no MT5 market order type for side {order.side}")
+        raise ValueError(f"no MT5 order type for side {order.side}")
 
     request: dict[str, Any] = {
-        "action": module.TRADE_ACTION_DEAL,
+        "action": action,
         "symbol": order.broker_symbol,
         "volume": float(order.volume),
         "type": getattr(module, order_type_constant),
         "magic": order.magic_number,
         "sl": float(order.stop_loss_price),
-        "deviation": order.max_slippage_points,
         "type_time": module.ORDER_TIME_GTC,
         "type_filling": module.ORDER_FILLING_IOC,
     }
+    if order.entry_type is EntryType.MARKET:
+        request["deviation"] = order.max_slippage_points
     if order.price is not None:
         request["price"] = float(order.price)
     if order.take_profit_price is not None:
@@ -129,7 +163,7 @@ def build_close_order_request(module: Mt5Module, instruction: FlattenInstruction
     """The MT5 request dict for closing exactly one open position (Phase B
 
     item B5, `review/adr/ADR-020-real-flatten-close.md`). A close *is* an
-    opposite-side `order_send`, with one field `build_market_order_request`
+    opposite-side `order_send`, with one field `build_order_request`
     never needs: `"position": instruction.ticket`. On a hedging account this
     is what tells the broker which specific ticket to act on — closing by
     symbol/side alone would let a close ambiguously net against, or open a
@@ -140,7 +174,7 @@ def build_close_order_request(module: Mt5Module, instruction: FlattenInstruction
     ticket, never re-derived. No `sl`/`tp`: a close does not set new
     protective levels.
     """
-    order_type_constant = _ORDER_TYPE_CONSTANT_BY_SIDE.get(instruction.close_side)
+    order_type_constant = _MARKET_ORDER_TYPE_CONSTANT_BY_SIDE.get(instruction.close_side)
     if order_type_constant is None:
         raise ValueError(f"no MT5 market order type for close_side {instruction.close_side}")
 
@@ -205,6 +239,9 @@ class OrderCheckMt5Gateway:
     def positions(self) -> tuple[PositionState, ...]:
         return self._reader.positions()
 
+    def pending_orders(self) -> tuple[PendingOrderState, ...]:
+        return self._reader.pending_orders()
+
     def terminal_health(self) -> dict[str, Any]:
         """Facts about the terminal, including `trade_allowed` — the
         execution multi-gate's "terminal AlgoTrading enabled" leg."""
@@ -238,7 +275,7 @@ class OrderCheckMt5Gateway:
             )
 
         module = self._client.module
-        request = build_market_order_request(module, order)
+        request = build_order_request(module, order)
 
         _log.info(
             "mt5.order_check",

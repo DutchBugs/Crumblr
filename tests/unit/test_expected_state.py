@@ -107,6 +107,25 @@ class TestPerRequestExposure:
         assert str(request_id) in exposure.undetermined_reasons[0]
         assert request_id not in exposure.determined_request_ids
 
+    def test_a_resting_submitted_pending_order_is_undetermined_not_flat(self) -> None:
+        """ICT LIMIT DEMO EXECUTION (Slice 1): the exact live gap this
+
+        slice's own review found -- `SUBMITTED`'s `_Exposure.UNDETERMINED`
+        classification must not fall through to "NONE -> nothing to
+        record" (which would report zero exposure for a request that may
+        carry real future exposure the moment it triggers)."""
+        request_id = uuid4()
+        history = [
+            event(ExecutionEventType.REQUEST_CLAIMED),
+            event(ExecutionEventType.SUBMISSION_STARTED, payload={"entry_type": "LIMIT"}),
+            event(ExecutionEventType.SUBMITTED, payload={"mt5_order_ticket": 800001}),
+        ]
+        exposure = derive_expected_exposure([(request_id, history)])
+        assert exposure.expected_position_tickets == frozenset()
+        assert len(exposure.undetermined_reasons) == 1
+        assert str(request_id) in exposure.undetermined_reasons[0]
+        assert request_id not in exposure.determined_request_ids
+
     def test_a_resolution_of_not_submitted_expects_no_exposure(self) -> None:
         request_id = uuid4()
         history = [

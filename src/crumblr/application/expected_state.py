@@ -67,17 +67,20 @@ _EXPOSURE_BY_EVENT: Mapping[ExecutionEventType, _Exposure] = {
     ExecutionEventType.SUBMISSION_STARTED: _Exposure.UNDETERMINED,
     ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED: _Exposure.DETERMINED,
     ExecutionEventType.RECONCILED: _Exposure.NOT_EXPOSURE_RELEVANT,
-    # Reserved for M5, unemittable today — see domain/enums.py. If a
-    # future item emits one of these without updating this table, the
-    # exhaustiveness test below still passes (they are already mapped),
-    # but the UNDETERMINED choice means this module fails closed rather
-    # than silently reporting zero exposure for a state it does not yet
-    # know how to read. FILLED now has a real (still unwired) producer
-    # as of Phase B item B3 — its UNDETERMINED entry is deliberately
-    # unchanged: attributing a ticket is still the magic-number search's
-    # job (`_recover_ambiguous_submission`), not this event's own
-    # payload — see `domain/enums.py::ExecutionEventType.FILLED`'s own
-    # docstring.
+    # `BROKER_ACK` stays reserved/unemittable — see domain/enums.py. If a
+    # future item emits it without updating this table, the exhaustiveness
+    # test below still passes (it is already mapped), but the UNDETERMINED
+    # choice means this module fails closed rather than silently reporting
+    # zero exposure for a state it does not yet know how to read. FILLED
+    # now has a real (still unwired) producer as of Phase B item B3 — its
+    # UNDETERMINED entry is deliberately unchanged: attributing a ticket
+    # is still the magic-number search's job
+    # (`_recover_ambiguous_submission`), not this event's own payload —
+    # see `domain/enums.py::ExecutionEventType.FILLED`'s own docstring.
+    # SUBMITTED (ICT LIMIT DEMO EXECUTION, Slice 1) has a real producer
+    # too now — its own explicit branch in `derive_expected_exposure()`
+    # below appends an honest `undetermined_reasons` entry rather than
+    # falling through to "nothing to record."
     ExecutionEventType.SUBMITTED: _Exposure.UNDETERMINED,
     ExecutionEventType.BROKER_ACK: _Exposure.UNDETERMINED,
     ExecutionEventType.FILLED: _Exposure.UNDETERMINED,
@@ -202,6 +205,23 @@ def derive_expected_exposure(
             reasons.append(
                 f"order_request_id {order_request_id} is stuck at SUBMISSION_STARTED "
                 "with its outcome not yet determined"
+            )
+            continue
+
+        if event_type is ExecutionEventType.SUBMITTED:
+            # ICT LIMIT DEMO EXECUTION (Slice 1): a real, resting pending
+            # order — genuinely not yet resolved to a fill, cancel,
+            # expiry or rejection. Falling through to "NONE -> nothing to
+            # record" here would report zero exposure for a request that
+            # may carry real future exposure the moment it triggers — an
+            # honest MATCHED verdict is worse than an honest UNKNOWN one.
+            # Full `expected_pending_order_ids` derivation (attributing
+            # the broker's own pending-order id) is Slice 2's job; this
+            # only prevents a false "nothing to see here" in the meantime.
+            reasons.append(
+                f"order_request_id {order_request_id} has a resting SUBMITTED pending "
+                "order whose eventual fill/cancel/expire/reject is not yet resolved "
+                "(Slice 2)"
             )
             continue
 

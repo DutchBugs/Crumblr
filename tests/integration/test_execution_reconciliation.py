@@ -307,6 +307,160 @@ def _seed_determined_request(
     return order_request_id
 
 
+def _seed_submitted_request(engine: Engine, config: Any) -> Any:
+    """Seed a durable request whose last event is `SUBMITTED` -- a real,
+
+    resting LIMIT pending order this platform placed (ICT LIMIT DEMO
+    EXECUTION, Slice 1) -- directly through the stores, the same pattern
+    `_seed_determined_request` already uses for `resolve_pending_once()`
+    to be exercised without driving `run_once()` through the full
+    capsule/submission machinery (`order_send` stays unreachable via
+    this fixture).
+    """
+    capsule = sealed_capsule(engine, config)
+    order_request_id = uuid4()
+    assert capsule.trade_intent is not None
+    ExecutionRequestStore(engine).claim(
+        order_request_id=order_request_id,
+        capsule_id=capsule.capsule_id,
+        intent_id=capsule.trade_intent.intent_id,
+        fingerprint="fp-1",
+        claimed_by="test-worker",
+        now=FIXED_NOW,
+    )
+    request_events = ExecutionEventStore(engine)
+    request_events.append(
+        order_request_id=order_request_id,
+        event_type=ExecutionEventType.SUBMISSION_STARTED,
+        occurred_at_utc=FIXED_NOW,
+        payload={"entry_type": "LIMIT"},
+    )
+    request_events.append(
+        order_request_id=order_request_id,
+        event_type=ExecutionEventType.SUBMITTED,
+        occurred_at_utc=FIXED_NOW,
+        payload={"mt5_order_ticket": 800001, "retcode": 10008},
+    )
+    return order_request_id
+
+
+class TestResolvePendingOnce:
+    """ICT LIMIT DEMO EXECUTION (Slice 1): the minimal SUBMITTED -> FILLED
+
+    resolver, end to end against real PostgreSQL and a fake MT5 terminal.
+    """
+
+    def test_no_submitted_requests_reads_nothing(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        fake = FakeMt5()
+        orch = orchestrator(engine, config, fake, activation_watermark=None)
+
+        assert orch.resolve_pending_once() == ()
+        assert fake.positions_get_calls == 0
+
+    def test_a_matching_position_resolves_to_filled_and_attributes_it(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        magic = mt5_magic_number(order_request_id)
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(magic=magic, ticket=900042),)
+
+        outcomes = orch_resolve(engine, config, fake)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.FILLED
+        assert outcomes[0].ticket == 900042
+
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        assert events[-1].event_type == ExecutionEventType.FILLED
+        assert events[-1].payload is not None
+        assert events[-1].payload["resolved_from"] == "SUBMITTED"
+        assert events[-1].payload["ticket"] == 900042
+        assert events[-1].payload["magic_number"] == magic
+
+    def test_still_resting_leaves_the_request_at_submitted(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        fake = FakeMt5()  # no positions -- still resting or unknown
+
+        outcomes = orch_resolve(engine, config, fake)
+
+        assert outcomes == ()
+        events = ExecutionEventStore(engine).events_for(order_request_id)
+        assert events[-1].event_type == ExecutionEventType.SUBMITTED
+
+    def test_two_matching_positions_is_an_integrity_ambiguity(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        magic = mt5_magic_number(order_request_id)
+        fake = FakeMt5()
+        fake.open_positions = (
+            fake_position(magic=magic, ticket=900042),
+            fake_position(magic=magic, ticket=900043),
+        )
+        kill_switch = KillSwitch()
+
+        outcomes = orch_resolve(engine, config, fake, kill_switch=kill_switch)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].event_type == ExecutionEventType.AMBIGUOUS_OUTCOME_RESOLVED
+        assert kill_switch.is_halted
+        assert ReasonCode.SUBMISSION_INTEGRITY_AMBIGUOUS in kill_switch.active_reasons
+
+    def test_an_already_filled_request_is_not_reprocessed(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        order_request_id = _seed_submitted_request(engine, config)
+        magic = mt5_magic_number(order_request_id)
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(magic=magic, ticket=900042),)
+
+        first = orch_resolve(engine, config, fake)
+        assert len(first) == 1
+
+        events_before_second = len(ExecutionEventStore(engine).events_for(order_request_id))
+        second = orch_resolve(engine, config, fake)
+
+        assert second == ()
+        assert len(ExecutionEventStore(engine).events_for(order_request_id)) == events_before_second
+
+    def test_never_calls_order_send(self, engine: Engine) -> None:
+        the_spec = spec()
+        InstrumentSpecStore(engine).record(the_spec)
+        config = _fully_approved_config(the_spec)
+        _seed_submitted_request(engine, config)
+        magic_ignored = 0
+        fake = FakeMt5()
+        fake.open_positions = (fake_position(magic=magic_ignored, ticket=900042),)
+
+        orch_resolve(engine, config, fake)
+
+        assert fake.order_send_calls == 0
+
+
+def orch_resolve(
+    engine: Engine, config: Any, fake: FakeMt5, *, kill_switch: KillSwitch | None = None
+) -> Any:
+    """`resolve_pending_once()` through a freshly built orchestrator --
+
+    mirrors how `TestReconcileOnce` above exercises `reconcile_once()` in
+    isolation.
+    """
+    orch = orchestrator(
+        engine, config, fake, activation_watermark=None, kill_switch=kill_switch or KillSwitch()
+    )
+    return orch.resolve_pending_once()
+
+
 class TestVerifyProtectiveStopsIntegration:
     """Core critical path item 9, end to end: `reconcile_once()` calling
 
@@ -504,8 +658,13 @@ class TestStillInert:
     def test_no_broker_fact_event_is_ever_emitted(self) -> None:
         """Source-level guard, directly protecting ADR-010's central
 
-        naming decision: `SUBMITTED`/`BROKER_ACK`/`FILLED`/`CLOSED` each
-        assert a broker fact no code path here can produce."""
+        naming decision — narrowed by ICT LIMIT DEMO EXECUTION (Slice 1):
+        `SUBMITTED` (a real LIMIT placement, via `resolve_pending_once()`)
+        and `FILLED` (a real fill, via the same method and the already-
+        wired MARKET canary path) are now genuinely, deliberately
+        reachable — this guard no longer covers them. `BROKER_ACK`/
+        `CLOSED` remain unreferenced anywhere in this module; nothing in
+        this slice gives either a real producer."""
         source = inspect.getsource(execution)
-        for name in ("SUBMITTED", "BROKER_ACK", "FILLED", "CLOSED"):
+        for name in ("BROKER_ACK", "CLOSED"):
             assert f"ExecutionEventType.{name}" not in source

@@ -359,6 +359,9 @@ broker_pending_order_snapshots = Table(
     Column("stop_loss_price", Numeric, nullable=True),
     Column("take_profit_price", Numeric, nullable=True),
     _utc_column("expires_at_utc", nullable=True),
+    # D-049 / ICT LIMIT DEMO EXECUTION Slice 1: mirrors
+    # broker_position_snapshots.magic — absent until this migration.
+    Column("magic", BigInteger, nullable=True),
     Column("payload", JSONB, nullable=False),
     Index("ix_broker_pending_order_snapshots_snapshot", "snapshot_id"),
 )

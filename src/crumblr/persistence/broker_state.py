@@ -162,6 +162,7 @@ class BrokerStateStore:
                             "stop_loss_price": order.stop_loss_price,
                             "take_profit_price": order.take_profit_price,
                             "expires_at_utc": order.expires_at_utc,
+                            "magic": order.magic,
                             "payload": order.model_dump(mode="json"),
                         }
                         for order in observation.pending_orders

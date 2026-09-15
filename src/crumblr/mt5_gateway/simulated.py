@@ -31,6 +31,7 @@ from crumblr.domain.models import (
     ApprovedOrder,
     ExecutionResult,
     InstrumentSpec,
+    PendingOrderState,
     PositionState,
 )
 from crumblr.domain.money import ZERO, price_to_points
@@ -239,6 +240,14 @@ class SimulatedBroker:
             )
             for position in self._open.values()
         )
+
+    def pending_orders(self) -> tuple[PendingOrderState, ...]:
+        """Always empty: this replay engine only ever fills MARKET orders
+
+        immediately (build.md §13) — it has never modelled a resting
+        pending order, and ICT LIMIT DEMO EXECUTION (Slice 1) does not
+        change that; LIMIT support there is real-broker-only."""
+        return ()
 
     def order_check(self, order: ApprovedOrder) -> OrderCheckCompleted:
         """Margin and volume validation, mirroring MT5's `order_check`."""
