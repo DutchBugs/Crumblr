@@ -1047,3 +1047,216 @@ class TestExecutionTimeRevalidation:
                 now=FIXED_NOW + timedelta(milliseconds=100),
             )
             assert result.approved_volume in (None, prior_decision.approved_volume)
+
+
+class TestExecutionTimeComparesAgainstTheRealBudgetNotAFreshSizingArtifact:
+    """FINAL RISK BUDGET COMPARISON — DEFECT CONFIRM + MINIMAL FIX.
+
+    ADR-001 requires: current monetary risk of the fixed approved volume
+    must not exceed the current authorised risk budget, i.e.
+    `current_equity * intent.requested_risk_fraction`. The previous code
+    instead compared the fixed volume's freshly-priced carried risk against
+    `evaluate()`'s own reported `risk_amount` — which is the *realised* risk
+    of a freshly (re-)sized, broker-lot-rounded volume, not the budget
+    itself. Whenever the raw sizing did not divide evenly by
+    `spec.volume_step`, that rounded value sat below the true budget, so a
+    price move far smaller than the account had ever authorised could
+    refuse a trade with real budget headroom still unused.
+
+    Found live on the real Pepperstone DEMO canary (attempts 3, 4 and 6): a
+    fixed 0.02-lot BUY blocked on a single one-point adverse tick
+    (1.15367 -> 1.15368) despite the account's true risk budget having
+    roughly 30% headroom left. `carried` there was 3.484320557491289232,
+    `evaluate()`'s own `risk_amount` was 3.466985629344566400, and the true
+    budget was 4.99680 — `fresh.risk_amount < carried <= current_budget`,
+    exactly the shape the fixture below reproduces with round numbers.
+
+    The fixture is deliberately built so the fixed volume's raw sizing does
+    NOT divide evenly by `SPEC.volume_step` (`0.02` lots approved from a
+    budget of `8.0`, carrying only `7.00` — a rounding remainder of `1.00`)
+    so the gap between the old, buggy comparison target and the real budget
+    actually exists to be exploited.
+    """
+
+    def _intent_with_a_rounding_remainder(self, **overrides: object) -> TradeIntent:
+        fields: dict[str, object] = {
+            "stop_loss_price": Decimal("1.08150"),  # 350 points from the 1.08500 reference
+            "requested_risk_fraction": Decimal("0.0008"),
+        }
+        fields.update(overrides)
+        return healthy_intent(**fields)
+
+    def _approved(self, intent: TradeIntent) -> RiskDecision:
+        prior_decision = policies.evaluate(
+            intent,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08488"), ask=Decimal("1.08500")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+        assert prior_decision.verdict is RiskVerdict.PASS
+        assert prior_decision.approved_volume == Decimal("0.02")
+        assert prior_decision.risk_amount == Decimal("7.00")
+        return prior_decision
+
+    def test_the_fixture_actually_has_a_rounding_remainder_below_the_true_budget(self) -> None:
+        """Sanity check on the fixture itself: without a real gap between
+
+        `evaluate()`'s reported `risk_amount` and the true budget, none of
+        the scenarios below would distinguish the old code from the fix.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+        assert intent.requested_risk_fraction is not None
+        true_budget = EQUITY * intent.requested_risk_fraction
+        assert true_budget == Decimal("8.0000")
+        assert prior_decision.risk_amount is not None
+        assert prior_decision.risk_amount < true_budget
+
+    def test_a_small_adverse_move_within_the_true_budget_passes_with_the_same_volume(
+        self,
+    ) -> None:
+        """A single one-point adverse move: the fixed volume's freshly-priced
+
+        carried risk (7.02) exceeds `evaluate()`'s own rounded
+        `risk_amount` (7.00) — the old code refused exactly here — but it
+        is comfortably inside the true budget (8.0000). The fix must PASS
+        with the unchanged volume.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08499"), ask=Decimal("1.08501")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.approved_volume == prior_decision.approved_volume
+        assert result.risk_amount == Decimal("7.02")
+
+    def test_a_move_that_exceeds_the_true_budget_still_blocks(self) -> None:
+        """A 450-point move pushes carried risk (9.00) past the true budget
+
+        (8.0000) too, not just past the old rounded reference (7.00) — a
+        genuine breach must still refuse under the fix.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08598"), ask=Decimal("1.08600")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.RISK_PER_TRADE_LIMIT in result.reason_codes
+        assert result.approved_volume is None
+
+    def test_an_equity_drop_that_pushes_the_fixed_volume_over_the_new_budget_blocks(self) -> None:
+        """Equity drops from 10000 to 6250 (true budget 8.0000 -> 5.0000)
+
+        with the executable price unchanged. `evaluate()`'s own fresh
+        resizing still succeeds at the lower equity (it would approve
+        0.01 lots) — this is not a case where sizing collapses to nothing;
+        it must block specifically because the *fixed* 0.02-lot volume's
+        unchanged carried risk (7.00) now exceeds the new true budget
+        (5.0000), not because a fresh sizing failed outright.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+        assert intent.requested_risk_fraction is not None
+        assert intent.stop_loss_price is not None
+
+        dropped_equity = Decimal("6250")
+        fresh_sizing = size_position(
+            equity=dropped_equity,
+            risk_fraction=intent.requested_risk_fraction,
+            stop_distance_price=abs(intent.reference_price - intent.stop_loss_price),
+            spec=SPEC,
+        )
+        assert fresh_sizing.volume is not None, "fixture must keep evaluate()'s own resizing viable"
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08488"), ask=Decimal("1.08500")),
+            SPEC,
+            portfolio(
+                account=make_account_state(
+                    equity=dropped_equity, balance=dropped_equity, server="DemoBroker-Demo"
+                )
+            ),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.BLOCK
+        assert ReasonCode.RISK_PER_TRADE_LIMIT in result.reason_codes
+        assert result.approved_volume is None, "a refusal must never carry a smaller volume"
+
+    def test_a_favourable_move_passes_with_no_volume_increase(self) -> None:
+        """The ask moved toward the reference price: carried risk (6.98) is
+
+        lower than at intent time. FINAL Risk must still return exactly the
+        original volume, never a larger one a fresh sizing could now
+        afford.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+
+        result = policies.revalidate_fixed_volume_at_execution_time(
+            intent,
+            prior_decision,
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08498"), ask=Decimal("1.08499")),
+            SPEC,
+            portfolio(),
+            context(),
+            KillSwitch(),
+            now=FIXED_NOW + timedelta(milliseconds=100),
+        )
+
+        assert result.verdict is RiskVerdict.PASS
+        assert result.approved_volume == prior_decision.approved_volume
+        assert result.risk_amount == Decimal("6.98")
+
+    def test_final_risk_never_resizes_across_all_budget_comparison_scenarios(self) -> None:
+        """Property check across every scenario above: the outcome is always
+
+        exactly `prior_decision.approved_volume` (PASS) or `None` (refused)
+        — never a different, larger or smaller number.
+        """
+        intent = self._intent_with_a_rounding_remainder()
+        prior_decision = self._approved(intent)
+        scenarios = [
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08499"), ask=Decimal("1.08501")),
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08498"), ask=Decimal("1.08499")),
+            make_snapshot(event_time_utc=FIXED_NOW, bid=Decimal("1.08598"), ask=Decimal("1.08600")),
+        ]
+        for snapshot in scenarios:
+            result = policies.revalidate_fixed_volume_at_execution_time(
+                intent,
+                prior_decision,
+                snapshot,
+                SPEC,
+                portfolio(),
+                context(),
+                KillSwitch(),
+                now=FIXED_NOW + timedelta(milliseconds=100),
+            )
+            assert result.approved_volume in (None, prior_decision.approved_volume)

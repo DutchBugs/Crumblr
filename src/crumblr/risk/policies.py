@@ -297,8 +297,13 @@ def revalidate_fixed_volume_at_execution_time(
     freshly observed inputs — system/account state, market data quality and
     spread, session window, intent expiry, exposure, order frequency, and
     loss gates — rather than reimplementing any of them (ADR-001's own
-    requirement). `evaluate()`'s sizing decision is used only as a safety
-    *ceiling* below; it is never adopted as the answer.
+    requirement). `evaluate()`'s own sizing/`risk_amount` is never adopted as
+    the answer and never used as the comparison ceiling either: it is the
+    *realised* risk of a freshly (re-)sized, broker-lot-rounded volume, which
+    can sit below the account's actual authorised budget whenever the raw
+    sizing does not divide evenly by `spec.volume_step`. The ceiling below is
+    always the true budget, `fresh_portfolio.account.equity *
+    intent.requested_risk_fraction` (ADR-001).
 
     **This function never resizes.** The outcome is always exactly one of:
     PASS with `prior_decision.approved_volume` unchanged, or BLOCK/HALT
@@ -344,13 +349,24 @@ def revalidate_fixed_volume_at_execution_time(
         ]
         return _refuse_at_execution_time(intent, reasons, context, now)
 
-    assert fresh.risk_amount is not None
+    # `fresh.risk_amount` is `evaluate()`'s own *realised* risk of a freshly
+    # (re-)sized, broker-lot-rounded volume — not the account's actual
+    # authorised risk budget (ADR-001: `current equity * requested risk
+    # fraction`). Whenever the original sizing's raw volume did not divide
+    # evenly by `spec.volume_step`, that rounded-down realised risk sits
+    # below the true budget, so comparing the fixed volume's freshly-priced
+    # carried risk against it — instead of against the real budget — could
+    # refuse trades on price moves far smaller than the account ever
+    # authorised (found live: real Pepperstone DEMO canary attempts blocked
+    # by single-point moves with ample real budget headroom remaining).
+    assert intent.requested_risk_fraction is not None  # evaluate() PASS guarantees this
+    current_budget = fresh_portfolio.account.equity * intent.requested_risk_fraction
     carried = realised_risk(prior_decision.approved_volume, fresh_stop_distance, spec)
-    if carried > fresh.risk_amount:
-        # The fixed volume now carries more risk than a fresh sizing would
-        # currently allow (equity dropped, the executable price moved
-        # against the stop, or both). Refuse — never resize into a smaller
-        # volume.
+    if carried > current_budget:
+        # The fixed volume now carries more risk than the account's actual
+        # authorised budget allows (equity dropped, the executable price
+        # moved against the stop, or both). Refuse — never resize into a
+        # smaller volume.
         return _refuse_at_execution_time(
             intent,
             [ReasonCode.RISK_PER_TRADE_LIMIT, ReasonCode.EXECUTION_TIME_RISK_BLOCK],
