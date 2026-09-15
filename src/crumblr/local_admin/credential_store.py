@@ -74,11 +74,35 @@ def _target_name(name: str) -> str:
     return f"{CRED_TARGET_PREFIX}{name}"
 
 
-def _advapi32() -> ctypes.WinDLL:
+def _advapi32() -> ctypes.CDLL:
+    # `ctypes.CDLL`, not `ctypes.WinDLL`: `WinDLL` only exists in typeshed's
+    # platform-gated view of `ctypes` on win32, so a Linux-targeted `mypy`
+    # run (CI's own Linux job) cannot resolve it as a type. `CDLL` is
+    # `WinDLL`'s own cross-platform base class and is what every caller
+    # here actually uses it as -- dynamic `.CredWriteW`/`.CredReadW`/...
+    # attribute access, unaffected by which of the two names the static
+    # type says. The constructed object is still a real `WinDLL` at
+    # runtime; only the *declared* type widened to its portable base.
     _require_windows()
     import ctypes
 
-    return ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    return ctypes.WinDLL(  # type: ignore[attr-defined,no-any-return]  # win32-only; _require_windows() above already guarantees this line never runs elsewhere
+        "Advapi32.dll", use_last_error=True
+    )
+
+
+def _get_last_error() -> int:
+    """`ctypes.get_last_error()` -- the Win32 `GetLastError()` value
+
+    `use_last_error=True` above captures. Genuinely Windows-only, with no
+    portable equivalent (`ctypes.get_errno()` is the different, POSIX
+    `errno` mechanism), so this one function carries the single
+    `type: ignore` every caller in this module needs instead of repeating
+    it at each of the four call sites.
+    """
+    import ctypes
+
+    return ctypes.get_last_error()  # type: ignore[attr-defined,no-any-return]  # win32-only; every caller only reaches this after _require_windows()
 
 
 def _credential_struct() -> type[ctypes.Structure]:
@@ -148,7 +172,7 @@ def write(name: str, value: str) -> None:
     advapi32.CredWriteW.argtypes = [ctypes.POINTER(credential_type), wintypes.DWORD]
     advapi32.CredWriteW.restype = wintypes.BOOL
     if not advapi32.CredWriteW(ctypes.byref(cred), 0):
-        error = ctypes.get_last_error()
+        error = _get_last_error()
         raise OSError(f"CredWriteW failed for {name!r}: WinError {error}")
 
 
@@ -176,7 +200,7 @@ def read(name: str) -> str | None:
     cred_ptr = ctypes.POINTER(credential_type)()
     ok = advapi32.CredReadW(_target_name(name), _CRED_TYPE_GENERIC, 0, ctypes.byref(cred_ptr))
     if not ok:
-        error = ctypes.get_last_error()
+        error = _get_last_error()
         if error == _ERROR_NOT_FOUND:
             return None
         raise OSError(f"CredReadW failed for {name!r}: WinError {error}")
@@ -211,7 +235,7 @@ def status(name: str) -> CredentialStatus:
     cred_ptr = ctypes.POINTER(credential_type)()
     ok = advapi32.CredReadW(_target_name(name), _CRED_TYPE_GENERIC, 0, ctypes.byref(cred_ptr))
     if not ok:
-        error = ctypes.get_last_error()
+        error = _get_last_error()
         if error == _ERROR_NOT_FOUND:
             return CredentialStatus(configured=False, last_written_utc=None)
         raise OSError(f"CredReadW failed for {name!r}: WinError {error}")
@@ -234,7 +258,6 @@ def delete(name: str) -> bool:
     something already gone is not a failure), `True` if a real entry was
     removed.
     """
-    import ctypes
     from ctypes import wintypes
 
     advapi32 = _advapi32()
@@ -243,7 +266,7 @@ def delete(name: str) -> bool:
 
     ok = advapi32.CredDeleteW(_target_name(name), _CRED_TYPE_GENERIC, 0)
     if not ok:
-        error = ctypes.get_last_error()
+        error = _get_last_error()
         if error == _ERROR_NOT_FOUND:
             return False
         raise OSError(f"CredDeleteW failed for {name!r}: WinError {error}")

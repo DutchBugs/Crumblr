@@ -114,6 +114,23 @@ enable_error_code = ["redundant-expr", "possibly-undefined", "truthy-bool"]
 module = ["MetaTrader5.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# These are the only modules reaching Windows-only stdlib surface
+# (ctypes.WinDLL/get_last_error, winreg) that typeshed defines solely
+# under a win32 platform view. Each must pass strict mypy checked from
+# BOTH Windows (local dev's own platform) and Linux (CI's "Lint, types
+# and tests (Linux)" job) -- a `# type: ignore[...]` covering the
+# Linux-only diagnostic on such a line is therefore unavoidably "unused"
+# when the same file is checked under Windows, and vice versa. Only
+# `warn_unused_ignores` is relaxed here; every other strict check
+# (including genuinely unrelated bugs in these same files) still applies.
+module = [
+    "crumblr.local_admin.credential_store",
+    "scripts.migrate_secrets_to_credential_manager",
+    "scripts.remove_legacy_env_secrets",
+]
+warn_unused_ignores = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config -ra"
