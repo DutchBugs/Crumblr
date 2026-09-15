@@ -63,7 +63,12 @@ def order_check_result(**overrides: Any) -> Any:
     from types import SimpleNamespace
 
     fields: dict[str, Any] = {
-        "retcode": 0,  # TRADE_RETCODE_DONE, per FakeMt5 below
+        # `MqlTradeCheckResult`'s own success value ("basic check of
+        # structures passed") -- a real order_check() success, *not* the
+        # order_send()-only TRADE_RETCODE_DONE (10009). See
+        # `OrderCheckMt5Gateway.order_check`'s own comment for why these
+        # must never be conflated.
+        "retcode": 0,
         "balance": 10_000.0,
         "equity": 10_012.5,
         "profit": 12.5,
@@ -295,6 +300,109 @@ class TestOrderCheck:
             gate.order_check(order)
 
         assert not fake.order_check_requests
+
+
+# --------------------------------------------------------------------------- #
+# MT5 ORDER_CHECK RETCODE FIX (live evidence, 2026-09-15): order_check()'s
+# own retcode=0-means-accepted contract, kept deliberately separate from
+# order_send()'s TRADE_RETCODE_DONE semantics.
+# --------------------------------------------------------------------------- #
+
+
+class TestOrderCheckRetcodeSemantics:
+    def test_retcode_zero_with_done_comment_is_accepted(self) -> None:
+        """The exact real broker response observed live: `retcode=0`,
+
+        `comment="Done"` — a genuine successful check, not a rejection."""
+        fake = FakeMt5(order_check_response=order_check_result(retcode=0, comment="Done"))
+        gate = gateway(fake)
+
+        result = gate.order_check(approved_order())
+
+        assert result.accepted is True
+        assert result.retcode == 0
+        assert result.comment == "Done"
+
+    def test_trade_retcode_done_is_not_special_cased_as_check_success(self) -> None:
+        """10009 (`order_send()`'s own success retcode) must not be
+
+        treated as an `order_check()` success — only literal `0` is.
+        Deliberately does not rely on `FakeMt5.TRADE_RETCODE_DONE`'s own
+        value for this: the fix must hold regardless of what that
+        unrelated constant happens to be set to.
+        """
+        fake = FakeMt5(order_check_response=order_check_result(retcode=10_009, comment="Done"))
+        gate = gateway(fake)
+
+        result = gate.order_check(approved_order())
+
+        assert result.accepted is False
+        assert result.retcode == 10_009
+
+    def test_acceptance_never_depends_on_comment_text(self) -> None:
+        """A "Done"-worded comment alongside a non-zero retcode must still
+
+        be a rejection — `accepted` is retcode-only, never comment-based.
+        """
+        fake = FakeMt5(order_check_response=order_check_result(retcode=10_004, comment="Done"))
+        gate = gateway(fake)
+
+        result = gate.order_check(approved_order())
+
+        assert result.accepted is False
+        assert result.retcode == 10_004
+
+    def test_a_representative_non_zero_rejection_stays_rejected(self) -> None:
+        fake = FakeMt5(order_check_response=order_check_result(retcode=10_019, comment="No money"))
+        gate = gateway(fake)
+
+        result = gate.order_check(approved_order())
+
+        assert result.accepted is False
+        assert result.retcode == 10_019
+        assert result.comment == "No money"
+
+    def test_a_missing_response_still_raises_the_existing_mt5_call_failure(self) -> None:
+        fake = FakeMt5(order_check_response=_MISSING, error=(4, "No connection"))
+        gate = gateway(fake)
+
+        with pytest.raises(Mt5CallFailedError, match="order_check"):
+            gate.order_check(approved_order())
+
+    def test_payload_margin_and_comment_normalization_is_unchanged(self) -> None:
+        """The retcode-vs-accepted fix touches only the `accepted` field --
+
+        every other decoded field (payload dict, margin_required, comment)
+        must still normalize exactly as before.
+        """
+        fake = FakeMt5(
+            order_check_response=order_check_result(
+                retcode=0,
+                comment="Done",
+                balance=10_000.0,
+                equity=10_012.5,
+                profit=12.5,
+                margin=43.2,
+                margin_free=9_969.3,
+                margin_level=23_176.0,
+            )
+        )
+        gate = gateway(fake)
+
+        result = gate.order_check(approved_order())
+
+        assert result.margin_required is not None
+        assert float(result.margin_required) == pytest.approx(43.2)
+        assert result.payload == {
+            "retcode": 0,
+            "balance": 10_000.0,
+            "equity": 10_012.5,
+            "profit": 12.5,
+            "margin": 43.2,
+            "margin_free": 9_969.3,
+            "margin_level": 23_176.0,
+            "comment": "Done",
+        }
 
 
 # --------------------------------------------------------------------------- #

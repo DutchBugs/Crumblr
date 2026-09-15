@@ -253,7 +253,17 @@ class OrderCheckMt5Gateway:
             raise Mt5CallFailedError("order_check", code, message)
 
         retcode = int(result.retcode)
-        accepted = retcode == module.TRADE_RETCODE_DONE
+        # MT5 ORDER_CHECK RETCODE FIX (live evidence, 2026-09-15): a real
+        # successful `order_check()` reports `retcode=0`
+        # (`MqlTradeCheckResult`'s own success value — "basic check of
+        # structures passed"), never `TRADE_RETCODE_DONE` (10009, which
+        # belongs to a real `order_send()` response — see
+        # `demo_execution.py::_decode_order_send_result`, unchanged by
+        # this fix). Comparing against `TRADE_RETCODE_DONE` here made
+        # every genuinely successful check look rejected. Deliberately
+        # exact (`retcode == 0`), never comment-text-based: any non-zero
+        # check retcode stays `accepted=False`, whatever `comment` says.
+        accepted = retcode == 0
         comment = str(getattr(result, "comment", "")) or None
         payload = {
             "retcode": retcode,
