@@ -48,6 +48,10 @@ from crumblr.dashboard.agent_state import (
     build_last_decision,
 )
 from crumblr.dashboard.broker_panel import BrokerReadModel, build_broker_read_model
+from crumblr.dashboard.execution_activity_panel import (
+    ExecutionActivityState,
+    build_execution_activity,
+)
 from crumblr.dashboard.execution_panel import ExecutionGateState, build_execution_gate_state
 from crumblr.dashboard.paper_lite_journal import JournalReadResult, read_journal_entries
 from crumblr.dashboard.paper_portfolio import PaperPortfolioPanelState, build_paper_portfolio_panel
@@ -58,6 +62,7 @@ from crumblr.dashboard.reconciliation_panel import (
     build_reconciliation_panel,
 )
 from crumblr.dashboard.risk_panel import RiskPanelState, build_risk_panel
+from crumblr.dashboard.trainer_panel import TrainerPanelState, build_trainer_panel
 from crumblr.domain.enums import Environment
 from crumblr.domain.events import Event, EventType, SignalGenerated
 from crumblr.domain.models import Contract, MarketBar, MarketTick, RiskDecision
@@ -71,6 +76,7 @@ from crumblr.persistence.agent_gateway import (
     PostgresTradingAssignmentStore,
 )
 from crumblr.persistence.broker_state import BrokerStateStore
+from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore, EventJournal
 from crumblr.persistence.market_data import MarketDataStore
@@ -227,6 +233,28 @@ class DashboardState:
 
     trail, shown separately from `recent_events` since it has no comparable
     wall-clock timestamp to sort-merge against."""
+
+    decision_outcome_counts: dict[str, int]
+    """FULL RUN 1: `{"NO_TRADE": N, "TRADE_PROPOSAL": M}` for the configured
+
+    assignment, all-time — `{}` when no assignment is configured. A real,
+    computed aggregate (`PostgresAgentDecisionOutcomeStore
+    .counts_by_outcome_type`), never a decision input."""
+
+    execution_activity: ExecutionActivityState
+    """FULL RUN 1: real `execution_requests`/`execution_events` activity —
+
+    distinct from `execution_gate`, which only reads static config. See
+    `dashboard.execution_activity_panel`."""
+
+    trainer_panel: TrainerPanelState
+    """FULL RUN 1: Trainer reachability/campaign/dataset-ingest/candidate/
+
+    verification status, read entirely from separate, explicitly-run,
+    read-only status files — never a live call to Trainer or the Static
+    Agent from this process. See `dashboard.trainer_panel`. Always
+    includes the permanent `CANDIDATE NOT ACTIVE — HUMAN PROMOTION
+    REQUIRED` banner."""
 
 
 def _signal_summary(payload: SignalGenerated) -> str:
@@ -438,6 +466,10 @@ def build_state(
     paper_lite_journal_path: Path | None = None,
     paper_lite_settings_path: Path | None = None,
     expected_spec_version: str | None = None,
+    trainer_status_path: Path | None = None,
+    dataset_status_path: Path | None = None,
+    candidate_status_path: Path | None = None,
+    verification_record_path: Path | None = None,
     clock: Callable[[], UtcDatetime] = utc_now,
 ) -> DashboardState:
     """Read every source once and return one consistent-enough snapshot.
@@ -522,6 +554,22 @@ def build_state(
         canonical_symbol=canonical_symbol,
         expected_spec_version=expected_spec_version,
     )
+    decision_outcome_counts = (
+        PostgresAgentDecisionOutcomeStore(engine).counts_by_outcome_type(
+            agent_id=agent_panel.agent_id, assignment_id=agent_panel.assignment_id
+        )
+        if agent_panel is not None
+        else {}
+    )
+    execution_activity = build_execution_activity(
+        request_store=ExecutionRequestStore(engine), event_store=ExecutionEventStore(engine)
+    )
+    trainer_panel = build_trainer_panel(
+        trainer_status_path=trainer_status_path,
+        dataset_status_path=dataset_status_path,
+        candidate_status_path=candidate_status_path,
+        verification_record_path=verification_record_path,
+    )
 
     return DashboardState(
         generated_at_utc=now,
@@ -593,4 +641,7 @@ def build_state(
             _event_summary(event) for event in journal.recent(limit=RECENT_EVENT_COUNT)
         ),
         paper_lite_activity=_paper_lite_activity(journal_read.entries, limit=RECENT_EVENT_COUNT),
+        decision_outcome_counts=decision_outcome_counts,
+        execution_activity=execution_activity,
+        trainer_panel=trainer_panel,
     )

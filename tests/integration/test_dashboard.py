@@ -114,6 +114,10 @@ def client(
     expected_spec_version: str | None = None,
     execution_config: ExecutionConfig = EXECUTION_CONFIG,
     live_trading_acknowledged: bool = False,
+    trainer_status_path: Path | None = None,
+    dataset_status_path: Path | None = None,
+    candidate_status_path: Path | None = None,
+    verification_record_path: Path | None = None,
 ) -> TestClient:
     app = create_app(
         engine=engine,
@@ -129,6 +133,10 @@ def client(
         paper_lite_journal_path=paper_lite_journal_path,
         paper_lite_settings_path=paper_lite_settings_path,
         expected_spec_version=expected_spec_version,
+        trainer_status_path=trainer_status_path,
+        dataset_status_path=dataset_status_path,
+        candidate_status_path=candidate_status_path,
+        verification_record_path=verification_record_path,
     )
     return TestClient(app)
 
@@ -1360,3 +1368,88 @@ class TestPaperPortfolioRendersRealEvidence:
 
         assert body["paper_portfolio"]["status"] == "DEGRADED"
         assert body["paper_portfolio"]["portfolio"] is None
+
+
+class TestFullRun1Observability:
+    def test_the_candidate_not_active_banner_is_always_present(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """No file, no assignment, nothing configured -- the banner still
+
+        renders, because it is a structural constant, never derived from
+        anything this test could omit."""
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+
+        assert body["trainer_panel"]["candidate_active"] is False
+        assert (
+            body["trainer_panel"]["candidate_active_banner"]
+            == "CANDIDATE NOT ACTIVE — HUMAN PROMOTION REQUIRED"
+        )
+
+    def test_missing_trainer_files_read_as_unknown_not_an_error(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        response = client(
+            engine,
+            tmp_path / "health.json",
+            trainer_status_path=tmp_path / "trainer_status.json",
+            dataset_status_path=tmp_path / "dataset_status.json",
+            candidate_status_path=tmp_path / "candidate_status.json",
+            verification_record_path=tmp_path / "verification_record.json",
+        ).get("/api/state")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["trainer_panel"]["campaign"]["reachability"] == "UNKNOWN"
+        assert body["trainer_panel"]["verification"]["result"] == "NOT_RUN"
+
+    def test_a_real_trainer_status_file_is_reflected(self, engine: Engine, tmp_path: Path) -> None:
+        trainer_status_path = tmp_path / "trainer_status.json"
+        trainer_status_path.write_text(
+            json.dumps(
+                {
+                    "run_id": "FULLRUN1-TEST",
+                    "campaign_id": "CAM-FULLRUN1-TEST",
+                    "reachability": {"reachable": True},
+                    "campaign": {"found": True, "campaign": {"mode": "MODE_2"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        body = (
+            client(engine, tmp_path / "health.json", trainer_status_path=trainer_status_path)
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["campaign"]["reachability"] == "REACHABLE"
+        assert body["trainer_panel"]["campaign"]["campaign_status"] == "FOUND"
+        assert body["trainer_panel"]["campaign"]["run_id"] == "FULLRUN1-TEST"
+
+    def test_decision_outcome_counts_and_execution_activity_keys_are_present(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        body = client(engine, tmp_path / "health.json").get("/api/state").json()
+
+        assert body["decision_outcome_counts"] == {}
+        assert body["execution_activity"]["requests_claimed_count"] == 0
+        assert body["execution_activity"]["event_counts_by_type"] == {}
+        assert body["execution_activity"]["latest_event"] is None
+
+    def test_the_page_renders_the_candidate_sections(self, engine: Engine, tmp_path: Path) -> None:
+        response = client(engine, tmp_path / "health.json").get("/")
+        assert response.status_code == 200
+        assert "CANDIDATE NOT ACTIVE" in response.text
+        assert "HUMAN PROMOTION REQUIRED" in response.text
+        assert "Trainer &amp; Candidate Research" in response.text
+
+    def test_the_page_renders_the_active_static_trader_label_when_assignment_is_active(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        assignment_id = _register_active_assignment(engine)
+        response = client(engine, tmp_path / "health.json", agent_assignment_id=assignment_id).get(
+            "/"
+        )
+        assert response.status_code == 200
+        assert "ACTIVE STATIC TRADER" in response.text

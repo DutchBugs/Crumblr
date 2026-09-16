@@ -376,6 +376,73 @@ class TestTradeProposalOutcomeIdsFor:
         assert outcome_ids == (first.proposal_id, second.proposal_id)
 
 
+class TestCountsByOutcomeType:
+    """The dashboard's NO_TRADE/TRADE_PROPOSAL aggregate-count panel."""
+
+    def test_no_outcomes_yet_reads_as_empty(self, engine: Engine) -> None:
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        assert store.counts_by_outcome_type(agent_id=uuid4(), assignment_id=uuid4()) == {}
+
+    def test_counts_group_by_outcome_type(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+
+        gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(context_hash=bundle.content_hash),
+            now=FIXED_NOW + timedelta(seconds=1),
+        )
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=proposal(context_hash=bundle.content_hash),
+            now=FIXED_NOW + timedelta(seconds=2),
+        )
+
+        counts = PostgresAgentDecisionOutcomeStore(engine).counts_by_outcome_type(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert counts == {"NO_TRADE": 2, "TRADE_PROPOSAL": 1}
+
+    def test_a_different_identity_never_leaks_in(self, engine: Engine) -> None:
+        other_assignment_id = uuid4()
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        gateway.issue_assignment(assignment(assignment_id=other_assignment_id))
+        bundle = _with_context(gateway)
+        other_bundle = _with_context(gateway, assignment_id=other_assignment_id)
+
+        gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+        gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(
+                assignment_id=other_assignment_id, context_hash=other_bundle.content_hash
+            ),
+            now=FIXED_NOW,
+        )
+
+        counts = PostgresAgentDecisionOutcomeStore(engine).counts_by_outcome_type(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert counts == {"NO_TRADE": 1}
+
+
 class TestRestartSafety:
     """`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §8: "restart does
 

@@ -57,6 +57,7 @@ from uuid import UUID
 from sqlalchemy import Engine
 
 from crumblr.agent_gateway.gateway import derive_trade_intent_id
+from crumblr.domain.timeutils import utc_now
 from crumblr.persistence.agent_gateway import (
     PostgresAgentDecisionOutcomeStore,
     PostgresTradingAssignmentStore,
@@ -113,6 +114,15 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="resolve and print the dataset, do not POST",
+    )
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="also write a status snapshot (identity, counts, exclusion reasons, POST "
+        "outcome) to this path -- for the dashboard's closed-trade dataset panel, which "
+        "reads this file, never calls this script itself",
     )
     return parser.parse_args()
 
@@ -214,6 +224,43 @@ def collect(
     return result, returns_r
 
 
+def _write_snapshot(
+    path: Path | None,
+    *,
+    run_id: str | None,
+    identity: TraderIdentity,
+    result: DatasetCollectionResult,
+    campaign_id: str,
+    posted: bool,
+    trainer_http_status: int | None,
+) -> None:
+    if path is None:
+        return
+    snapshot = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "checked_at_utc": utc_now().isoformat(),
+        "campaign_id": campaign_id,
+        "identity": {
+            "agent_id": str(identity.agent_id),
+            "assignment_id": str(identity.assignment_id),
+            "strategy_artifact_hash": identity.strategy_artifact_hash,
+            "canonical_symbol": identity.canonical_symbol,
+            "timeframe": identity.timeframe,
+        },
+        "discovered_count": result.discovered_count,
+        "eligible_count": len(result.eligible),
+        "excluded_count": len(result.excluded),
+        "excluded_reasons": [
+            {"outcome_id": str(item.outcome_id), "reason": item.reason} for item in result.excluded
+        ],
+        "posted_to_trainer": posted,
+        "trainer_http_status": trainer_http_status,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     args = parse_args()
 
@@ -257,6 +304,15 @@ def main() -> int:
             "\nNo eligible closed trades for this identity yet -- reporting the fact "
             "plainly, not posting to Trainer, not substituting any other identity's data."
         )
+        _write_snapshot(
+            args.json,
+            run_id=args.run_id,
+            identity=identity,
+            result=result,
+            campaign_id=args.campaign_id,
+            posted=False,
+            trainer_http_status=None,
+        )
         return 0
 
     # Hard-coded, not an operator flag: `transaction_costs_included` is a
@@ -270,6 +326,15 @@ def main() -> int:
 
     if args.dry_run:
         print("\n--dry-run: not posting to Trainer")
+        _write_snapshot(
+            args.json,
+            run_id=args.run_id,
+            identity=identity,
+            result=result,
+            campaign_id=args.campaign_id,
+            posted=False,
+            trainer_http_status=None,
+        )
         return 0
 
     config = TrainerClientConfig(base_url=args.trainer_base_url, api_key=args.trainer_api_key)
@@ -296,10 +361,28 @@ def main() -> int:
         )
     except TrainerTransportError as error:
         print(f"BLOCKED: Trainer call failed: {error}", file=sys.stderr)
+        _write_snapshot(
+            args.json,
+            run_id=args.run_id,
+            identity=identity,
+            result=result,
+            campaign_id=args.campaign_id,
+            posted=False,
+            trainer_http_status=None,
+        )
         return 2
 
     print(f"\n=== Trainer response (HTTP {status}) ===")
     print(json.dumps(body, indent=2))
+    _write_snapshot(
+        args.json,
+        run_id=args.run_id,
+        identity=identity,
+        result=result,
+        campaign_id=args.campaign_id,
+        posted=200 <= status < 300,
+        trainer_http_status=status,
+    )
     return 0 if 200 <= status < 300 else 1
 
 

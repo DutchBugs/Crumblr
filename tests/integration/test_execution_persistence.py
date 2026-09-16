@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import Engine
 
+from crumblr.dashboard.execution_activity_panel import build_execution_activity
 from crumblr.domain.enums import Environment, ExecutionEventType, ReasonCode
 from crumblr.domain.models import DecisionCapsule
 from crumblr.persistence.execution import (
@@ -575,3 +576,131 @@ class TestExecutionEvents:
         )
         assert first == second
         assert first != different
+
+
+class TestCountClaimed:
+    def test_zero_before_any_claim(self, engine: Engine) -> None:
+        assert ExecutionRequestStore(engine).count_claimed() == 0
+
+    def test_counts_every_claimed_request(self, engine: Engine) -> None:
+        store = ExecutionRequestStore(engine)
+        for _ in range(3):
+            capsule = sealed_capsule(engine)
+            store.claim(
+                order_request_id=uuid4(),
+                capsule_id=capsule.capsule_id,
+                intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+                fingerprint="fp-1",
+                claimed_by="test-worker",
+                now=FIXED_NOW,
+            )
+        assert store.count_claimed() == 3
+
+
+class TestCountsByTypeAndLatestEvent:
+    def test_empty_before_any_event(self, engine: Engine) -> None:
+        store = ExecutionEventStore(engine)
+        assert store.counts_by_type() == {}
+        assert store.latest_event() is None
+
+    def test_counts_group_by_event_type_across_requests(self, engine: Engine) -> None:
+        event_store = ExecutionEventStore(engine)
+        request_store = ExecutionRequestStore(engine)
+        for _ in range(2):
+            capsule = sealed_capsule(engine)
+            order_request_id = uuid4()
+            request_store.claim(
+                order_request_id=order_request_id,
+                capsule_id=capsule.capsule_id,
+                intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+                fingerprint="fp-1",
+                claimed_by="test-worker",
+                now=FIXED_NOW,
+            )
+            event_store.append(
+                order_request_id=order_request_id,
+                event_type=ExecutionEventType.REQUEST_CLAIMED,
+                occurred_at_utc=FIXED_NOW,
+            )
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        request_store.claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        event_store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.ORDER_CHECKED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        counts = event_store.counts_by_type()
+
+        assert counts["REQUEST_CLAIMED"] == 2
+        assert counts["ORDER_CHECKED"] == 1
+
+    def test_latest_event_is_the_most_recently_appended_across_requests(
+        self, engine: Engine
+    ) -> None:
+        event_store = ExecutionEventStore(engine)
+        request_store = ExecutionRequestStore(engine)
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        request_store.claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        event_store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+        event_store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.ORDER_CHECKED,
+            occurred_at_utc=FIXED_NOW,
+            detail="second",
+        )
+
+        latest = event_store.latest_event()
+
+        assert latest is not None
+        assert latest.event_type == ExecutionEventType.ORDER_CHECKED
+        assert latest.detail == "second"
+
+
+class TestBuildExecutionActivity:
+    def test_wires_the_three_reads_together(self, engine: Engine) -> None:
+        request_store = ExecutionRequestStore(engine)
+        event_store = ExecutionEventStore(engine)
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        request_store.claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+        event_store.append(
+            order_request_id=order_request_id,
+            event_type=ExecutionEventType.REQUEST_CLAIMED,
+            occurred_at_utc=FIXED_NOW,
+        )
+
+        activity = build_execution_activity(request_store=request_store, event_store=event_store)
+
+        assert activity.requests_claimed_count == 1
+        assert activity.event_counts_by_type == {"REQUEST_CLAIMED": 1}
+        assert activity.latest_event is not None
+        assert activity.latest_event.event_type == "REQUEST_CLAIMED"
+        assert activity.latest_event.order_request_id == str(order_request_id)

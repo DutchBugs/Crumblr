@@ -60,6 +60,33 @@ def main() -> int:
         help="PAPER_LITE's own settings file — read-only, sources the paper portfolio "
         "panel's starting_balance/account_currency/leverage",
     )
+    parser.add_argument(
+        "--trainer-status-path",
+        type=Path,
+        default=REPO_ROOT / "var" / "trainer_status.json",
+        help="scripts/check_trainer_status.py's own --json snapshot — read-only, never "
+        "written by this process",
+    )
+    parser.add_argument(
+        "--dataset-status-path",
+        type=Path,
+        default=REPO_ROOT / "var" / "closed_trade_dataset_state.json",
+        help="scripts/collect_crumblr_trader_dataset.py's own --json snapshot",
+    )
+    parser.add_argument(
+        "--candidate-status-path",
+        type=Path,
+        default=REPO_ROOT / "var" / "candidate_status.json",
+        help="scripts/fetch_trainer_candidate.py's own --status-json snapshot",
+    )
+    parser.add_argument(
+        "--verification-record-path",
+        type=Path,
+        default=REPO_ROOT / "var" / "candidate_verification_record.json",
+        help="crumblr-static-agent-host's scripts/verify_trainer_candidate.py's own "
+        "--out record, pointed at a path under this repo's var/ (same host, no copy "
+        "step needed)",
+    )
     args = parser.parse_args()
 
     try:
@@ -86,6 +113,10 @@ def main() -> int:
         paper_lite_journal_path=args.paper_lite_journal_path,
         paper_lite_settings_path=args.paper_lite_settings_path,
         expected_spec_version=market.expected_spec_version if market is not None else None,
+        trainer_status_path=args.trainer_status_path,
+        dataset_status_path=args.dataset_status_path,
+        candidate_status_path=args.candidate_status_path,
+        verification_record_path=args.verification_record_path,
     )
 
     print(f"Dashboard v0 (read-only) at http://{args.host}:{args.port}/")

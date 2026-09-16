@@ -161,3 +161,28 @@ def get_candidate_artifact(
     """
     url = config.base_url.rstrip("/") + f"/api/v1/campaigns/{campaign_id}/candidate-artifact"
     return _send(config, method="GET", url=url, body=None)
+
+
+def get_healthz(config: TrainerClientConfig) -> tuple[int, dict[str, Any]]:
+    """GET `{base_url}/healthz` -- Trainer's own liveness endpoint.
+
+    Read-only, no campaign scope. Returns `(status_code, decoded_json_body)`
+    for any response the server actually sent. Raises a
+    `TrainerTransportError` subclass only when the call itself failed (the
+    service is unreachable) -- see the module docstring.
+    """
+    url = config.base_url.rstrip("/") + "/healthz"
+    return _send(config, method="GET", url=url, body=None)
+
+
+def get_campaign(config: TrainerClientConfig, *, campaign_id: str) -> tuple[int, dict[str, Any]]:
+    """GET `{base_url}/api/v1/campaigns/{campaign_id}`.
+
+    Read-only. Returns `(status_code, decoded_json_body)` for any response
+    the server actually sent -- a `404 NotFoundError` (no such campaign) is
+    a real, meaningful answer here, not a transport failure. Raises a
+    `TrainerTransportError` subclass only when the call itself failed -- see
+    the module docstring.
+    """
+    url = config.base_url.rstrip("/") + f"/api/v1/campaigns/{campaign_id}"
+    return _send(config, method="GET", url=url, body=None)

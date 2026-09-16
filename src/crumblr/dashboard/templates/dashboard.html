@@ -573,9 +573,24 @@
 
   <!-- Row 3: Agent / StrategyArtifact panel -->
   <div class="section">
-    <div class="section-title">Agent / StrategyArtifact</div>
+    <div class="section-title">
+      Agent / StrategyArtifact
+      <span id="agent-active-badge">
+      {% if state.agent_panel and state.agent_panel.assignment_status == "ACTIVE" %}
+      <span class="badge-inline good" style="margin-left:8px;">ACTIVE STATIC TRADER</span>
+      {% endif %}
+      </span>
+    </div>
     <div class="card">
       {% if state.agent_panel %}
+      <div class="kv" style="margin-bottom:10px;">
+        <span class="k">Decision outcomes (all-time)</span>
+        <span class="v" id="decision-outcome-counts">
+          NO_TRADE: {{ state.decision_outcome_counts.get("NO_TRADE", 0) }}
+          &nbsp;•&nbsp;
+          TRADE_PROPOSAL: {{ state.decision_outcome_counts.get("TRADE_PROPOSAL", 0) }}
+        </span>
+      </div>
       <div class="grid-3">
         <div>
           <div class="panel-title">Assignment</div>
@@ -620,6 +635,77 @@
         or none was found for the one configured.
       </div>
       {% endif %}
+    </div>
+  </div>
+
+  <!-- Row 3b: Trainer & Candidate Research (FULL RUN 1). Every field here
+       comes from build_trainer_panel(), which only ever reads separate,
+       explicitly-run, read-only status JSON files -- this dashboard never
+       calls Trainer or the Static Agent itself. The banner is a
+       structural constant, shown unconditionally. -->
+  <div class="section">
+    <div class="section-title">Trainer &amp; Candidate Research</div>
+    <div class="card" style="margin-bottom:10px;">
+      <span class="badge-inline bad">{{ state.trainer_panel.candidate_active_banner }}</span>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <div class="panel-title">Trainer campaign</div>
+        <div id="trainer-campaign-body">
+          <div class="kv"><span class="k">Reachability</span><span class="v"><span class="badge-inline {{ state.trainer_panel.campaign.reachability | state_class }}">{{ state.trainer_panel.campaign.reachability }}</span></span></div>
+          <div class="kv"><span class="k">Campaign ID</span><span class="v mono">{{ state.trainer_panel.campaign.campaign_id or "—" }}</span></div>
+          <div class="kv"><span class="k">Campaign status</span><span class="v"><span class="badge-inline {{ state.trainer_panel.campaign.campaign_status | state_class }}">{{ state.trainer_panel.campaign.campaign_status }}</span></span></div>
+          <div class="kv"><span class="k">Mode</span><span class="v">{{ state.trainer_panel.campaign.campaign_mode or "—" }}</span></div>
+          <div class="kv"><span class="k">Strategy key</span><span class="v mono">{{ state.trainer_panel.campaign.campaign_strategy_key or "—" }}</span></div>
+          <div class="kv"><span class="k">Checked at</span><span class="v">{{ state.trainer_panel.campaign.checked_at_utc or "NOT YET CHECKED" }}</span></div>
+          <div class="kv"><span class="k">Run ID</span><span class="v mono">{{ state.trainer_panel.campaign.run_id or "—" }}</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="panel-title">Closed-trade dataset</div>
+        <div id="trainer-dataset-body">
+          <div class="kv"><span class="k">Discovered</span><span class="v">{{ state.trainer_panel.dataset.discovered_count if state.trainer_panel.dataset.discovered_count is not none else "—" }}</span></div>
+          <div class="kv"><span class="k">Eligible</span><span class="v">{{ state.trainer_panel.dataset.eligible_count if state.trainer_panel.dataset.eligible_count is not none else "—" }}</span></div>
+          <div class="kv"><span class="k">Excluded</span><span class="v">{{ state.trainer_panel.dataset.excluded_count if state.trainer_panel.dataset.excluded_count is not none else "—" }}</span></div>
+          <div class="kv"><span class="k">Posted to Trainer</span><span class="v">{{ "YES" if state.trainer_panel.dataset.posted_to_trainer else ("NO" if state.trainer_panel.dataset.posted_to_trainer is not none else "—") }}</span></div>
+          <div class="kv"><span class="k">Checked at</span><span class="v">{{ state.trainer_panel.dataset.checked_at_utc or "NOT YET CHECKED" }}</span></div>
+          {% if state.trainer_panel.dataset.excluded_reasons %}
+          <div class="muted" style="margin-top:6px;">{{ state.trainer_panel.dataset.excluded_reasons | join("; ") | truncate(160) }}</div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="card">
+        <div class="panel-title">Candidate &amp; verification</div>
+        <div id="trainer-candidate-body">
+          <div class="kv"><span class="k">Availability</span><span class="v"><span class="badge-inline {{ state.trainer_panel.candidate.availability | state_class }}">{{ state.trainer_panel.candidate.availability }}</span></span></div>
+          <div class="kv"><span class="k">Research status</span><span class="v">{{ state.trainer_panel.candidate.research_status or "—" }}</span></div>
+          <div class="kv"><span class="k">Spec hash</span><span class="v mono" title="{{ state.trainer_panel.candidate.candidate_strategy_spec_hash or '' }}">{{ (state.trainer_panel.candidate.candidate_strategy_spec_hash or "—") | truncate(16, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Parent strategy</span><span class="v mono">{{ state.trainer_panel.candidate.parent_strategy_key or "—" }}</span></div>
+          <div class="kv"><span class="k">Static verification</span><span class="v"><span class="badge-inline {{ state.trainer_panel.verification.result | state_class }}">{{ state.trainer_panel.verification.result }}</span></span></div>
+          <div class="kv"><span class="k">Candidate hash</span><span class="v mono" title="{{ state.trainer_panel.verification.candidate_hash or '' }}">{{ (state.trainer_panel.verification.candidate_hash or "—") | truncate(16, True, '…') }}</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 3c: Execution activity -- real execution_requests/execution_events
+       history, distinct from the config-only "Execution" gate card below. -->
+  <div class="section">
+    <div class="section-title">Execution activity</div>
+    <div class="card">
+      <div id="execution-activity-body">
+        <div class="kv"><span class="k">Requests claimed (all-time)</span><span class="v">{{ state.execution_activity.requests_claimed_count }}</span></div>
+        <div class="kv"><span class="k">Events by type</span><span class="v">
+          {% if state.execution_activity.event_counts_by_type %}
+            {% for event_type, count in state.execution_activity.event_counts_by_type.items() %}{{ event_type }}: {{ count }}{% if not loop.last %}&nbsp;•&nbsp;{% endif %}{% endfor %}
+          {% else %}—{% endif %}
+        </span></div>
+        {% if state.execution_activity.latest_event %}
+        <div class="kv"><span class="k">Latest event</span><span class="v">{{ state.execution_activity.latest_event.event_type }} at {{ state.execution_activity.latest_event.occurred_at_utc }}</span></div>
+        {% else %}
+        <div class="kv"><span class="k">Latest event</span><span class="v na">NO EVIDENCE</span></div>
+        {% endif %}
+      </div>
     </div>
   </div>
 
@@ -933,6 +1019,106 @@
   function kv(label, valueHtml, cls) {
     return '<div class="kv"><span class="k">' + esc(label) + '</span>'
       + '<span class="v' + (cls ? " " + esc(cls) : "") + '">' + valueHtml + "</span></div>";
+  }
+
+  function badge(value) {
+    return '<span class="badge-inline ' + stateClass(value) + '">' + esc(value) + "</span>";
+  }
+
+  // FULL RUN 1: state.trainer_panel/execution_activity/decision_outcome_counts
+  // are all read from separate, explicitly-run, read-only status files or
+  // durable DB aggregates -- this function only ever displays whatever
+  // /api/state already carries, it never calls Trainer/the Static Agent
+  // itself. Same one-shot-rebuild discipline as renderBrokerAccount above.
+  function renderTrainerPanel(state) {
+    var counts = state.decision_outcome_counts || {};
+    setText(
+      "decision-outcome-counts",
+      "NO_TRADE: " + (counts.NO_TRADE || 0) + "  •  TRADE_PROPOSAL: " + (counts.TRADE_PROPOSAL || 0)
+    );
+
+    var activeBadge = document.getElementById("agent-active-badge");
+    if (activeBadge) {
+      var isActive = state.agent_panel && state.agent_panel.assignment_status === "ACTIVE";
+      activeBadge.innerHTML = isActive
+        ? '<span class="badge-inline good" style="margin-left:8px;">ACTIVE STATIC TRADER</span>'
+        : "";
+    }
+
+    var tp = state.trainer_panel;
+    if (!tp) return;
+
+    var campaignEl = document.getElementById("trainer-campaign-body");
+    if (campaignEl) {
+      var c = tp.campaign;
+      var html = "";
+      html += kv("Reachability", badge(c.reachability));
+      html += kv("Campaign ID", esc(c.campaign_id || "—"));
+      html += kv("Campaign status", badge(c.campaign_status));
+      html += kv("Mode", esc(c.campaign_mode || "—"));
+      html += kv("Strategy key", esc(c.campaign_strategy_key || "—"));
+      html += kv("Checked at", esc(c.checked_at_utc || "NOT YET CHECKED"));
+      html += kv("Run ID", esc(c.run_id || "—"));
+      campaignEl.innerHTML = html;
+    }
+
+    var datasetEl = document.getElementById("trainer-dataset-body");
+    if (datasetEl) {
+      var d = tp.dataset;
+      var dHtml = "";
+      dHtml += kv("Discovered", d.discovered_count != null ? d.discovered_count : "—");
+      dHtml += kv("Eligible", d.eligible_count != null ? d.eligible_count : "—");
+      dHtml += kv("Excluded", d.excluded_count != null ? d.excluded_count : "—");
+      dHtml += kv(
+        "Posted to Trainer",
+        d.posted_to_trainer === true ? "YES" : d.posted_to_trainer === false ? "NO" : "—"
+      );
+      dHtml += kv("Checked at", esc(d.checked_at_utc || "NOT YET CHECKED"));
+      if (d.excluded_reasons && d.excluded_reasons.length) {
+        dHtml += '<div class="muted" style="margin-top:6px;">' + esc(d.excluded_reasons.join("; ")) + "</div>";
+      }
+      datasetEl.innerHTML = dHtml;
+    }
+
+    var candidateEl = document.getElementById("trainer-candidate-body");
+    if (candidateEl) {
+      var cand = tp.candidate;
+      var v = tp.verification;
+      var candHtml = "";
+      candHtml += kv("Availability", badge(cand.availability));
+      candHtml += kv("Research status", esc(cand.research_status || "—"));
+      candHtml += kv("Spec hash", esc((cand.candidate_strategy_spec_hash || "—").slice(0, 16)));
+      candHtml += kv("Parent strategy", esc(cand.parent_strategy_key || "—"));
+      candHtml += kv("Static verification", badge(v.result));
+      candHtml += kv("Candidate hash", esc((v.candidate_hash || "—").slice(0, 16)));
+      candidateEl.innerHTML = candHtml;
+    }
+  }
+
+  function renderExecutionActivity(state) {
+    var el = document.getElementById("execution-activity-body");
+    if (!el) return;
+    var activity = state.execution_activity;
+    if (!activity) return;
+    var html = "";
+    html += kv("Requests claimed (all-time)", activity.requests_claimed_count);
+    var counts = activity.event_counts_by_type || {};
+    var countParts = [];
+    for (var eventType in counts) {
+      if (Object.prototype.hasOwnProperty.call(counts, eventType)) {
+        countParts.push(esc(eventType) + ": " + counts[eventType]);
+      }
+    }
+    html += kv("Events by type", countParts.length ? countParts.join("&nbsp;•&nbsp;") : "—");
+    if (activity.latest_event) {
+      html += kv(
+        "Latest event",
+        esc(activity.latest_event.event_type) + " at " + esc(activity.latest_event.occurred_at_utc)
+      );
+    } else {
+      html += kv("Latest event", "NO EVIDENCE", "na");
+    }
+    el.innerHTML = html;
   }
 
   // Mirrors the server-rendered Jinja markup for the broker section exactly
@@ -1288,6 +1474,8 @@
     renderPaperPortfolio(state);
     renderActivityFeed(state, currentActivityFilter);
     renderPipeline(state);
+    renderTrainerPanel(state);
+    renderExecutionActivity(state);
 
     setClass("mt5-state", "state", stateClass(state.mt5_connectivity));
     setClass("mt5-dot", "dot", stateClass(state.mt5_connectivity));
@@ -1457,6 +1645,8 @@
       renderPipeline: renderPipeline,
       pipelineStageClass: pipelineStageClass,
       renderPaperPortfolio: renderPaperPortfolio,
+      renderTrainerPanel: renderTrainerPanel,
+      renderExecutionActivity: renderExecutionActivity,
       applyState: applyState,
     };
   }

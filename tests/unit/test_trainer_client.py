@@ -25,7 +25,10 @@ from crumblr.trainer_bridge.trainer_client import (
     TrainerInvalidResponseError,
     TrainerRedirectRefusedError,
     TrainerResponseTooLargeError,
+    TrainerTransportError,
+    get_campaign,
     get_candidate_artifact,
+    get_healthz,
     post_agent_data,
 )
 
@@ -288,6 +291,68 @@ class TestGetCandidateArtifact:
 
         with pytest.raises(TrainerInvalidResponseError):
             get_candidate_artifact(config, campaign_id="CAM-1")
+
+
+class TestGetHealthz:
+    def test_a_2xx_response_is_returned_not_raised(self, server_factory: Any) -> None:
+        body = json.dumps({"status": "ok"}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        status, decoded = get_healthz(config)
+
+        assert status == 200
+        assert decoded == {"status": "ok"}
+
+    def test_gets_the_exact_healthz_path(self, server_factory: Any) -> None:
+        _REQUESTS.clear()
+        body = json.dumps({"status": "ok"}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        get_healthz(config)
+
+        assert _REQUESTS[-1]["path"] == "/healthz"
+
+    def test_an_unreachable_server_raises_not_returns(self, server_factory: Any) -> None:
+        server = server_factory(_handler_factory(status=200, body=b"{}"))
+        config = TrainerClientConfig(base_url=server.base_url)
+        server.stop()
+
+        with pytest.raises(TrainerTransportError):
+            get_healthz(config)
+
+
+class TestGetCampaign:
+    def test_a_2xx_response_is_returned_not_raised(self, server_factory: Any) -> None:
+        body = json.dumps({"campaign_id": "CAM-FULLRUN1-1", "mode": "MODE_2"}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        status, decoded = get_campaign(config, campaign_id="CAM-FULLRUN1-1")
+
+        assert status == 200
+        assert decoded["mode"] == "MODE_2"
+
+    def test_gets_the_exact_campaign_path(self, server_factory: Any) -> None:
+        _REQUESTS.clear()
+        body = json.dumps({"ok": True}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        get_campaign(config, campaign_id="CAM-FULLRUN1-1")
+
+        assert _REQUESTS[-1]["path"] == "/api/v1/campaigns/CAM-FULLRUN1-1"
+
+    def test_a_404_is_returned_not_raised(self, server_factory: Any) -> None:
+        body = json.dumps({"error": "NotFoundError", "message": "no such campaign"}).encode("utf-8")
+        server = server_factory(_handler_factory(status=404, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        status, decoded = get_campaign(config, campaign_id="CAM-MISSING")
+
+        assert status == 404
+        assert decoded["error"] == "NotFoundError"
 
 
 class TestRefusals:

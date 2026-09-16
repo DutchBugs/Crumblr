@@ -528,3 +528,23 @@ class PostgresAgentDecisionOutcomeStore:
         )
         with self._engine.connect() as connection:
             return tuple(row[0] for row in connection.execute(statement))
+
+    def counts_by_outcome_type(self, *, agent_id: UUID, assignment_id: UUID) -> dict[str, int]:
+        """Every outcome ever claimed by exactly this `(agent_id,
+        assignment_id)` pair, grouped by `outcome_type` -- e.g.
+        `{"NO_TRADE": 4892, "TRADE_PROPOSAL": 0}`. A dashboard-facing
+        aggregate count, read-only, never a decision input. Both id fields
+        for the same reason `trade_proposal_outcome_ids_for` requires
+        both -- a caller naming a mismatched pair gets zero rows, never a
+        silent cross-identity count."""
+        statement = (
+            select(agent_decision_outcomes.c.outcome_type, func.count())
+            .select_from(agent_decision_outcomes)
+            .where(
+                agent_decision_outcomes.c.agent_id == agent_id,
+                agent_decision_outcomes.c.assignment_id == assignment_id,
+            )
+            .group_by(agent_decision_outcomes.c.outcome_type)
+        )
+        with self._engine.connect() as connection:
+            return {row[0]: int(row[1]) for row in connection.execute(statement)}

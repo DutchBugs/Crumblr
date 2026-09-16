@@ -266,6 +266,32 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             for event in state.recent_events
         ],
         "paper_lite_activity": [asdict(row) for row in state.paper_lite_activity],
+        "decision_outcome_counts": state.decision_outcome_counts,
+        "execution_activity": {
+            "requests_claimed_count": state.execution_activity.requests_claimed_count,
+            "event_counts_by_type": state.execution_activity.event_counts_by_type,
+            "latest_event": (
+                {
+                    **asdict(state.execution_activity.latest_event),
+                    "occurred_at_utc": (
+                        state.execution_activity.latest_event.occurred_at_utc.isoformat()
+                    ),
+                }
+                if state.execution_activity.latest_event is not None
+                else None
+            ),
+        },
+        "trainer_panel": {
+            "campaign": asdict(state.trainer_panel.campaign),
+            "dataset": {
+                **asdict(state.trainer_panel.dataset),
+                "excluded_reasons": list(state.trainer_panel.dataset.excluded_reasons),
+            },
+            "candidate": asdict(state.trainer_panel.candidate),
+            "verification": asdict(state.trainer_panel.verification),
+            "candidate_active": state.trainer_panel.candidate_active,
+            "candidate_active_banner": state.trainer_panel.candidate_active_banner,
+        },
     }
     for key in ("latest_signal", "latest_risk_decision", "latest_supervisor_decision"):
         summary = getattr(state, key)
@@ -288,6 +314,10 @@ def create_app(
     paper_lite_journal_path: Path | None = None,
     paper_lite_settings_path: Path | None = None,
     expected_spec_version: str | None = None,
+    trainer_status_path: Path | None = None,
+    dataset_status_path: Path | None = None,
+    candidate_status_path: Path | None = None,
+    verification_record_path: Path | None = None,
 ) -> FastAPI:
     """Build the dashboard app against one already-open database engine.
 
@@ -325,6 +355,10 @@ def create_app(
             paper_lite_journal_path=paper_lite_journal_path,
             paper_lite_settings_path=paper_lite_settings_path,
             expected_spec_version=expected_spec_version,
+            trainer_status_path=trainer_status_path,
+            dataset_status_path=dataset_status_path,
+            candidate_status_path=candidate_status_path,
+            verification_record_path=verification_record_path,
         )
 
     @app.get("/", response_class=HTMLResponse)

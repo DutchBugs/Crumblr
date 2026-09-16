@@ -197,6 +197,18 @@ class ExecutionRequestStore:
             )
         return ClaimResult(claimed=False)
 
+    def count_claimed(self) -> int:
+        """How many `execution_requests` rows have ever been claimed,
+        all-time -- a dashboard-facing aggregate. Never a decision input;
+        FINAL Risk's own frequency check counts
+        `ExecutionEventType.SUBMISSION_STARTED` events instead
+        (`ExecutionEventStore.count_events_since`)."""
+        from sqlalchemy import func
+
+        statement = select(func.count()).select_from(execution_requests)
+        with self._engine.connect() as connection:
+            return int(connection.execute(statement).scalar_one())
+
     def capsule_id_for(self, order_request_id: UUID) -> UUID | None:
         """The `capsule_id` a given `order_request_id` was claimed against,
         or `None` if it was never claimed -- the read half of `claim()`, for
@@ -343,6 +355,45 @@ class ExecutionEventStore:
                 payload=row["payload"],
             )
             for row in rows
+        )
+
+    def counts_by_type(self) -> dict[str, int]:
+        """Every `execution_events` row ever recorded, grouped by
+        `event_type` -- e.g. `{"SUBMISSION_STARTED": 0, "FILLED": 1}`. A
+        dashboard-facing aggregate, all-time, never a decision input --
+        `FINAL Risk`'s own frequency check uses `count_events_since`, not
+        this."""
+        from sqlalchemy import func
+
+        statement = (
+            select(execution_events.c.event_type, func.count())
+            .select_from(execution_events)
+            .group_by(execution_events.c.event_type)
+        )
+        with self._engine.connect() as connection:
+            return {row[0]: int(row[1]) for row in connection.execute(statement)}
+
+    def latest_event(self) -> ExecutionEventRecord | None:
+        """The single most recently recorded event across every request,
+
+        by the table's own global `sequence` (an `Identity` column, unique
+        across the whole table, not per-request) -- `None` if no event has
+        ever been recorded. A dashboard-facing "what just happened" fact,
+        never a decision input.
+        """
+        statement = select(execution_events).order_by(execution_events.c.sequence.desc()).limit(1)
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        if row is None:
+            return None
+        return ExecutionEventRecord(
+            event_id=row["event_id"],
+            order_request_id=row["order_request_id"],
+            event_type=ExecutionEventType(row["event_type"]),
+            occurred_at_utc=row["occurred_at_utc"],
+            reason_codes=tuple(ReasonCode(code) for code in row["reason_codes"]),
+            detail=row["detail"],
+            payload=row["payload"],
         )
 
     def count_events_since(
