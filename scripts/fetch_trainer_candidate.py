@@ -10,10 +10,15 @@ Read-only against the Trainer's existing, already-reviewed
 Crumblr database connection, no MT5 connection, no write of any kind on the
 Crumblr side. Does not translate, verify, or otherwise interpret the
 artifact -- that is the Static Agent's `candidate_verifier` module. This
-script's only job is retrieving the exact bytes Trainer serves and saving
-them to a local file, so a candidate can be carried from Trainer to the
-Static Agent host without either side needing direct network access to the
-other.
+script's only job is retrieving the candidate Trainer serves and saving it
+to a local file, so it can be carried from Trainer to the Static Agent
+host without either side needing direct network access to the other.
+`get_candidate_artifact()` decodes the response as JSON and this script
+re-serializes that decoded object -- it preserves the logical candidate
+(every field and value Trainer sent), not the literal response bytes
+(whitespace/formatting are not preserved). Downstream hash verification
+(`candidate_verifier.translate_candidate`) recomputes its own canonical
+JSON from the decoded object, so this is not a correctness concern.
 
 Trainer's own `ConflictError` (no `RESEARCH_PROMISING` candidate exists yet
 for this campaign, or the strategy has no executable `local_strategy`) is a
