@@ -209,6 +209,21 @@ class ExecutionRequestStore:
         with self._engine.connect() as connection:
             return connection.execute(statement).scalar_one_or_none()
 
+    def order_request_id_for_intent(self, intent_id: UUID) -> UUID | None:
+        """The `order_request_id` claimed for a given `intent_id`, or
+        `None` if that intent never reached a claim -- an entirely normal
+        outcome for a `TradeIntent` that intent-time Risk or the Policy
+        Gate refused before execution ever began, not an error. The other
+        direction of `capsule_id_for`'s walk: from an
+        `agent_decision_outcomes` row's derived `intent_id`
+        (`agent_gateway.gateway.derive_trade_intent_id`) to the execution
+        this platform actually attempted, if it attempted one at all."""
+        statement = select(execution_requests.c.order_request_id).where(
+            execution_requests.c.intent_id == intent_id
+        )
+        with self._engine.connect() as connection:
+            return connection.execute(statement).scalar_one_or_none()
+
 
 class ExecutionEventStore:
     """The append-only half: every lifecycle step, one row each."""

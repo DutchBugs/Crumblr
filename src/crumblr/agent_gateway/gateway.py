@@ -87,6 +87,18 @@ own strategy artifact is still fully traceable via `strategy_version`
 (`TradingAssignment.strategy_artifact_hash`)."""
 
 
+def derive_trade_intent_id(proposal_id: UUID) -> UUID:
+    """The deterministic `TradeIntent.intent_id` `_build_trade_intent`
+    derives from a `TradeProposal.proposal_id` -- extracted to a named,
+    importable function (rather than left inline) so downstream tooling
+    that needs to walk from a durable `agent_decision_outcomes.outcome_id`
+    (== `proposal_id` for a `TRADE_PROPOSAL`) back to the resulting
+    `TradeIntent`/`execution_requests` row (`trainer_bridge`'s dataset
+    collector) reuses this exact formula instead of re-deriving or
+    guessing it a second time."""
+    return uuid5(NAMESPACE_DNS, f"{_INTENT_NAMESPACE}:{proposal_id}")
+
+
 @dataclass(frozen=True)
 class AgentDecisionOutcomeResult:
     """The result of one `submit_trade_proposal`/`submit_no_trade` call.
@@ -341,7 +353,7 @@ class AgentGateway:
         """
         bundle = self._contexts.by_hash(proposal.context_hash)
         assert bundle is not None  # already validated by _context_reason
-        intent_id = uuid5(NAMESPACE_DNS, f"{_INTENT_NAMESPACE}:{proposal.proposal_id}")
+        intent_id = derive_trade_intent_id(proposal.proposal_id)
         return TradeIntent(
             intent_id=intent_id,
             strategy_id=_EXTERNAL_AGENT_STRATEGY_ID,

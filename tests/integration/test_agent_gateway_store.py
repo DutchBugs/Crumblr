@@ -261,6 +261,121 @@ class TestBasicRoundTrip:
         assert len(events) == 2  # RECEIVED, then REJECTED
 
 
+class TestTradeProposalOutcomeIdsFor:
+    """`trainer_bridge`'s dataset collector's discovery step -- every
+    `TRADE_PROPOSAL` outcome ever claimed by one exact identity, whether
+    the Gateway went on to accept or reject it (a rejection is still a
+    real discovered candidate; the collector excludes it downstream with
+    an honest reason, it never disappears from the count here)."""
+
+    def test_no_outcomes_yet_reads_as_empty(self, engine: Engine) -> None:
+        store = PostgresAgentDecisionOutcomeStore(engine)
+        assert store.trade_proposal_outcome_ids_for(agent_id=uuid4(), assignment_id=uuid4()) == ()
+
+    def test_an_accepted_proposal_is_discoverable(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+        sent = proposal(context_hash=bundle.content_hash)
+
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=sent, now=FIXED_NOW
+        )
+        assert result.accepted is True
+
+        outcome_ids = PostgresAgentDecisionOutcomeStore(engine).trade_proposal_outcome_ids_for(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert outcome_ids == (sent.proposal_id,)
+
+    def test_a_rejected_proposal_is_still_discoverable(self, engine: Engine) -> None:
+        """A Gateway-level rejection (e.g. `UNKNOWN_CONTEXT`) is still a
+        `TRADE_PROPOSAL`-type outcome, not a `NO_TRADE` -- it must remain
+        discoverable so the collector's `discovered_count` is honest, even
+        though it will always end up excluded downstream."""
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        sent = proposal(context_hash="never-issued-hash")
+
+        result = gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=sent, now=FIXED_NOW
+        )
+        assert result.accepted is False
+
+        outcome_ids = PostgresAgentDecisionOutcomeStore(engine).trade_proposal_outcome_ids_for(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert outcome_ids == (sent.proposal_id,)
+
+    def test_a_no_trade_decision_is_never_returned(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+
+        gateway.submit_no_trade(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            decision=no_trade(context_hash=bundle.content_hash),
+            now=FIXED_NOW,
+        )
+
+        outcome_ids = PostgresAgentDecisionOutcomeStore(engine).trade_proposal_outcome_ids_for(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert outcome_ids == ()
+
+    def test_a_different_assignment_never_leaks_in(self, engine: Engine) -> None:
+        other_assignment_id = uuid4()
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        gateway.issue_assignment(assignment(assignment_id=other_assignment_id))
+        bundle = _with_context(gateway)
+        other_bundle = _with_context(gateway, assignment_id=other_assignment_id)
+
+        sent = proposal(context_hash=bundle.content_hash)
+        other_sent = proposal(
+            assignment_id=other_assignment_id, context_hash=other_bundle.content_hash
+        )
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=sent, now=FIXED_NOW
+        )
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=other_sent, now=FIXED_NOW
+        )
+
+        outcome_ids = PostgresAgentDecisionOutcomeStore(engine).trade_proposal_outcome_ids_for(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert outcome_ids == (sent.proposal_id,)
+
+    def test_ordering_is_deterministic_by_claimed_at_then_sequence(self, engine: Engine) -> None:
+        gateway = build_gateway(engine)
+        gateway.register_identity(identity(), credential_secret=SECRET)
+        gateway.issue_assignment(assignment())
+        bundle = _with_context(gateway)
+
+        first = proposal(context_hash=bundle.content_hash)
+        second = proposal(context_hash=bundle.content_hash)
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID, credential_secret=SECRET, proposal=first, now=FIXED_NOW
+        )
+        gateway.submit_trade_proposal(
+            agent_id=AGENT_ID,
+            credential_secret=SECRET,
+            proposal=second,
+            now=FIXED_NOW + timedelta(seconds=1),
+        )
+
+        outcome_ids = PostgresAgentDecisionOutcomeStore(engine).trade_proposal_outcome_ids_for(
+            agent_id=AGENT_ID, assignment_id=ASSIGNMENT_ID
+        )
+        assert outcome_ids == (first.proposal_id, second.proposal_id)
+
+
 class TestRestartSafety:
     """`CRUMBLR_DEV2_AGENT_INTEGRATION_INSTRUCTIONS_V2.md` §8: "restart does
 

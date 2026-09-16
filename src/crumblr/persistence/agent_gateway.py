@@ -502,3 +502,29 @@ class PostgresAgentDecisionOutcomeStore:
         with self._engine.connect() as connection:
             row = connection.execute(statement).first()
         return None if row is None else row[0]
+
+    def trade_proposal_outcome_ids_for(
+        self, *, agent_id: UUID, assignment_id: UUID
+    ) -> tuple[UUID, ...]:
+        """Every `TRADE_PROPOSAL` outcome ever claimed by exactly this
+        `(agent_id, assignment_id)` pair, oldest first -- the identity
+        filter `trainer_bridge`'s dataset collector walks to discover
+        candidate closed trades. Deliberately both fields, not
+        `assignment_id` alone: an assignment is immutable-once-registered
+        and already implies its `allowed_agent_id`, but a caller naming
+        both gets a query that fails to match anything (rather than
+        silently matching a different agent) if the two ever disagree.
+        Ordered by `(claimed_at_utc, sequence)` for a stable, deterministic
+        result across repeated runs.
+        """
+        statement = (
+            select(agent_decision_outcomes.c.outcome_id)
+            .where(
+                agent_decision_outcomes.c.agent_id == agent_id,
+                agent_decision_outcomes.c.assignment_id == assignment_id,
+                agent_decision_outcomes.c.outcome_type == AgentOutcomeType.TRADE_PROPOSAL.value,
+            )
+            .order_by(agent_decision_outcomes.c.claimed_at_utc, agent_decision_outcomes.c.sequence)
+        )
+        with self._engine.connect() as connection:
+            return tuple(row[0] for row in connection.execute(statement))

@@ -165,6 +165,33 @@ class TestCapsuleIdFor:
         assert store.capsule_id_for(order_request_id) == capsule.capsule_id
 
 
+class TestOrderRequestIdForIntent:
+    """The other direction of `capsule_id_for`'s walk -- from an
+    `agent_decision_outcomes` row's derived `intent_id`
+    (`agent_gateway.gateway.derive_trade_intent_id`) to the execution
+    this platform actually attempted, if it attempted one at all."""
+
+    def test_an_unclaimed_intent_id_reads_as_none(self, engine: Engine) -> None:
+        store = ExecutionRequestStore(engine)
+        assert store.order_request_id_for_intent(uuid4()) is None
+
+    def test_a_claimed_intent_resolves_to_its_order_request_id(self, engine: Engine) -> None:
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        intent_id = capsule.trade_intent.intent_id  # type: ignore[union-attr]
+        store = ExecutionRequestStore(engine)
+        store.claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=intent_id,
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+
+        assert store.order_request_id_for_intent(intent_id) == order_request_id
+
+
 class TestCountEventsSince:
     """Review 1.23 F-060 (reopened): the durable order-frequency authority
 
