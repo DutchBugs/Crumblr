@@ -79,29 +79,19 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         raise TrainerRedirectRefusedError(f"refused redirect to {newurl!r} (status {code})")
 
 
-def post_agent_data(
-    config: TrainerClientConfig,
-    *,
-    campaign_id: str,
-    agent_id: str,
-    result: dict[str, Any],
-    source_reference: str | None = None,
+def _send(
+    config: TrainerClientConfig, *, method: str, url: str, body: bytes | None
 ) -> tuple[int, dict[str, Any]]:
-    """POST to `{base_url}/api/v1/campaigns/{campaign_id}/agent-data`.
+    """Shared request/response handling for every call in this module.
 
     Returns `(status_code, decoded_json_body)` for any response the server
     actually sent. Raises a `TrainerTransportError` subclass only when the
     call itself failed -- see the module docstring.
     """
-    body_dict: dict[str, Any] = {"agent_id": agent_id, "result": result}
-    if source_reference is not None:
-        body_dict["source_reference"] = source_reference
-    body = json.dumps(body_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    url = config.base_url.rstrip("/") + f"/api/v1/campaigns/{campaign_id}/agent-data"
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"} if body is not None else {}
     if config.api_key is not None:
         headers["Authorization"] = f"Bearer {config.api_key}"
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
     opener = urllib.request.build_opener(_RefuseRedirects())
 
     try:
@@ -133,3 +123,41 @@ def post_agent_data(
     if not isinstance(decoded, dict):
         raise TrainerInvalidResponseError("response JSON was not an object")
     return status_code, decoded
+
+
+def post_agent_data(
+    config: TrainerClientConfig,
+    *,
+    campaign_id: str,
+    agent_id: str,
+    result: dict[str, Any],
+    source_reference: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """POST to `{base_url}/api/v1/campaigns/{campaign_id}/agent-data`.
+
+    Returns `(status_code, decoded_json_body)` for any response the server
+    actually sent. Raises a `TrainerTransportError` subclass only when the
+    call itself failed -- see the module docstring.
+    """
+    body_dict: dict[str, Any] = {"agent_id": agent_id, "result": result}
+    if source_reference is not None:
+        body_dict["source_reference"] = source_reference
+    body = json.dumps(body_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    url = config.base_url.rstrip("/") + f"/api/v1/campaigns/{campaign_id}/agent-data"
+    return _send(config, method="POST", url=url, body=body)
+
+
+def get_candidate_artifact(
+    config: TrainerClientConfig, *, campaign_id: str
+) -> tuple[int, dict[str, Any]]:
+    """GET `{base_url}/api/v1/campaigns/{campaign_id}/candidate-artifact`.
+
+    Read-only. Returns `(status_code, decoded_json_body)` for any response
+    the server actually sent -- Trainer's own `ConflictError` (no
+    `RESEARCH_PROMISING` candidate exists yet, or the strategy has no
+    executable `local_strategy`) is a real, meaningful answer here, not a
+    transport failure. Raises a `TrainerTransportError` subclass only when
+    the call itself failed -- see the module docstring.
+    """
+    url = config.base_url.rstrip("/") + f"/api/v1/campaigns/{campaign_id}/candidate-artifact"
+    return _send(config, method="GET", url=url, body=None)

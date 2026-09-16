@@ -25,6 +25,7 @@ from crumblr.trainer_bridge.trainer_client import (
     TrainerInvalidResponseError,
     TrainerRedirectRefusedError,
     TrainerResponseTooLargeError,
+    get_candidate_artifact,
     post_agent_data,
 )
 
@@ -53,6 +54,21 @@ def _handler_factory(*, status: int, body: bytes) -> type:
             self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self) -> None:
+            _REQUESTS.append(
+                {
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "content_type": None,
+                    "body": b"",
+                }
+            )
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
     return Handler
 
 
@@ -64,6 +80,12 @@ def _redirect_handler_factory(*, location: str) -> type:
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:
             self.send_response(302)
             self.send_header("Location", location)
             self.send_header("Content-Length", "0")
@@ -187,6 +209,85 @@ class TestSuccessfulResponses:
 
         assert status == 409
         assert decoded["error"] == "ScopeViolationError"
+
+
+class TestGetCandidateArtifact:
+    def test_a_2xx_response_is_returned_not_raised(self, server_factory: Any) -> None:
+        body = json.dumps({"artifact_state": "UNAPPROVED_CANDIDATE"}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        status, decoded = get_candidate_artifact(config, campaign_id="CAM-1")
+
+        assert status == 200
+        assert decoded == {"artifact_state": "UNAPPROVED_CANDIDATE"}
+
+    def test_gets_the_exact_candidate_artifact_path(self, server_factory: Any) -> None:
+        _REQUESTS.clear()
+        body = json.dumps({"ok": True}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        get_candidate_artifact(config, campaign_id="CAM-DEMO")
+
+        assert _REQUESTS[-1]["path"] == "/api/v1/campaigns/CAM-DEMO/candidate-artifact"
+
+    def test_the_request_carries_no_body(self, server_factory: Any) -> None:
+        _REQUESTS.clear()
+        body = json.dumps({"ok": True}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        get_candidate_artifact(config, campaign_id="CAM-1")
+
+        assert _REQUESTS[-1]["body"] == b""
+
+    def test_the_api_key_becomes_a_bearer_header(self, server_factory: Any) -> None:
+        _REQUESTS.clear()
+        body = json.dumps({"ok": True}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=body))
+        config = TrainerClientConfig(base_url=server.base_url, api_key="secret")
+
+        get_candidate_artifact(config, campaign_id="CAM-1")
+
+        assert _REQUESTS[-1]["authorization"] == "Bearer secret"
+
+    def test_a_409_conflict_is_returned_not_raised(self, server_factory: Any) -> None:
+        """Trainer's own `ConflictError` (no `RESEARCH_PROMISING` candidate
+        exists yet, or the strategy has no executable `local_strategy`) is a
+        real, meaningful answer here, not a transport failure."""
+        body = json.dumps(
+            {"error": "ConflictError", "message": "No RESEARCH_PROMISING candidate exists"}
+        ).encode("utf-8")
+        server = server_factory(_handler_factory(status=409, body=body))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        status, decoded = get_candidate_artifact(config, campaign_id="CAM-1")
+
+        assert status == 409
+        assert decoded["error"] == "ConflictError"
+
+    def test_a_redirect_is_never_followed(self, server_factory: Any) -> None:
+        server = server_factory(_redirect_handler_factory(location="http://evil.example/steal"))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        with pytest.raises(TrainerRedirectRefusedError):
+            get_candidate_artifact(config, campaign_id="CAM-1")
+
+    def test_a_response_over_the_size_limit_is_refused(self, server_factory: Any) -> None:
+        oversized = json.dumps({"padding": "x" * 100}).encode("utf-8")
+        server = server_factory(_handler_factory(status=200, body=oversized))
+        config = TrainerClientConfig(base_url=server.base_url, max_response_bytes=10)
+
+        with pytest.raises(TrainerResponseTooLargeError):
+            get_candidate_artifact(config, campaign_id="CAM-1")
+
+    def test_a_non_json_response_is_refused(self, server_factory: Any) -> None:
+        server = server_factory(_handler_factory(status=200, body=b"not json"))
+        config = TrainerClientConfig(base_url=server.base_url)
+
+        with pytest.raises(TrainerInvalidResponseError):
+            get_candidate_artifact(config, campaign_id="CAM-1")
 
 
 class TestRefusals:
