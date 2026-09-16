@@ -90,3 +90,52 @@ class TestEarliest:
         earliest = store.earliest(canonical_symbol="EUR/USD")
         assert earliest is not None
         assert earliest.spec_version == older.spec_version
+
+
+class TestAtOrBefore:
+    """Reproducing a historical sizing/risk calculation (e.g. a Trainer
+    export's `return_r`) needs the spec actually in force *then*, not
+    whatever `latest()` returns now."""
+
+    def test_no_spec_recorded_yet_reads_as_none(self, engine: Engine) -> None:
+        store = InstrumentSpecStore(engine)
+        at = make_instrument_spec().captured_at_utc
+        assert store.at_or_before(canonical_symbol="EUR/USD", at=at) is None
+
+    def test_a_spec_captured_after_the_target_time_is_not_returned(self, engine: Engine) -> None:
+        spec = make_instrument_spec()
+        store = InstrumentSpecStore(engine)
+        store.record(spec)
+
+        result = store.at_or_before(
+            canonical_symbol="EUR/USD", at=spec.captured_at_utc - timedelta(minutes=1)
+        )
+        assert result is None
+
+    def test_returns_the_spec_in_force_at_exactly_that_moment(self, engine: Engine) -> None:
+        spec = make_instrument_spec()
+        store = InstrumentSpecStore(engine)
+        store.record(spec)
+
+        result = store.at_or_before(canonical_symbol="EUR/USD", at=spec.captured_at_utc)
+        assert result is not None
+        assert result.spec_version == spec.spec_version
+
+    def test_a_later_change_does_not_affect_an_earlier_reconstruction(self, engine: Engine) -> None:
+        older = make_instrument_spec()
+        newer = make_instrument_spec(
+            digits=4, captured_at_utc=older.captured_at_utc + timedelta(minutes=5)
+        )
+        store = InstrumentSpecStore(engine)
+        store.record(older)
+        store.record(newer)
+
+        result = store.at_or_before(canonical_symbol="EUR/USD", at=older.captured_at_utc)
+        assert result is not None
+        assert result.spec_version == older.spec_version
+
+        result_after_change = store.at_or_before(
+            canonical_symbol="EUR/USD", at=newer.captured_at_utc
+        )
+        assert result_after_change is not None
+        assert result_after_change.spec_version == newer.spec_version

@@ -17,6 +17,8 @@ than an overwrite silently losing the previous one.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import Engine, asc, desc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -88,6 +90,29 @@ class InstrumentSpecStore:
             select(instrument_specs.c.payload)
             .where(instrument_specs.c.canonical_symbol == canonical_symbol)
             .order_by(asc(instrument_specs.c.captured_at_utc))
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).scalar_one_or_none()
+        return InstrumentSpec.model_validate(row) if row is not None else None
+
+    def at_or_before(self, *, canonical_symbol: str, at: datetime) -> InstrumentSpec | None:
+        """The spec actually in force at `at`, or `None` if none was yet
+        observed by then.
+
+        For reproducing a historical sizing/risk calculation exactly as it
+        was originally computed (e.g. re-deriving an R-multiple from a past
+        `FINAL_RISK_PASSED` event's `risk_amount`) — `latest()` would return
+        whatever the broker reports *now*, which can silently disagree with
+        what was actually in force at the time being reconstructed.
+        """
+        statement = (
+            select(instrument_specs.c.payload)
+            .where(
+                instrument_specs.c.canonical_symbol == canonical_symbol,
+                instrument_specs.c.captured_at_utc <= at,
+            )
+            .order_by(desc(instrument_specs.c.captured_at_utc))
             .limit(1)
         )
         with self._engine.connect() as connection:

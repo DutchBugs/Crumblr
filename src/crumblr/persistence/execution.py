@@ -197,6 +197,18 @@ class ExecutionRequestStore:
             )
         return ClaimResult(claimed=False)
 
+    def capsule_id_for(self, order_request_id: UUID) -> UUID | None:
+        """The `capsule_id` a given `order_request_id` was claimed against,
+        or `None` if it was never claimed -- the read half of `claim()`, for
+        callers that need to walk from an execution event back to the
+        decision that authorized it (e.g. reconstructing a closed trade's
+        original intent/stop for a Trainer export)."""
+        statement = select(execution_requests.c.capsule_id).where(
+            execution_requests.c.order_request_id == order_request_id
+        )
+        with self._engine.connect() as connection:
+            return connection.execute(statement).scalar_one_or_none()
+
 
 class ExecutionEventStore:
     """The append-only half: every lifecycle step, one row each."""

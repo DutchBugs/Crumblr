@@ -140,6 +140,31 @@ class TestClaim:
         assert second == ClaimResult(claimed=True)
 
 
+class TestCapsuleIdFor:
+    """The read half of `claim()` -- walking from an `order_request_id`
+    back to the decision that authorized it (e.g. reconstructing a closed
+    trade's original intent/stop for a Trainer export)."""
+
+    def test_an_unclaimed_order_request_id_reads_as_none(self, engine: Engine) -> None:
+        store = ExecutionRequestStore(engine)
+        assert store.capsule_id_for(uuid4()) is None
+
+    def test_a_claimed_order_request_id_resolves_to_its_capsule(self, engine: Engine) -> None:
+        capsule = sealed_capsule(engine)
+        order_request_id = uuid4()
+        store = ExecutionRequestStore(engine)
+        store.claim(
+            order_request_id=order_request_id,
+            capsule_id=capsule.capsule_id,
+            intent_id=capsule.trade_intent.intent_id,  # type: ignore[union-attr]
+            fingerprint="fp-1",
+            claimed_by="test-worker",
+            now=FIXED_NOW,
+        )
+
+        assert store.capsule_id_for(order_request_id) == capsule.capsule_id
+
+
 class TestCountEventsSince:
     """Review 1.23 F-060 (reopened): the durable order-frequency authority
 
