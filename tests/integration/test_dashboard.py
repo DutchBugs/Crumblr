@@ -1410,6 +1410,7 @@ class TestFullRun1Observability:
                 {
                     "run_id": "FULLRUN1-TEST",
                     "campaign_id": "CAM-FULLRUN1-TEST",
+                    "checked_at_utc": datetime.now(UTC).isoformat(),
                     "reachability": {"reachable": True},
                     "campaign": {"found": True, "campaign": {"mode": "MODE_2"}},
                 }
@@ -1453,3 +1454,146 @@ class TestFullRun1Observability:
         )
         assert response.status_code == 200
         assert "ACTIVE STATIC TRADER" in response.text
+
+
+class TestSnapshotCoherenceFix:
+    """Dev 1 BLOCK: end-to-end proof (through the real /api/state route,
+
+    not only the trainer_panel unit tests) that a stale REACHABLE, a
+    run_id mismatch across the three status files, and a verification
+    record for a stale/different candidate are all surfaced honestly."""
+
+    def test_a_stale_trainer_status_reads_stale_not_reachable(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        trainer_status_path = tmp_path / "trainer_status.json"
+        trainer_status_path.write_text(
+            json.dumps(
+                {
+                    "reachability": {"reachable": True},
+                    "campaign": {"found": True, "campaign": {"mode": "MODE_2"}},
+                    "checked_at_utc": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        body = (
+            client(engine, tmp_path / "health.json", trainer_status_path=trainer_status_path)
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["campaign"]["reachability"] == "STALE"
+
+    def test_mismatched_run_ids_across_files_read_incoherent(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        trainer_status_path = tmp_path / "trainer_status.json"
+        dataset_status_path = tmp_path / "dataset_status.json"
+        candidate_status_path = tmp_path / "candidate_status.json"
+        trainer_status_path.write_text(
+            json.dumps(
+                {
+                    "run_id": "FULLRUN1-A",
+                    "reachability": {},
+                    "campaign": {},
+                    "checked_at_utc": datetime.now(UTC).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        dataset_status_path.write_text(
+            json.dumps({"run_id": "FULLRUN1-B", "discovered_count": 0}), encoding="utf-8"
+        )
+        candidate_status_path.write_text(
+            json.dumps({"run_id": "FULLRUN1-A", "available": False}), encoding="utf-8"
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                trainer_status_path=trainer_status_path,
+                dataset_status_path=dataset_status_path,
+                candidate_status_path=candidate_status_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["run_coherence"] == "INCOHERENT"
+        assert "FULLRUN1-A" in body["trainer_panel"]["run_coherence_detail"]
+        assert "FULLRUN1-B" in body["trainer_panel"]["run_coherence_detail"]
+
+    def test_a_verification_record_for_a_different_candidate_never_reads_pass(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        candidate_status_path = tmp_path / "candidate_status.json"
+        verification_record_path = tmp_path / "verification_record.json"
+        candidate_status_path.write_text(
+            json.dumps({"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"}),
+            encoding="utf-8",
+        )
+        verification_record_path.write_text(
+            json.dumps(
+                {
+                    "lineage": {"candidate_strategy_spec_hash": "hash-OLD-DIFFERENT"},
+                    "base_code_hash_verified": True,
+                    "candidate_hash_recomputed_matches": True,
+                    "trainer_artifact_hash_verified": True,
+                    "candidate_strategy_spec_hash_verified": True,
+                    "parent_compatibility_verified": True,
+                    "unit_mapping_verified": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                candidate_status_path=candidate_status_path,
+                verification_record_path=verification_record_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["verification"]["result"] == "STALE"
+
+    def test_a_matching_current_candidate_reads_pass(self, engine: Engine, tmp_path: Path) -> None:
+        candidate_status_path = tmp_path / "candidate_status.json"
+        verification_record_path = tmp_path / "verification_record.json"
+        candidate_status_path.write_text(
+            json.dumps({"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"}),
+            encoding="utf-8",
+        )
+        verification_record_path.write_text(
+            json.dumps(
+                {
+                    "lineage": {"candidate_strategy_spec_hash": "hash-CURRENT"},
+                    "base_code_hash_verified": True,
+                    "candidate_hash_recomputed_matches": True,
+                    "trainer_artifact_hash_verified": True,
+                    "candidate_strategy_spec_hash_verified": True,
+                    "parent_compatibility_verified": True,
+                    "unit_mapping_verified": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                candidate_status_path=candidate_status_path,
+                verification_record_path=verification_record_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["verification"]["result"] == "PASS"

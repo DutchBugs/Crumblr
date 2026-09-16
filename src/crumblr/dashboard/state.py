@@ -569,6 +569,7 @@ def build_state(
         dataset_status_path=dataset_status_path,
         candidate_status_path=candidate_status_path,
         verification_record_path=verification_record_path,
+        now=now,
     )
 
     return DashboardState(

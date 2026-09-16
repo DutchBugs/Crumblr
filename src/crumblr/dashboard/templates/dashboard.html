@@ -648,6 +648,11 @@
     <div class="card" style="margin-bottom:10px;">
       <span class="badge-inline bad">{{ state.trainer_panel.candidate_active_banner }}</span>
     </div>
+    <div class="card" id="run-coherence-card" style="margin-bottom:10px;{{ '' if state.trainer_panel.run_coherence == 'INCOHERENT' else ' display:none;' }}">
+      <span class="badge-inline {{ state.trainer_panel.run_coherence | state_class }}">RUN MISMATCH</span>
+      <span class="muted" id="run-coherence-detail">{{ state.trainer_panel.run_coherence_detail or "" }}</span>
+      <span class="muted"> — panels below may describe different FULL RUN attempts; do not read them as one coherent run.</span>
+    </div>
     <div class="grid-3">
       <div class="card">
         <div class="panel-title">Trainer campaign</div>
@@ -683,6 +688,7 @@
           <div class="kv"><span class="k">Parent strategy</span><span class="v mono">{{ state.trainer_panel.candidate.parent_strategy_key or "—" }}</span></div>
           <div class="kv"><span class="k">Static verification</span><span class="v"><span class="badge-inline {{ state.trainer_panel.verification.result | state_class }}">{{ state.trainer_panel.verification.result }}</span></span></div>
           <div class="kv"><span class="k">Candidate hash</span><span class="v mono" title="{{ state.trainer_panel.verification.candidate_hash or '' }}">{{ (state.trainer_panel.verification.candidate_hash or "—") | truncate(16, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Verified spec hash</span><span class="v mono" title="{{ state.trainer_panel.verification.verified_candidate_strategy_spec_hash or '' }}">{{ (state.trainer_panel.verification.verified_candidate_strategy_spec_hash or "—") | truncate(16, True, '…') }}</span></div>
         </div>
       </div>
     </div>
@@ -942,7 +948,7 @@
   // The fallback must be "neutral", matching state_class()'s own default,
   // and BAD must be an explicit set here too -- UNKNOWN must stay bad
   // because it is *listed*, not because everything unmatched used to be.
-  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1, LIVE: 1 };
+  var GOOD = { CONNECTED: 1, HEALTHY: 1, RUNNING: 1, GOOD: 1, MATCHED: 1, ACTIVE: 1, PAPER_FILLED: 1, LIVE: 1, COHERENT: 1 };
   var WARN = {
     STALE: 1, UNCALIBRATED: 1, WAITING: 1, NOT_YET_VALID: 1, AWAITING_OUTCOME: 1, AWAITING_EVIDENCE: 1,
     "CONFIG GATES OPEN": 1
@@ -950,7 +956,8 @@
   var BAD = {
     DISCONNECTED: 1, HALTED: 1, UNKNOWN: 1, MISMATCHED: 1, DOWN: 1, UNHEALTHY: 1,
     "NOT PROVISIONED": 1, EXPIRED: 1, DISABLED: 1, DEGRADED: 1, GATEWAY_REJECTED: 1,
-    RISK_BLOCKED: 1, SESSION_BLOCKED: 1, POLICY_BLOCKED: 1, PAPER_ORDER_CHECK_BLOCKED: 1
+    RISK_BLOCKED: 1, SESSION_BLOCKED: 1, POLICY_BLOCKED: 1, PAPER_ORDER_CHECK_BLOCKED: 1,
+    INCOHERENT: 1
   };
   function stateClass(value) {
     var v = (value || "").toUpperCase();
@@ -1048,6 +1055,15 @@
     var tp = state.trainer_panel;
     if (!tp) return;
 
+    var coherenceCard = document.getElementById("run-coherence-card");
+    if (coherenceCard) {
+      coherenceCard.style.display = tp.run_coherence === "INCOHERENT" ? "" : "none";
+    }
+    var coherenceDetail = document.getElementById("run-coherence-detail");
+    if (coherenceDetail) {
+      coherenceDetail.textContent = tp.run_coherence_detail || "";
+    }
+
     var campaignEl = document.getElementById("trainer-campaign-body");
     if (campaignEl) {
       var c = tp.campaign;
@@ -1091,6 +1107,10 @@
       candHtml += kv("Parent strategy", esc(cand.parent_strategy_key || "—"));
       candHtml += kv("Static verification", badge(v.result));
       candHtml += kv("Candidate hash", esc((v.candidate_hash || "—").slice(0, 16)));
+      candHtml += kv(
+        "Verified spec hash",
+        esc((v.verified_candidate_strategy_spec_hash || "—").slice(0, 16))
+      );
       candidateEl.innerHTML = candHtml;
     }
   }

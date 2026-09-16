@@ -24,6 +24,10 @@ function makeElement() {
   return { innerHTML: "" };
 }
 
+function makeElementWithStyle() {
+  return { innerHTML: "", textContent: "", style: { display: "" } };
+}
+
 function makeDom() {
   const elements = {
     "decision-outcome-counts": makeElement(),
@@ -32,6 +36,8 @@ function makeDom() {
     "trainer-dataset-body": makeElement(),
     "trainer-candidate-body": makeElement(),
     "execution-activity-body": makeElement(),
+    "run-coherence-card": makeElementWithStyle(),
+    "run-coherence-detail": makeElement(),
   };
   return {
     getElementById(id) {
@@ -119,7 +125,9 @@ const firstState = {
       candidate_strategy_spec_hash: null,
       parent_strategy_key: null,
     },
-    verification: { result: "NOT_RUN", candidate_hash: null },
+    verification: { result: "NOT_RUN", candidate_hash: null, verified_candidate_strategy_spec_hash: null },
+    run_coherence: "COHERENT",
+    run_coherence_detail: null,
   },
 };
 renderTrainerPanel(firstState);
@@ -130,6 +138,11 @@ let datasetHtml = dom.elements["trainer-dataset-body"].innerHTML;
 assert.ok(datasetHtml.includes("never reached execution"));
 let candidateHtml = dom.elements["trainer-candidate-body"].innerHTML;
 assert.ok(candidateHtml.includes("NOT_RUN"));
+assert.equal(
+  dom.elements["run-coherence-card"].style.display,
+  "none",
+  "a COHERENT run must not show the mismatch banner"
+);
 
 // A second, different poll must visibly replace the first render.
 renderTrainerPanel({
@@ -159,7 +172,13 @@ renderTrainerPanel({
       candidate_strategy_spec_hash: "abcdef0123456789abcdef",
       parent_strategy_key: "ict-sb-eurusd-pivot2@v1",
     },
-    verification: { result: "PASS", candidate_hash: "fedcba9876543210fedcba" },
+    verification: {
+      result: "PASS",
+      candidate_hash: "fedcba9876543210fedcba",
+      verified_candidate_strategy_spec_hash: "abcdef0123456789abcdef",
+    },
+    run_coherence: "INCOHERENT",
+    run_coherence_detail: "disagreeing run_id values: FULLRUN1-1, FULLRUN1-2",
   },
 });
 campaignHtml = dom.elements["trainer-campaign-body"].innerHTML;
@@ -168,6 +187,13 @@ assert.ok(!campaignHtml.includes("REACHABLE>"), "must not retain the old REACHAB
 candidateHtml = dom.elements["trainer-candidate-body"].innerHTML;
 assert.ok(candidateHtml.includes("RESEARCH_PROMISING"));
 assert.ok(candidateHtml.includes("PASS"));
+assert.equal(
+  dom.elements["run-coherence-card"].style.display,
+  "",
+  "an INCOHERENT run must show the mismatch banner"
+);
+assert.ok(dom.elements["run-coherence-detail"].textContent.includes("FULLRUN1-1"));
+assert.ok(dom.elements["run-coherence-detail"].textContent.includes("FULLRUN1-2"));
 
 // --- Execution activity panel ---------------------------------------------
 renderExecutionActivity({

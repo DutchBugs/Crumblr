@@ -40,7 +40,7 @@ message is fixed and generic, since both `/api/state` and the rendered HTML
 must never carry anything credential-shaped."""
 
 _GOOD_STATES = frozenset(
-    {"CONNECTED", "HEALTHY", "RUNNING", "GOOD", "MATCHED", "ACTIVE", "PAPER_FILLED"}
+    {"CONNECTED", "HEALTHY", "RUNNING", "GOOD", "MATCHED", "ACTIVE", "PAPER_FILLED", "COHERENT"}
 )
 _WARN_STATES = frozenset(
     {
@@ -76,6 +76,7 @@ _BAD_STATES = frozenset(
         "SESSION_BLOCKED",
         "POLICY_BLOCKED",
         "PAPER_ORDER_CHECK_BLOCKED",
+        "INCOHERENT",
     }
 )
 """Review 1.13 §9's visual-state semantics, as a lookup instead of a chain of
@@ -289,6 +290,8 @@ def state_to_json(state: DashboardState) -> dict[str, Any]:
             },
             "candidate": asdict(state.trainer_panel.candidate),
             "verification": asdict(state.trainer_panel.verification),
+            "run_coherence": state.trainer_panel.run_coherence,
+            "run_coherence_detail": state.trainer_panel.run_coherence_detail,
             "candidate_active": state.trainer_panel.candidate_active,
             "candidate_active_banner": state.trainer_panel.candidate_active_banner,
         },
