@@ -4,7 +4,7 @@ Trader-identity closed-trade dataset snapshot. No database, no network.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -50,6 +50,7 @@ def make_evidence(**overrides: Any) -> ClosedTradeEvidence:
         "last_open_snapshot_at_utc": FIXED_NOW,
         "balance_before_close": Decimal("9993.55"),
         "balance_after_close": Decimal("9993.66"),
+        "close_observed_at_utc": FIXED_NOW + timedelta(minutes=1),
         "account_currency": "EUR",
     }
     fields.update(overrides)
@@ -95,12 +96,20 @@ class TestBuildDatasetResult:
         assert dataset["pnl"] == [pytest.approx(0.11)]
         assert dataset["dates"] == ["2026-09-15"]
 
-    def test_multiple_eligible_trades_are_ordered_by_fill_time_deterministically(self) -> None:
+    def test_multiple_eligible_trades_are_ordered_by_close_time_deterministically(self) -> None:
+        """Ordering follows the durable close observation, not the entry
+        fill -- deliberately given fill times in the OPPOSITE order from
+        their close times, so a test that accidentally still ordered by
+        fill time would be caught."""
         later = make_evidence(
-            order_request_id=uuid4(), fill_occurred_at_utc=FIXED_NOW.replace(hour=12)
+            order_request_id=uuid4(),
+            fill_occurred_at_utc=FIXED_NOW,
+            close_observed_at_utc=FIXED_NOW.replace(hour=12),
         )
         earlier = make_evidence(
-            order_request_id=uuid4(), fill_occurred_at_utc=FIXED_NOW.replace(hour=6)
+            order_request_id=uuid4(),
+            fill_occurred_at_utc=FIXED_NOW.replace(hour=23),
+            close_observed_at_utc=FIXED_NOW.replace(hour=6),
         )
         collection = DatasetCollectionResult(
             identity=IDENTITY, discovered_count=2, eligible=(later, earlier), excluded=()
@@ -115,8 +124,10 @@ class TestBuildDatasetResult:
     def test_ordering_is_stable_regardless_of_input_order(self) -> None:
         """Feeding the same two trades in the opposite order must produce
         byte-identical output -- determinism, not insertion-order luck."""
-        a = make_evidence(order_request_id=uuid4(), fill_occurred_at_utc=FIXED_NOW.replace(hour=6))
-        b = make_evidence(order_request_id=uuid4(), fill_occurred_at_utc=FIXED_NOW.replace(hour=12))
+        a = make_evidence(order_request_id=uuid4(), close_observed_at_utc=FIXED_NOW.replace(hour=6))
+        b = make_evidence(
+            order_request_id=uuid4(), close_observed_at_utc=FIXED_NOW.replace(hour=12)
+        )
         returns_r = {a.order_request_id: Decimal("1"), b.order_request_id: Decimal("2")}
 
         forward = DatasetCollectionResult(
@@ -131,6 +142,50 @@ class TestBuildDatasetResult:
             backward, returns_r, transaction_costs_included=False
         )
         assert forward_dataset["trade_ids"] == backward_dataset["trade_ids"]
+
+    def test_a_trade_spanning_two_calendar_dates_reports_the_close_date(self) -> None:
+        """Entry and close fall on different calendar days -- `dates` must
+        report the close date, and the per-trade provenance must carry
+        both timestamps honestly, never inventing a broker close-fill
+        timestamp."""
+        fill_at = datetime(2026, 9, 15, 23, 55, 0, tzinfo=UTC)
+        close_at = datetime(2026, 9, 16, 0, 10, 0, tzinfo=UTC)
+        evidence = make_evidence(fill_occurred_at_utc=fill_at, close_observed_at_utc=close_at)
+        collection = DatasetCollectionResult(
+            identity=IDENTITY, discovered_count=1, eligible=(evidence,), excluded=()
+        )
+
+        dataset = build_dataset_result(
+            collection, {evidence.order_request_id: Decimal("1")}, transaction_costs_included=False
+        )
+
+        assert dataset["dates"] == ["2026-09-16"]
+        trade_summary = dataset["report_summary"]["trades"][0]
+        assert trade_summary["fill_occurred_at_utc"] == fill_at.isoformat()
+        assert trade_summary["close_observed_at_utc"] == close_at.isoformat()
+
+    def test_ordering_uses_close_date_even_across_a_calendar_boundary(self) -> None:
+        """Trade A fills first but closes second (after crossing midnight);
+        trade B fills second but closes first. Close-time ordering must
+        place B before A."""
+        trade_a = make_evidence(
+            order_request_id=uuid4(),
+            fill_occurred_at_utc=datetime(2026, 9, 15, 23, 0, 0, tzinfo=UTC),
+            close_observed_at_utc=datetime(2026, 9, 16, 1, 0, 0, tzinfo=UTC),
+        )
+        trade_b = make_evidence(
+            order_request_id=uuid4(),
+            fill_occurred_at_utc=datetime(2026, 9, 16, 0, 30, 0, tzinfo=UTC),
+            close_observed_at_utc=datetime(2026, 9, 16, 0, 45, 0, tzinfo=UTC),
+        )
+        collection = DatasetCollectionResult(
+            identity=IDENTITY, discovered_count=2, eligible=(trade_a, trade_b), excluded=()
+        )
+        returns_r = {trade_a.order_request_id: Decimal("1"), trade_b.order_request_id: Decimal("2")}
+
+        dataset = build_dataset_result(collection, returns_r, transaction_costs_included=False)
+
+        assert dataset["trade_ids"] == [build_trade_id(trade_b), build_trade_id(trade_a)]
 
     def test_identity_is_preserved_in_the_report_summary(self) -> None:
         collection = DatasetCollectionResult(

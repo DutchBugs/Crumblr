@@ -309,6 +309,7 @@ def resolve_evidence(engine: Engine, order_request_id: UUID) -> ClosedTradeEvide
         last_open_snapshot_at_utc=window.last_open_at,
         balance_before_close=window.balance_before_close,
         balance_after_close=window.balance_after_close,
+        close_observed_at_utc=window.post_close_at,
         account_currency=window.account_currency,
     )
 

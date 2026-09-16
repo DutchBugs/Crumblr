@@ -47,6 +47,7 @@ def make_evidence(**overrides: Any) -> ClosedTradeEvidence:
         "last_open_snapshot_at_utc": FIXED_NOW,
         "balance_before_close": Decimal("9993.55"),
         "balance_after_close": Decimal("9993.66"),
+        "close_observed_at_utc": FIXED_NOW,
         "account_currency": "EUR",
     }
     fields.update(overrides)

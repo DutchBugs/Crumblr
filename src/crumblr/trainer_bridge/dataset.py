@@ -80,15 +80,17 @@ def build_dataset_result(
     `evidence.py::build_normalized_result`'s single-trade version to one
     parallel-array entry per eligible trade in `collection`.
 
-    Deterministically ordered by `(fill_occurred_at_utc, order_request_id)`
-    -- never database insertion order, which is not itself a stable
-    replay-independent key. `returns_r` keys every eligible trade's
-    `order_request_id` to its already-derived R-multiple (computed once,
-    upstream, by the unmodified `evidence.derive_return_r`); this function
-    only orders and assembles, it derives nothing new.
+    Deterministically ordered by `(close_observed_at_utc, order_request_id)`
+    -- the durable post-close observation, never the entry `FILLED` time
+    (a trade's chronological place in a closed-trade dataset is when it
+    closed, not when it opened) and never database insertion order, which
+    is not itself a stable replay-independent key. `returns_r` keys every
+    eligible trade's `order_request_id` to its already-derived R-multiple
+    (computed once, upstream, by the unmodified `evidence.derive_return_r`);
+    this function only orders and assembles, it derives nothing new.
     """
     ordered = sorted(
-        collection.eligible, key=lambda e: (e.fill_occurred_at_utc, e.order_request_id)
+        collection.eligible, key=lambda e: (e.close_observed_at_utc, e.order_request_id)
     )
     identity = collection.identity
 
@@ -104,7 +106,7 @@ def build_dataset_result(
         returns_r_list.append(float(r))
         trade_ids.append(build_trade_id(evidence))
         pnl_list.append(float(pnl))
-        dates.append(evidence.fill_occurred_at_utc.date().isoformat())
+        dates.append(evidence.close_observed_at_utc.date().isoformat())
         per_trade_summaries.append(
             {
                 "trade_id": build_trade_id(evidence),
@@ -121,6 +123,7 @@ def build_dataset_result(
                 "realized_pnl_account_currency": str(pnl),
                 "account_currency": evidence.account_currency,
                 "fill_occurred_at_utc": evidence.fill_occurred_at_utc.isoformat(),
+                "close_observed_at_utc": evidence.close_observed_at_utc.isoformat(),
             }
         )
 

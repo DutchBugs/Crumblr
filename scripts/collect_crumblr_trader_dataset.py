@@ -31,6 +31,14 @@ If zero trades are eligible, this is reported as a plain, explicit fact
 -- no POST is attempted, and canary-fixture data is never substituted for
 a Trader identity that has not produced a real closed trade yet.
 
+`transaction_costs_included` is always `False` and is not a CLI flag --
+it is a dataset truth claim about every included trade, not an operator
+assertion this tool should let anyone override on the command line.
+It stays hard-coded closed until Crumblr has durable evidence proving all
+applicable broker costs (commission/swap/spread) for every trade a
+dataset snapshot includes, not merely that a balance delta netted them
+out for one specific trade.
+
 Not built here (deliberately out of scope for this slice):
 StrategyMaterializer, candidate promotion, automatic TradingAssignment
 changes, Trainer-to-Trader activation, automatic campaign creation or
@@ -101,13 +109,6 @@ def parse_args() -> argparse.Namespace:
         "Crumblr --agent-id itself",
     )
     parser.add_argument("--trainer-api-key", default=None)
-    parser.add_argument(
-        "--transaction-costs-included",
-        action="store_true",
-        default=False,
-        help="only pass this if the source evidence proves ALL applicable broker "
-        "costs for every eligible trade -- defaults to false",
-    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -258,9 +259,12 @@ def main() -> int:
         )
         return 0
 
-    dataset = build_dataset_result(
-        result, returns_r, transaction_costs_included=args.transaction_costs_included
-    )
+    # Hard-coded, not an operator flag: `transaction_costs_included` is a
+    # dataset truth claim, not an assertion this CLI should let anyone
+    # make on the command line. It stays `False` until Crumblr has durable
+    # evidence proving all applicable costs for every included trade --
+    # see the module docstring.
+    dataset = build_dataset_result(result, returns_r, transaction_costs_included=False)
     print("\n=== normalized dataset (Trainer RESULT_CONTRACT.md shape) ===")
     print(json.dumps(dataset, indent=2))
 

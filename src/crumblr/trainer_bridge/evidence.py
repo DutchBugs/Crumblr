@@ -54,6 +54,16 @@ class ClosedTradeEvidence:
     balance_after_close: Decimal
     """Account balance at the first subsequent snapshot cycle in which the
     ticket no longer appears among open positions."""
+    close_observed_at_utc: datetime
+    """The durable observation timestamp `_resolve_isolated_close_window`
+    established as `post_close_at` -- the first account snapshot cycle at
+    which this ticket was confirmed absent and the book confirmed flat.
+
+    **Not a broker close-fill timestamp** -- Crumblr's one-shot close
+    runner never durably records one (see `realized_pnl`'s docstring).
+    This is the honest, named alternative: when this platform first
+    durably confirmed the trade was closed, not when the broker itself
+    executed the close."""
     account_currency: str
 
 
