@@ -1486,6 +1486,32 @@ class TestSnapshotCoherenceFix:
 
         assert body["trainer_panel"]["campaign"]["reachability"] == "STALE"
 
+    def test_a_timezone_naive_checked_at_utc_fails_closed_not_500(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """A naive `checked_at_utc` (no UTC offset) must not crash the
+
+        `/api/state` route -- fails closed to STALE, same as a missing
+        timestamp."""
+        trainer_status_path = tmp_path / "trainer_status.json"
+        trainer_status_path.write_text(
+            json.dumps(
+                {
+                    "reachability": {"reachable": True},
+                    "campaign": {"found": True, "campaign": {"mode": "MODE_2"}},
+                    "checked_at_utc": "2026-09-17T11:59:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        response = client(
+            engine, tmp_path / "health.json", trainer_status_path=trainer_status_path
+        ).get("/api/state")
+
+        assert response.status_code == 200
+        assert response.json()["trainer_panel"]["campaign"]["reachability"] == "STALE"
+
     def test_mismatched_run_ids_across_files_read_incoherent(
         self, engine: Engine, tmp_path: Path
     ) -> None:
@@ -1567,13 +1593,24 @@ class TestSnapshotCoherenceFix:
         candidate_status_path = tmp_path / "candidate_status.json"
         verification_record_path = tmp_path / "verification_record.json"
         candidate_status_path.write_text(
-            json.dumps({"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"}),
+            json.dumps(
+                {
+                    "available": True,
+                    "candidate_strategy_spec_hash": "hash-CURRENT",
+                    "parent_strategy_key": "ict-sb-eurusd-pivot2@v1",
+                    "parent_source_hash": "source-hash-CURRENT",
+                }
+            ),
             encoding="utf-8",
         )
         verification_record_path.write_text(
             json.dumps(
                 {
-                    "lineage": {"candidate_strategy_spec_hash": "hash-CURRENT"},
+                    "lineage": {
+                        "candidate_strategy_spec_hash": "hash-CURRENT",
+                        "parent_strategy_key": "ict-sb-eurusd-pivot2@v1",
+                        "parent_source_hash": "source-hash-CURRENT",
+                    },
                     "base_code_hash_verified": True,
                     "candidate_hash_recomputed_matches": True,
                     "trainer_artifact_hash_verified": True,
@@ -1597,3 +1634,55 @@ class TestSnapshotCoherenceFix:
         )
 
         assert body["trainer_panel"]["verification"]["result"] == "PASS"
+
+    def test_matching_spec_hash_but_a_different_parent_never_reads_pass(
+        self, engine: Engine, tmp_path: Path
+    ) -> None:
+        """Required regression, end to end: the same candidate spec hash
+
+        can exist under a different frozen parent -- binding on the spec
+        hash alone would wrongly read PASS."""
+        candidate_status_path = tmp_path / "candidate_status.json"
+        verification_record_path = tmp_path / "verification_record.json"
+        candidate_status_path.write_text(
+            json.dumps(
+                {
+                    "available": True,
+                    "candidate_strategy_spec_hash": "hash-CURRENT",
+                    "parent_strategy_key": "ict-sb-eurusd-pivot2@v1",
+                    "parent_source_hash": "source-hash-CURRENT",
+                }
+            ),
+            encoding="utf-8",
+        )
+        verification_record_path.write_text(
+            json.dumps(
+                {
+                    "lineage": {
+                        "candidate_strategy_spec_hash": "hash-CURRENT",
+                        "parent_strategy_key": "some-other-strategy@v1",
+                        "parent_source_hash": "source-hash-CURRENT",
+                    },
+                    "base_code_hash_verified": True,
+                    "candidate_hash_recomputed_matches": True,
+                    "trainer_artifact_hash_verified": True,
+                    "candidate_strategy_spec_hash_verified": True,
+                    "parent_compatibility_verified": True,
+                    "unit_mapping_verified": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        body = (
+            client(
+                engine,
+                tmp_path / "health.json",
+                candidate_status_path=candidate_status_path,
+                verification_record_path=verification_record_path,
+            )
+            .get("/api/state")
+            .json()
+        )
+
+        assert body["trainer_panel"]["verification"]["result"] == "STALE"

@@ -689,6 +689,8 @@
           <div class="kv"><span class="k">Static verification</span><span class="v"><span class="badge-inline {{ state.trainer_panel.verification.result | state_class }}">{{ state.trainer_panel.verification.result }}</span></span></div>
           <div class="kv"><span class="k">Candidate hash</span><span class="v mono" title="{{ state.trainer_panel.verification.candidate_hash or '' }}">{{ (state.trainer_panel.verification.candidate_hash or "—") | truncate(16, True, '…') }}</span></div>
           <div class="kv"><span class="k">Verified spec hash</span><span class="v mono" title="{{ state.trainer_panel.verification.verified_candidate_strategy_spec_hash or '' }}">{{ (state.trainer_panel.verification.verified_candidate_strategy_spec_hash or "—") | truncate(16, True, '…') }}</span></div>
+          <div class="kv"><span class="k">Verified parent</span><span class="v mono">{{ state.trainer_panel.verification.verified_parent_strategy_key or "—" }}</span></div>
+          <div class="kv"><span class="k">Verified parent source</span><span class="v mono" title="{{ state.trainer_panel.verification.verified_parent_source_hash or '' }}">{{ (state.trainer_panel.verification.verified_parent_source_hash or "—") | truncate(16, True, '…') }}</span></div>
         </div>
       </div>
     </div>
@@ -1110,6 +1112,11 @@
       candHtml += kv(
         "Verified spec hash",
         esc((v.verified_candidate_strategy_spec_hash || "—").slice(0, 16))
+      );
+      candHtml += kv("Verified parent", esc(v.verified_parent_strategy_key || "—"));
+      candHtml += kv(
+        "Verified parent source",
+        esc((v.verified_parent_source_hash || "—").slice(0, 16))
       );
       candidateEl.innerHTML = candHtml;
     }

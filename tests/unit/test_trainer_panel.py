@@ -36,6 +36,23 @@ _ALL_PROOFS_TRUE = {
     "unit_mapping_verified": True,
 }
 
+_CURRENT_CANDIDATE_IDENTITY = {
+    "candidate_strategy_spec_hash": "hash-CURRENT",
+    "parent_strategy_key": "ict-sb-eurusd-pivot2@v1",
+    "parent_source_hash": "source-hash-CURRENT",
+}
+
+
+def _matching_lineage(**overrides: str) -> dict[str, str]:
+    """A verification record's `lineage` block that binds to
+
+    `_CURRENT_CANDIDATE_IDENTITY` by default -- pass an override to make
+    exactly one of the three identity fields disagree, for the
+    different-parent regression tests."""
+    lineage = dict(_CURRENT_CANDIDATE_IDENTITY)
+    lineage.update(overrides)
+    return lineage
+
 
 class TestAllFilesMissing:
     def test_every_panel_reads_as_unknown_not_an_error(self, tmp_path: Path) -> None:
@@ -221,6 +238,32 @@ class TestCampaignPanel:
         )
         assert panel.campaign.reachability == "UNREACHABLE"
 
+    def test_a_timezone_naive_but_otherwise_parseable_timestamp_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """`datetime.fromisoformat` happily parses a timestamp with no UTC
+
+        offset into a naive `datetime` -- subtracting that from `now`
+        (always timezone-aware) raises `TypeError` rather than comparing.
+        Must fail closed to STALE, never crash the whole dashboard read."""
+        path = tmp_path / "trainer_status.json"
+        _write(
+            path,
+            {
+                "reachability": {"reachable": True},
+                "campaign": {"found": True, "campaign": {"mode": "MODE_2"}},
+                "checked_at_utc": "2026-09-17T11:59:00",  # no +00:00/Z offset
+            },
+        )
+        panel = build_trainer_panel(
+            trainer_status_path=path,
+            dataset_status_path=tmp_path / "missing.json",
+            candidate_status_path=tmp_path / "missing.json",
+            verification_record_path=tmp_path / "missing.json",
+            now=_NOW,
+        )
+        assert panel.campaign.reachability == "STALE"
+
 
 class TestDatasetPanel:
     def test_zero_eligible_is_shown_plainly(self, tmp_path: Path) -> None:
@@ -305,18 +348,18 @@ class TestVerificationPanel:
         assert panel.verification.result == "NOT_RUN"
 
     def test_matching_current_run_and_current_candidate_is_pass(self, tmp_path: Path) -> None:
-        """Required regression: hashes agree and every proof is true ->
+        """Required regression: all three identity fields agree and every
 
-        PASS."""
+        proof is true -> PASS."""
         candidate_path = tmp_path / "candidate_status.json"
-        _write(candidate_path, {"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"})
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
         verification_path = tmp_path / "verification_record.json"
         _write(
             verification_path,
             {
                 "candidate_hash": "joint-hash-abc",
                 "evaluation_outcome_kind": "TRADE_PROPOSAL",
-                "lineage": {"candidate_strategy_spec_hash": "hash-CURRENT"},
+                "lineage": _matching_lineage(),
                 **_ALL_PROOFS_TRUE,
             },
         )
@@ -330,6 +373,8 @@ class TestVerificationPanel:
         assert panel.verification.result == "PASS"
         assert panel.verification.candidate_hash == "joint-hash-abc"
         assert panel.verification.verified_candidate_strategy_spec_hash == "hash-CURRENT"
+        assert panel.verification.verified_parent_strategy_key == "ict-sb-eurusd-pivot2@v1"
+        assert panel.verification.verified_parent_source_hash == "source-hash-CURRENT"
 
     def test_a_record_for_a_different_candidate_is_stale_not_pass(self, tmp_path: Path) -> None:
         """Required regression: an old verification record whose six proofs
@@ -338,11 +383,14 @@ class TestVerificationPanel:
         the one currently shown, must never read as PASS for the one shown
         now."""
         candidate_path = tmp_path / "candidate_status.json"
-        _write(candidate_path, {"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"})
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
         verification_path = tmp_path / "verification_record.json"
         _write(
             verification_path,
-            {"lineage": {"candidate_strategy_spec_hash": "hash-OLD-DIFFERENT"}, **_ALL_PROOFS_TRUE},
+            {
+                "lineage": _matching_lineage(candidate_strategy_spec_hash="hash-OLD-DIFFERENT"),
+                **_ALL_PROOFS_TRUE,
+            },
         )
         panel = build_trainer_panel(
             trainer_status_path=tmp_path / "missing.json",
@@ -354,6 +402,61 @@ class TestVerificationPanel:
         assert panel.verification.result == "STALE"
         assert panel.verification.verified_candidate_strategy_spec_hash == "hash-OLD-DIFFERENT"
 
+    def test_same_spec_hash_different_parent_identity_is_stale_not_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """Required regression: the exact gap this fix closes. The same
+
+        `candidate_strategy_spec_hash` can exist under a different frozen
+        parent -- binding on the spec hash alone would wrongly read PASS
+        here. Only `parent_strategy_key` differs from the current
+        candidate; the spec hash and proofs are otherwise identical."""
+        candidate_path = tmp_path / "candidate_status.json"
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
+        verification_path = tmp_path / "verification_record.json"
+        _write(
+            verification_path,
+            {
+                "lineage": _matching_lineage(parent_strategy_key="some-other-strategy@v1"),
+                **_ALL_PROOFS_TRUE,
+            },
+        )
+        panel = build_trainer_panel(
+            trainer_status_path=tmp_path / "missing.json",
+            dataset_status_path=tmp_path / "missing.json",
+            candidate_status_path=candidate_path,
+            verification_record_path=verification_path,
+            now=_NOW,
+        )
+        assert panel.verification.result == "STALE"
+        assert panel.verification.verified_candidate_strategy_spec_hash == "hash-CURRENT"
+        assert panel.verification.verified_parent_strategy_key == "some-other-strategy@v1"
+
+    def test_same_spec_hash_different_parent_source_hash_is_stale_not_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """Same gap, the other parent field: matching parent_strategy_key
+
+        but a different parent_source_hash must also refuse PASS."""
+        candidate_path = tmp_path / "candidate_status.json"
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
+        verification_path = tmp_path / "verification_record.json"
+        _write(
+            verification_path,
+            {
+                "lineage": _matching_lineage(parent_source_hash="some-other-source-hash"),
+                **_ALL_PROOFS_TRUE,
+            },
+        )
+        panel = build_trainer_panel(
+            trainer_status_path=tmp_path / "missing.json",
+            dataset_status_path=tmp_path / "missing.json",
+            candidate_status_path=candidate_path,
+            verification_record_path=verification_path,
+            now=_NOW,
+        )
+        assert panel.verification.result == "STALE"
+
     def test_no_current_candidate_to_bind_to_is_stale_not_pass(self, tmp_path: Path) -> None:
         """A verification record with all-true proofs but no currently
 
@@ -361,10 +464,7 @@ class TestVerificationPanel:
         describing "the candidate shown now" -- there is no candidate
         shown now."""
         verification_path = tmp_path / "verification_record.json"
-        _write(
-            verification_path,
-            {"lineage": {"candidate_strategy_spec_hash": "hash-SOMETHING"}, **_ALL_PROOFS_TRUE},
-        )
+        _write(verification_path, {"lineage": _matching_lineage(), **_ALL_PROOFS_TRUE})
         panel = build_trainer_panel(
             trainer_status_path=tmp_path / "missing.json",
             dataset_status_path=tmp_path / "missing.json",
@@ -376,13 +476,10 @@ class TestVerificationPanel:
 
     def test_matching_candidate_but_a_false_proof_is_fail_not_stale(self, tmp_path: Path) -> None:
         candidate_path = tmp_path / "candidate_status.json"
-        _write(candidate_path, {"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"})
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
         verification_path = tmp_path / "verification_record.json"
         proofs = {**_ALL_PROOFS_TRUE, "unit_mapping_verified": False}
-        _write(
-            verification_path,
-            {"lineage": {"candidate_strategy_spec_hash": "hash-CURRENT"}, **proofs},
-        )
+        _write(verification_path, {"lineage": _matching_lineage(), **proofs})
         panel = build_trainer_panel(
             trainer_status_path=tmp_path / "missing.json",
             dataset_status_path=tmp_path / "missing.json",
@@ -400,14 +497,11 @@ class TestVerificationPanel:
         PASS merely because it happens not to contain an explicit False
         value."""
         candidate_path = tmp_path / "candidate_status.json"
-        _write(candidate_path, {"available": True, "candidate_strategy_spec_hash": "hash-CURRENT"})
+        _write(candidate_path, {**_CURRENT_CANDIDATE_IDENTITY, "available": True})
         verification_path = tmp_path / "verification_record.json"
         _write(
             verification_path,
-            {
-                "lineage": {"candidate_strategy_spec_hash": "hash-CURRENT"},
-                "base_code_hash_verified": True,
-            },
+            {"lineage": _matching_lineage(), "base_code_hash_verified": True},
         )
         panel = build_trainer_panel(
             trainer_status_path=tmp_path / "missing.json",

@@ -176,6 +176,8 @@ renderTrainerPanel({
       result: "PASS",
       candidate_hash: "fedcba9876543210fedcba",
       verified_candidate_strategy_spec_hash: "abcdef0123456789abcdef",
+      verified_parent_strategy_key: "ict-sb-eurusd-pivot2@v1",
+      verified_parent_source_hash: "source-hash-abcdef012345",
     },
     run_coherence: "INCOHERENT",
     run_coherence_detail: "disagreeing run_id values: FULLRUN1-1, FULLRUN1-2",
@@ -187,6 +189,8 @@ assert.ok(!campaignHtml.includes("REACHABLE>"), "must not retain the old REACHAB
 candidateHtml = dom.elements["trainer-candidate-body"].innerHTML;
 assert.ok(candidateHtml.includes("RESEARCH_PROMISING"));
 assert.ok(candidateHtml.includes("PASS"));
+assert.ok(candidateHtml.includes("ict-sb-eurusd-pivot2@v1"));
+assert.ok(candidateHtml.includes("source-hash-abcd"), "verified parent source hash truncated to 16 chars");
 assert.equal(
   dom.elements["run-coherence-card"].style.display,
   "",

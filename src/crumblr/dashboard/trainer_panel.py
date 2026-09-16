@@ -42,12 +42,16 @@ findings from the first observability pass, all closed in this revision:
 3. Static verification `PASS` was computed from six booleans in the
    verification record alone, with no check that record actually
    describes the candidate currently shown. `_verification_panel` now
-   requires the verification record's own `lineage.candidate_strategy_spec_hash`
-   -- an immutable field the Static Agent's `candidate_verifier.py`
-   already emits, not a new envelope field -- to equal the currently
-   displayed candidate's own `candidate_strategy_spec_hash` before `PASS`
-   is possible at all. A record for a different (or no longer current)
-   candidate reads `STALE`, never `PASS`.
+   requires all three of the verification record's own immutable
+   `lineage` identity fields -- `candidate_strategy_spec_hash`,
+   `parent_strategy_key`, `parent_source_hash` (all already emitted by
+   the Static Agent's `candidate_verifier.py`, no new envelope field
+   needed) -- to equal the currently displayed candidate's own values
+   before `PASS` is possible at all. The spec hash alone is not a
+   sufficient identity: the same candidate spec can exist under a
+   different frozen parent. A record for a different (or no longer
+   current) candidate identity reads `STALE`, never `PASS`; a record that
+   binds correctly but fails a proof reads `FAIL`.
 """
 
 from __future__ import annotations
@@ -130,12 +134,16 @@ class StaticVerificationPanelState:
     parent_compatibility_verified: bool | None
     unit_mapping_verified: bool | None
     verified_candidate_strategy_spec_hash: str | None
-    """The candidate identity the verification record itself names
+    verified_parent_strategy_key: str | None
+    verified_parent_source_hash: str | None
+    """The full candidate identity the verification record itself names
 
-    (`lineage.candidate_strategy_spec_hash`) -- shown so a viewer can see
-    directly why a `STALE` result does not match the candidate panel's own
-    `candidate_strategy_spec_hash`, rather than only being told it
-    doesn't."""
+    (`lineage.candidate_strategy_spec_hash`/`parent_strategy_key`/
+    `parent_source_hash`) -- shown so a viewer can see directly why a
+    `STALE` result does not match the candidate panel's own identity,
+    rather than only being told it doesn't. All three are required to
+    match: the same candidate spec hash can exist under a different
+    frozen parent, so the spec hash alone is not a sufficient identity."""
 
 
 @dataclass(frozen=True)
@@ -160,12 +168,24 @@ class TrainerPanelState:
 
 
 def _parse_utc(raw: str | None) -> datetime | None:
+    """Fails closed on anything that is not a genuinely timezone-aware
+
+    timestamp -- a syntactically valid but naive `datetime.fromisoformat()`
+    result is rejected here too, not merely left for a later `now -
+    parsed` subtraction to raise `TypeError` (a naive/aware subtraction is
+    always an error, never a comparison Python can perform). `now` is
+    always timezone-aware, so returning a naive `parsed` here would crash
+    `_is_stale` instead of reporting an honest stale reading.
+    """
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except (TypeError, ValueError):
         return None
+    if parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def _is_stale(checked_at_utc: str | None, *, now: UtcDatetime, max_age: timedelta) -> bool:
@@ -288,7 +308,11 @@ def _candidate_panel(snapshot: dict[str, Any] | None) -> TrainerCandidatePanelSt
 
 
 def _verification_panel(
-    snapshot: dict[str, Any] | None, *, current_candidate_strategy_spec_hash: str | None
+    snapshot: dict[str, Any] | None,
+    *,
+    current_candidate_strategy_spec_hash: str | None,
+    current_parent_strategy_key: str | None,
+    current_parent_source_hash: str | None,
 ) -> StaticVerificationPanelState:
     if snapshot is None:
         return StaticVerificationPanelState(
@@ -302,6 +326,8 @@ def _verification_panel(
             parent_compatibility_verified=None,
             unit_mapping_verified=None,
             verified_candidate_strategy_spec_hash=None,
+            verified_parent_strategy_key=None,
+            verified_parent_source_hash=None,
         )
     checks = (
         snapshot.get("base_code_hash_verified"),
@@ -315,16 +341,27 @@ def _verification_panel(
 
     # The verification record's own lineage names exactly which candidate
     # it verified (candidate_verifier.py already emits this -- no new
-    # envelope field needed). PASS requires that identity to equal the
-    # currently displayed candidate's own hash: a record whose proofs all
-    # passed for a *different* (or no longer current) candidate must never
-    # read as PASS for the one shown now.
+    # envelope field needed). PASS requires ALL THREE immutable identity
+    # fields to equal the currently displayed candidate's own: the same
+    # candidate_strategy_spec_hash can exist under a different frozen
+    # parent (parent_strategy_key/parent_source_hash), so the spec hash
+    # alone is not a sufficient identity match. A record whose proofs all
+    # passed for a *different* (or no longer current) candidate identity
+    # must never read as PASS for the one shown now.
     lineage = snapshot.get("lineage") or {}
     verified_hash = lineage.get("candidate_strategy_spec_hash")
+    verified_parent_strategy_key = lineage.get("parent_strategy_key")
+    verified_parent_source_hash = lineage.get("parent_source_hash")
     binds_to_current_candidate = (
         verified_hash is not None
         and current_candidate_strategy_spec_hash is not None
         and verified_hash == current_candidate_strategy_spec_hash
+        and verified_parent_strategy_key is not None
+        and current_parent_strategy_key is not None
+        and verified_parent_strategy_key == current_parent_strategy_key
+        and verified_parent_source_hash is not None
+        and current_parent_source_hash is not None
+        and verified_parent_source_hash == current_parent_source_hash
     )
 
     result: VerificationResult
@@ -346,6 +383,8 @@ def _verification_panel(
         parent_compatibility_verified=snapshot.get("parent_compatibility_verified"),
         unit_mapping_verified=snapshot.get("unit_mapping_verified"),
         verified_candidate_strategy_spec_hash=verified_hash,
+        verified_parent_strategy_key=verified_parent_strategy_key,
+        verified_parent_source_hash=verified_parent_source_hash,
     )
 
 
@@ -406,6 +445,8 @@ def build_trainer_panel(
     verification = _verification_panel(
         verification_snapshot,
         current_candidate_strategy_spec_hash=candidate.candidate_strategy_spec_hash,
+        current_parent_strategy_key=candidate.parent_strategy_key,
+        current_parent_source_hash=candidate.parent_source_hash,
     )
     run_coherence, run_coherence_detail = _run_coherence(
         (campaign.run_id, dataset.run_id, candidate.run_id)
