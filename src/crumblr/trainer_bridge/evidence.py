@@ -69,17 +69,23 @@ def pre_trade_stop_distance(evidence: ClosedTradeEvidence) -> Decimal:
 
 
 def realized_pnl(evidence: ClosedTradeEvidence) -> Decimal:
-    """Realized PnL in account currency, from the durable broker-account
-    balance delta across the close.
+    """An account-balance delta across one isolated smoke-test close
+    window, in account currency -- **not** an independently observed
+    broker close-fill price or a confirmed net-of-all-costs figure.
 
     Crumblr's one-shot close runner (`scripts/close_demo_canary_position.py`)
     verifies a close by the ticket's absence from a fresh `positions()`
     read; it does not durably record a `CLOSED` execution event or a fill
     price anywhere in Crumblr's own database (confirmed by inspection, not
-    assumed). The account ledger's own balance is the one place a
-    broker-applied cost cannot help but show up -- any commission, swap or
-    spread the broker actually charged changed this number, so it is the
-    true net realized outcome, not a price-only approximation of it.
+    assumed). Absent that, this reads the balance change across a window
+    the caller (`scripts/export_crumblr_trade_to_trainer.py`'s
+    `_resolve_isolated_close_window`) has already proven is isolated to
+    this one ticket alone -- no other open position and no other order's
+    `FILLED` event anywhere inside it. That isolation is what makes the
+    delta attributable to this trade specifically; it does not by itself
+    make this Crumblr's canonical or long-term closed-trade accounting
+    contract, only what Slice 1's smoke proof could establish honestly
+    without a durable close-fill record.
     """
     return evidence.balance_after_close - evidence.balance_before_close
 

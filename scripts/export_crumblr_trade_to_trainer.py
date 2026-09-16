@@ -13,11 +13,19 @@ touches `TradingAssignment`/agent registration, never issues a permit.
 Resolves exactly one already-closed real trade from Crumblr's own durable
 evidence (`execution_requests` -> `decision_capsules` for the intent-time
 stop/reference price, `execution_events` for the real `FILLED` fill, and
-`broker_position_snapshots`/`broker_account_snapshots` for the close --
+`broker_position_snapshots`/`broker_account_snapshots` for the close).
 Crumblr's one-shot close runner never durably records a `CLOSED` execution
-event or a fill price, so the realized outcome is read from the account
-ledger's own balance delta, the one number a broker-applied cost cannot
-help but show up in). Derives one deterministic `return_r`
+event or a fill price -- there is no observed durable broker close-fill
+price anywhere in Crumblr's own database for this trade. Absent that, the
+realized outcome is read as an account-balance delta across a close window
+`_resolve_isolated_close_window` first proves is isolated to this one
+ticket alone (no other open position, no other order's `FILLED` event
+anywhere inside it, and a fully flat book at the close observation) --
+refusing (`EvidenceIncompleteError`) rather than exporting a delta that
+could silently include another trade's outcome. This is what Slice 1's
+smoke proof can establish honestly, not a claim that account-balance-delta
+derivation is Crumblr's canonical or long-term closed-trade accounting
+contract. Derives one deterministic `return_r`
 (`crumblr.trainer_bridge.evidence.derive_return_r`) and POSTs Trainer's
 exact `docs/RESULT_CONTRACT.md` shape through the already-existing,
 already-reviewed `POST /api/v1/campaigns/{campaign_id}/agent-data` MODE_2
@@ -38,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
@@ -50,7 +59,11 @@ from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, create_db_engine, d
 from crumblr.persistence.execution import ExecutionEventStore, ExecutionRequestStore
 from crumblr.persistence.instrument_specs import InstrumentSpecStore
 from crumblr.persistence.journal import CapsuleStore
-from crumblr.persistence.schema import broker_account_snapshots, broker_position_snapshots
+from crumblr.persistence.schema import (
+    broker_account_snapshots,
+    broker_position_snapshots,
+    execution_events,
+)
 from crumblr.trainer_bridge.evidence import (
     ClosedTradeEvidence,
     build_normalized_result,
@@ -96,70 +109,146 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _last_open_position_snapshot(
-    connection: Connection, *, ticket: int
-) -> tuple[datetime, Decimal]:
-    statement = (
-        select(
-            broker_position_snapshots.c.observed_at_utc,
+def _tickets_in_snapshot(connection: Connection, snapshot_id: UUID) -> set[int]:
+    statement = select(broker_position_snapshots.c.ticket).where(
+        broker_position_snapshots.c.snapshot_id == snapshot_id
+    )
+    return {int(row[0]) for row in connection.execute(statement)}
+
+
+def _account_balance_and_currency(connection: Connection, snapshot_id: UUID) -> tuple[Decimal, str]:
+    statement = select(
+        broker_account_snapshots.c.balance, broker_account_snapshots.c.currency
+    ).where(broker_account_snapshots.c.snapshot_id == snapshot_id)
+    row = connection.execute(statement).first()
+    if row is None:
+        raise EvidenceIncompleteError(
+            f"no broker_account_snapshots row for snapshot_id {snapshot_id}"
         )
+    return Decimal(str(row[0])), row[1]
+
+
+@dataclass(frozen=True)
+class _CloseWindow:
+    last_open_at: datetime
+    balance_before_close: Decimal
+    post_close_at: datetime
+    balance_after_close: Decimal
+    account_currency: str
+
+
+def _resolve_isolated_close_window(
+    connection: Connection, *, ticket: int, order_request_id: UUID
+) -> _CloseWindow:
+    """Resolve the account-balance delta across one closed trade's window,
+    refusing (`EvidenceIncompleteError`) unless that window is demonstrably
+    isolated to `ticket` alone -- an account-balance delta is only a valid
+    proxy for one trade's realized outcome if nothing else moved money
+    during the window it spans. Five checks, in order:
+
+    1. at the last observation showing `ticket` open, no other ticket may
+       also be open;
+    2. walk forward to the immediate next observation after that point at
+       which `ticket` is absent;
+    3. every observation in between must still show no ticket other than
+       `ticket` open;
+    4. no *different* order's `FILLED` execution event may fall strictly
+       inside the window -- a same-cycle open+close between two polls
+       would be invisible to position snapshots but visible here;
+    5. the close observation itself must be fully account-flat, not merely
+       `ticket`-absent -- Slice 1 does not attempt multi-position
+       accounting.
+    """
+    last_open_statement = (
+        select(broker_position_snapshots.c.snapshot_id, broker_position_snapshots.c.observed_at_utc)
         .where(broker_position_snapshots.c.ticket == ticket)
         .order_by(broker_position_snapshots.c.observed_at_utc.desc())
         .limit(1)
     )
-    row = connection.execute(statement).first()
-    if row is None:
+    last_open_row = connection.execute(last_open_statement).first()
+    if last_open_row is None:
         raise EvidenceIncompleteError(
             f"no broker_position_snapshots row was ever recorded for ticket {ticket} "
             "-- cannot establish this trade was ever durably observed open"
         )
-    last_open_at = row[0]
+    last_open_snapshot_id, last_open_at = last_open_row
 
-    balance_statement = (
-        select(broker_account_snapshots.c.balance)
-        .where(broker_account_snapshots.c.observed_at_utc == last_open_at)
-        .order_by(broker_account_snapshots.c.observed_at_utc)
-        .limit(1)
-    )
-    balance_row = connection.execute(balance_statement).first()
-    if balance_row is None:
+    # Step 1.
+    last_open_tickets = _tickets_in_snapshot(connection, last_open_snapshot_id)
+    if last_open_tickets != {ticket}:
         raise EvidenceIncompleteError(
-            f"no broker_account_snapshots row at {last_open_at} -- cannot read the "
-            "balance in force while the position was still open"
+            f"snapshot {last_open_snapshot_id} at {last_open_at} is not isolated to "
+            f"ticket {ticket} alone (also open: {sorted(last_open_tickets - {ticket})}) "
+            "-- refusing an account-balance derivation across a contaminated window"
         )
-    return last_open_at, balance_row[0]
+    balance_before_close, account_currency = _account_balance_and_currency(
+        connection, last_open_snapshot_id
+    )
 
+    # Steps 2/3/5: walk forward to the immediate next observation without
+    # `ticket`, refusing on any foreign ticket seen along the way, and
+    # requiring that first target-absent observation to be fully flat.
+    candidates_statement = (
+        select(broker_account_snapshots.c.snapshot_id, broker_account_snapshots.c.observed_at_utc)
+        .where(broker_account_snapshots.c.observed_at_utc > last_open_at)
+        .order_by(broker_account_snapshots.c.observed_at_utc)
+    )
+    post_close_snapshot_id: UUID | None = None
+    post_close_at: datetime | None = None
+    for candidate_snapshot_id, candidate_observed_at in connection.execute(candidates_statement):
+        tickets = _tickets_in_snapshot(connection, candidate_snapshot_id)
+        if ticket in tickets:
+            if tickets != {ticket}:
+                raise EvidenceIncompleteError(
+                    f"snapshot {candidate_snapshot_id} at {candidate_observed_at} is not "
+                    f"isolated to ticket {ticket} alone (also open: "
+                    f"{sorted(tickets - {ticket})}) -- refusing an account-balance "
+                    "derivation across a contaminated window"
+                )
+            continue
+        if tickets:
+            raise EvidenceIncompleteError(
+                f"snapshot {candidate_snapshot_id} at {candidate_observed_at} is the "
+                f"first observation without ticket {ticket}, but the account is not "
+                f"flat there (open: {sorted(tickets)}) -- Slice 1 requires a flat close"
+            )
+        post_close_snapshot_id, post_close_at = candidate_snapshot_id, candidate_observed_at
+        break
 
-def _first_flat_account_snapshot_after(
-    connection: Connection, *, ticket: int, after: datetime
-) -> Decimal:
-    still_open_statement = (
-        select(broker_position_snapshots.c.observed_at_utc)
+    if post_close_snapshot_id is None or post_close_at is None:
+        raise EvidenceIncompleteError(
+            f"no broker_account_snapshots row exists after {last_open_at} showing "
+            f"ticket {ticket} closed -- this trade is not durably confirmed closed yet"
+        )
+
+    # Step 4.
+    foreign_fill_statement = (
+        select(execution_events.c.event_id)
         .where(
-            broker_position_snapshots.c.ticket == ticket,
-            broker_position_snapshots.c.observed_at_utc > after,
+            execution_events.c.event_type == ExecutionEventType.FILLED.value,
+            execution_events.c.order_request_id != order_request_id,
+            execution_events.c.occurred_at_utc > last_open_at,
+            execution_events.c.occurred_at_utc < post_close_at,
         )
         .limit(1)
     )
-    if connection.execute(still_open_statement).first() is not None:
+    foreign_fill = connection.execute(foreign_fill_statement).first()
+    if foreign_fill is not None:
         raise EvidenceIncompleteError(
-            f"ticket {ticket} still appears in broker_position_snapshots after "
-            f"{after} -- this trade is not durably confirmed closed yet"
+            f"a different order's FILLED event ({foreign_fill[0]}) occurred between "
+            f"{last_open_at} and {post_close_at} -- refusing an account-balance "
+            "derivation across a window that may include another trade's outcome"
         )
 
-    statement = (
-        select(broker_account_snapshots.c.balance)
-        .where(broker_account_snapshots.c.observed_at_utc > after)
-        .order_by(broker_account_snapshots.c.observed_at_utc)
-        .limit(1)
+    balance_after_close, _ = _account_balance_and_currency(connection, post_close_snapshot_id)
+
+    return _CloseWindow(
+        last_open_at=last_open_at,
+        balance_before_close=balance_before_close,
+        post_close_at=post_close_at,
+        balance_after_close=balance_after_close,
+        account_currency=account_currency,
     )
-    row = connection.execute(statement).first()
-    if row is None:
-        raise EvidenceIncompleteError(
-            f"no broker_account_snapshots row exists after {after} -- cannot confirm "
-            "the post-close balance"
-        )
-    return Decimal(row[0])
 
 
 def resolve_evidence(engine: Engine, order_request_id: UUID) -> ClosedTradeEvidence:
@@ -189,21 +278,11 @@ def resolve_evidence(engine: Engine, order_request_id: UUID) -> ClosedTradeEvide
         raise EvidenceIncompleteError(f"FILLED event {filled[0].event_id} has no payload")
 
     with engine.connect() as connection:
-        last_open_at, balance_before_close = _last_open_position_snapshot(
-            connection, ticket=int(fill_payload["mt5_order_ticket"])
+        window = _resolve_isolated_close_window(
+            connection,
+            ticket=int(fill_payload["mt5_order_ticket"]),
+            order_request_id=order_request_id,
         )
-        balance_after_close = _first_flat_account_snapshot_after(
-            connection, ticket=int(fill_payload["mt5_order_ticket"]), after=last_open_at
-        )
-
-    account_row_statement = (
-        select(broker_account_snapshots.c.currency)
-        .where(broker_account_snapshots.c.observed_at_utc == last_open_at)
-        .limit(1)
-    )
-    with engine.connect() as connection:
-        currency_row = connection.execute(account_row_statement).first()
-    account_currency = currency_row[0] if currency_row is not None else "UNKNOWN"
 
     trade_intent = capsule.trade_intent
     if trade_intent.stop_loss_price is None:
@@ -227,10 +306,10 @@ def resolve_evidence(engine: Engine, order_request_id: UUID) -> ClosedTradeEvide
         fill_occurred_at_utc=filled[0].occurred_at_utc,
         mt5_order_ticket=int(fill_payload["mt5_order_ticket"]),
         mt5_deal_ticket=int(fill_payload["mt5_deal_ticket"]),
-        last_open_snapshot_at_utc=last_open_at,
-        balance_before_close=Decimal(str(balance_before_close)),
-        balance_after_close=Decimal(str(balance_after_close)),
-        account_currency=account_currency,
+        last_open_snapshot_at_utc=window.last_open_at,
+        balance_before_close=window.balance_before_close,
+        balance_after_close=window.balance_after_close,
+        account_currency=window.account_currency,
     )
 
 
