@@ -390,6 +390,12 @@
       </div>
 
       <div class="card status-card">
+        <!-- Owner correction: state.agent_health (build_agent_health()) is
+             derived from assignment/identity status and *decision
+             recency* -- real, persisted evidence, but not an OS/process
+             heartbeat for the Agent runtime. Nothing here claims the Agent
+             process itself is alive; the sub-caption says exactly what
+             this is evidence of. -->
         <div class="label">Agent</div>
         <div class="state {{ state.agent_health | state_class }}" id="agent-state">
           <span class="dot {{ state.agent_health | state_class }}" id="agent-dot"></span>
@@ -397,7 +403,7 @@
         </div>
         <div class="sub" id="agent-sub">
           {% if state.agent_panel %}
-            {{ state.agent_panel.canonical_symbol }} / {{ state.agent_panel.timeframe }}
+            recent decision evidence, not a live runtime heartbeat · {{ state.agent_panel.canonical_symbol }} / {{ state.agent_panel.timeframe }}
           {% else %}
             no assignment configured
           {% endif %}
@@ -584,17 +590,18 @@
   <div class="section">
     <div class="section-title">
       Paper Portfolio <span class="simulated-ribbon">PAPER_LITE — simulated, not the real broker</span>
-      <!-- Evidence, not an invented runtime badge: the journal's own
-           latest_observation_time_utc is a real, durable timestamp -- if
-           it is old, this is a historical replay, not a currently-running
-           simulated broker, and must not visually look like one. Same
-           3x-timeframe-interval staleness reasoning agent_state.py's
-           build_agent_health() already uses (M5 -> 15 minutes). -->
+      <!-- Owner correction: the age of the journal's own
+           latest_observation_time_utc is evidence the *data* is stale, not
+           proof the PAPER_LITE runtime process itself has stopped -- no
+           independent durable runtime/heartbeat evidence exists here, so
+           this must never say INACTIVE. Same 3x-timeframe-interval
+           staleness window agent_state.py's build_agent_health() already
+           uses (M5 -> 15 minutes) for *when* to flag it, wording only. -->
       {% set paper_obs_dt = (state.paper_portfolio.portfolio.latest_observation_time_utc | parse_iso) if state.paper_portfolio.status == "OK" and state.paper_portfolio.portfolio else none %}
       {% if paper_obs_dt and (state.generated_at_utc - paper_obs_dt) > timedelta(minutes=15) %}
-      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon">INACTIVE — no recent activity</span>
+      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon">NO RECENT PAPER ACTIVITY — last observation {{ (state.generated_at_utc - paper_obs_dt) | age }} ago</span>
       {% else %}
-      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon" style="display:none;">INACTIVE — no recent activity</span>
+      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon" style="display:none;">NO RECENT PAPER ACTIVITY</span>
       {% endif %}
     </div>
     <div class="grid-2">
@@ -1437,19 +1444,26 @@
     renderPaperPortfolioAccount(state);
     renderPaperPortfolioPositions(state);
 
-    // Same 15-minute (3x M5) staleness reasoning as build_agent_health() --
-    // a real, durable latest_observation_time_utc that is old means this is
-    // a historical replay, not a currently-running simulated broker.
+    // Same 15-minute (3x M5) staleness window as build_agent_health() for
+    // *when* to flag this -- but the age of latest_observation_time_utc is
+    // evidence the data is stale, never proof the PAPER_LITE runtime itself
+    // stopped (no independent durable runtime/heartbeat evidence exists
+    // here), so this must never say INACTIVE (owner correction).
     var ribbon = document.getElementById("paper-portfolio-inactive-ribbon");
     if (ribbon) {
       var panel = (state && state.paper_portfolio) || {};
       var obsTime = panel.status === "OK" && panel.portfolio ? panel.portfolio.latest_observation_time_utc : null;
-      var inactive = false;
+      var stale = false;
+      var obsAgeText = "";
       if (obsTime) {
         var obsAgeMs = Date.parse(state.generated_at_utc) - Date.parse(obsTime);
-        inactive = obsAgeMs > 15 * 60 * 1000;
+        stale = obsAgeMs > 15 * 60 * 1000;
+        obsAgeText = formatAge(Math.max(0, obsAgeMs / 1000)) + " ago";
       }
-      ribbon.style.display = inactive ? "inline-flex" : "none";
+      ribbon.style.display = stale ? "inline-flex" : "none";
+      ribbon.textContent = stale
+        ? "NO RECENT PAPER ACTIVITY — last observation " + obsAgeText
+        : "NO RECENT PAPER ACTIVITY";
     }
   }
 
