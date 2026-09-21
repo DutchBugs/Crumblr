@@ -117,6 +117,42 @@
     border: 1px solid rgba(167, 139, 250, 0.4);
   }
 
+  /* ---- Historical/inactive ribbon -- grey/neutral, deliberately distinct
+     from .simulated-ribbon's purple: "this is old evidence" is a different
+     claim from "this is a simulated (never real-broker) account." ---- */
+  .historical-ribbon {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 999px; font-size: 0.7em;
+    font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    background: var(--neutral-bg); color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  /* ---- Top-bar heartbeat pill (browser<->/api/state polling only --
+     independent of MT5/market-data health, see renderHeartbeat()). Compact
+     by design: while healthy it is just a pulsing dot + "LIVE", no age
+     text and no dedicated card in the main grid. ---- */
+  .heartbeat-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 11px; border-radius: 999px; font-size: 0.75em;
+    font-weight: 700; letter-spacing: 0.05em; border: 1px solid var(--border);
+    background: var(--neutral-bg); color: var(--text-dim); cursor: default;
+  }
+  .heartbeat-pill.good { background: var(--good-bg); color: var(--good); border-color: rgba(52, 211, 153, 0.35); }
+  .heartbeat-pill.warn { background: var(--warn-bg); color: var(--warn); border-color: rgba(251, 191, 36, 0.35); }
+  .heartbeat-pill.bad { background: var(--bad-bg); color: var(--bad); border-color: rgba(251, 84, 104, 0.35); }
+  .heartbeat-pill .dot { width: 7px; height: 7px; }
+  /* Pulse only while healthy, and only this one dot -- Row 1's other
+     .dot.good elements (Market Reader, Agent, ...) must stay static. */
+  .heartbeat-pill .dot.good { animation: heartbeatPulse 1.8s ease-in-out infinite; }
+  @keyframes heartbeatPulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+    50% { opacity: 0.72; box-shadow: 0 0 0 4px rgba(52, 211, 153, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .heartbeat-pill .dot.good { animation: none; }
+  }
+
   /* ---- Row 1: status cards ---- */
   .status-card .label {
     font-size: 0.72em; font-weight: 700; letter-spacing: 0.07em; color: var(--text-faint);
@@ -146,6 +182,34 @@
   .hero-price .ask .price { color: var(--up); }
   .hero-price .meta { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 0.85em; color: var(--text-dim); }
   .hero-price .meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* ---- BID/ASK odometer digits (display formatting only -- never alters
+     persisted market data). Fixed-width digit cells at a stable 5-decimal
+     layout so the quote never changes width tick to tick; each cell clips
+     its own roll animation so digits never visually spill into neighbors. */
+  .price-digits { display: inline-flex; white-space: nowrap; }
+  .price-char {
+    display: inline-block; overflow: hidden; position: relative;
+    font-variant-numeric: tabular-nums;
+  }
+  .price-char.digit { width: 0.62em; text-align: center; }
+  .roll-up { animation: priceRollUp 220ms ease-out; }
+  .roll-down { animation: priceRollDown 220ms ease-out; }
+  @keyframes priceRollUp {
+    0% { transform: translateY(45%); opacity: 0.3; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+  @keyframes priceRollDown {
+    0% { transform: translateY(-45%); opacity: 0.3; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .roll-up, .roll-down { animation: none; }
+  }
+  @media (max-width: 480px) {
+    .hero-price .price { font-size: 1.4em; }
+    .hero-price .quote { flex-wrap: wrap; gap: 10px 18px; }
+  }
   .chart-card { display: flex; flex-direction: column; }
   .chart-card .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
   .chart-card .chart-head .title { font-size: 0.8em; color: var(--text-dim); }
@@ -260,12 +324,18 @@
   <div class="identity">
     <span class="brand">CRUMBLR</span>
     <span class="subtitle">Crumblr Autonomous Trading Platform</span>
+    <!-- Browser<->/api/state polling heartbeat only -- independent of
+         MT5/market-data health (see renderHeartbeat()). No runtime/process
+         badge lives here: an ACTIVE TradingAssignment is not evidence a
+         decision runtime is actually running (owner review), so nothing
+         is asserted about that from this top bar at all. -->
+    <span class="heartbeat-pill good" id="heartbeat-pill" title="Browser to /api/state polling status">
+      <span class="dot good" id="heartbeat-dot"></span>
+      <span id="heartbeat-text">LIVE</span>
+    </span>
   </div>
   <div class="badges">
     <span class="pill pill-demo">{{ state.environment_badge_label if state else "—" }}</span>
-    {% if state and state.agent_panel and state.agent_panel.assignment_status == "ACTIVE" %}
-    <span class="pill pill-agent" id="paperlite-badge">PAPER_LITE / SHADOW</span>
-    {% endif %}
     <span class="pill pill-readonly">READ ONLY</span>
     <span class="pill pill-exec-disabled">⛔ REAL EXECUTION DISABLED</span>
   </div>
@@ -284,18 +354,11 @@
 
 {% else %}
 
-  <!-- Row 1: header status cards -->
+  <!-- Row 1: header status cards. The browser<->/api/state heartbeat is
+       not one of these -- it moved to the top-bar pill (compact, its own
+       independent fact, see renderHeartbeat()). -->
   <div class="section">
-    <div class="grid-6">
-      <div class="card status-card">
-        <div class="label">Dashboard</div>
-        <div class="state good" id="heartbeat-state">
-          <span class="dot good" id="heartbeat-dot"></span>
-          <span id="heartbeat-text">LIVE</span>
-        </div>
-        <div class="sub" id="heartbeat-sub">refreshed just now</div>
-      </div>
-
+    <div class="grid-5">
       <div class="card status-card">
         <div class="label">Market Reader</div>
         <div class="state {{ state.mt5_connectivity | state_class }}" id="mt5-state">
@@ -383,8 +446,8 @@
         <div id="hero-body">
           {% if state.latest_tick %}
           <div class="quote">
-            <div class="bid"><div class="side-label">BID</div><div class="price" id="hero-bid">{{ state.latest_tick.bid }}</div></div>
-            <div class="ask"><div class="side-label">ASK</div><div class="price" id="hero-ask">{{ state.latest_tick.ask }}</div></div>
+            <div class="bid"><div class="side-label">BID</div><div class="price" id="hero-bid">{{ state.latest_tick.bid | price5 }}</div></div>
+            <div class="ask"><div class="side-label">ASK</div><div class="price" id="hero-ask">{{ state.latest_tick.ask | price5 }}</div></div>
           </div>
           <div class="meta">
             <div>Spread: <b id="hero-spread">{{ state.latest_tick.spread }}</b></div>
@@ -401,7 +464,10 @@
       <div class="card chart-card">
         <div class="chart-head">
           <div class="title" id="chart-title">{{ state.timeframe }} — last {{ state.recent_bars | length }} closed bars</div>
-          <div class="title muted">source: PostgreSQL (persisted, not live MT5)</div>
+          <!-- Honest, not aspirational: this wording tracks the real
+               reader/data-feed health on every poll (renderChartSourceLabel())
+               rather than asserting "live" unconditionally. -->
+          <div class="title muted" id="chart-source-label">{{ "MT5 DEMO live feed → PostgreSQL" if state.data_feed_state == "HEALTHY" else "PostgreSQL (persisted/historical — no active live data session)" }}</div>
         </div>
         {% if state.recent_bars %}
         <div class="chart-wrap">
@@ -426,7 +492,9 @@
         <div class="panel-title">Account (latest observed broker snapshot)</div>
         <div id="broker-account-body">
         {% if state.broker.account %}
-        <div class="kv"><span class="k">Observed</span><span class="v">{{ state.broker.account.observed_at_utc }} ({{ (state.generated_at_utc - state.broker.account.observed_at_utc) | age }} ago)</span></div>
+        <!-- Same 5-minute trust window reconcile() itself already uses for
+             broker-state snapshot staleness -- not a new threshold. -->
+        <div class="kv"><span class="k">Observed</span><span class="v {{ 'warn' if (state.generated_at_utc - state.broker.account.observed_at_utc) > timedelta(minutes=5) else '' }}" id="broker-observed-age">{{ state.broker.account.observed_at_utc }} ({{ (state.generated_at_utc - state.broker.account.observed_at_utc) | age }} ago{{ ' — STALE' if (state.generated_at_utc - state.broker.account.observed_at_utc) > timedelta(minutes=5) else '' }})</span></div>
         <div class="kv"><span class="k">Server</span><span class="v">{{ state.broker.account.server }}</span></div>
         <div class="kv"><span class="k">Account</span><span class="v">{{ state.broker.account.account_ref }}</span></div>
         <div class="kv"><span class="k">Currency / Leverage</span><span class="v">{{ state.broker.account.currency }} · 1:{{ state.broker.account.leverage }}</span></div>
@@ -514,7 +582,21 @@
        read-only from its durable journal — never the real broker shown
        above, and never a claim about real trading authority). -->
   <div class="section">
-    <div class="section-title">Paper Portfolio <span class="simulated-ribbon">PAPER_LITE — simulated, not the real broker</span></div>
+    <div class="section-title">
+      Paper Portfolio <span class="simulated-ribbon">PAPER_LITE — simulated, not the real broker</span>
+      <!-- Evidence, not an invented runtime badge: the journal's own
+           latest_observation_time_utc is a real, durable timestamp -- if
+           it is old, this is a historical replay, not a currently-running
+           simulated broker, and must not visually look like one. Same
+           3x-timeframe-interval staleness reasoning agent_state.py's
+           build_agent_health() already uses (M5 -> 15 minutes). -->
+      {% set paper_obs_dt = (state.paper_portfolio.portfolio.latest_observation_time_utc | parse_iso) if state.paper_portfolio.status == "OK" and state.paper_portfolio.portfolio else none %}
+      {% if paper_obs_dt and (state.generated_at_utc - paper_obs_dt) > timedelta(minutes=15) %}
+      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon">INACTIVE — no recent activity</span>
+      {% else %}
+      <span class="historical-ribbon" id="paper-portfolio-inactive-ribbon" style="display:none;">INACTIVE — no recent activity</span>
+      {% endif %}
+    </div>
     <div class="grid-2">
       <div class="card card-simulated">
         <div class="panel-title">Simulated account</div>
@@ -583,8 +665,8 @@
     </div>
     <div class="card">
       {% if state.agent_panel %}
-      <div class="kv" style="margin-bottom:10px;">
-        <span class="k">Decision outcomes (all-time)</span>
+      <div class="kv" style="margin-bottom:10px;opacity:0.75;">
+        <span class="k">Decision outcomes <span class="muted">(all-time, historical aggregate)</span></span>
         <span class="v" id="decision-outcome-counts">
           NO_TRADE: {{ state.decision_outcome_counts.get("NO_TRADE", 0) }}
           &nbsp;•&nbsp;
@@ -638,13 +720,47 @@
     </div>
   </div>
 
+  <!-- Row 3a: last decision -- promoted here (was far below Trainer/
+       Execution-activity) so current/latest decision evidence outranks
+       the historical aggregates that follow, per the currentness audit. -->
+  <div class="section">
+    <div class="section-title">Last decision</div>
+    <div class="card">
+      {% if state.last_decision %}
+      <div class="last-decision-head">
+        <div>
+          <span class="last-decision-outcome {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</span>
+        </div>
+        <div class="muted">{{ state.last_decision.occurred_at_utc or "—" }}</div>
+      </div>
+      {% if state.last_decision.proposal %}
+      <div class="proposal-grid">
+        <div class="kv"><span class="k">Side</span><span class="v">{{ state.last_decision.proposal.side }}</span></div>
+        <div class="kv"><span class="k">Order type</span><span class="v">{{ state.last_decision.proposal.entry_type }}</span></div>
+        <div class="kv"><span class="k">Reference price</span><span class="v">{{ state.last_decision.proposal.reference_price }}</span></div>
+        <div class="kv"><span class="k">Stop loss</span><span class="v">{{ state.last_decision.proposal.stop_loss_price or "—" }}</span></div>
+        <div class="kv"><span class="k">Take profit</span><span class="v">{{ state.last_decision.proposal.take_profit_price or "—" }}</span></div>
+        <div class="kv"><span class="k">Requested risk</span><span class="v">{{ state.last_decision.proposal.requested_risk_fraction or "—" }}</span></div>
+      </div>
+      <div class="kv" style="margin-top:6px;"><span class="k">Reason codes</span><span class="v">{{ state.last_decision.proposal.reason_codes | join(", ") if state.last_decision.proposal.reason_codes else "—" }}</span></div>
+      {% elif state.last_decision.platform_outcome == "NO_TRADE" %}
+      <p class="muted" style="margin-top:10px;">NO_TRADE is a normal strategy result, not an error.</p>
+      {% elif state.last_decision.platform_outcome_detail %}
+      <p class="muted" style="margin-top:10px;">{{ state.last_decision.platform_outcome_detail }}</p>
+      {% endif %}
+      {% else %}
+      <div class="agent-empty"><b>NO EVIDENCE</b> — PAPER_LITE has not produced a decision yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
   <!-- Row 3b: Trainer & Candidate Research (FULL RUN 1). Every field here
        comes from build_trainer_panel(), which only ever reads separate,
        explicitly-run, read-only status JSON files -- this dashboard never
        calls Trainer or the Static Agent itself. The banner is a
        structural constant, shown unconditionally. -->
   <div class="section">
-    <div class="section-title">Trainer &amp; Candidate Research</div>
+    <div class="section-title">Trainer &amp; Candidate Research <span class="muted" style="text-transform:none;font-weight:400;">— status snapshot, not live-polled (see each panel's own "Checked at")</span></div>
     <div class="card" style="margin-bottom:10px;">
       <span class="badge-inline bad">{{ state.trainer_panel.candidate_active_banner }}</span>
     </div>
@@ -699,8 +815,8 @@
   <!-- Row 3c: Execution activity -- real execution_requests/execution_events
        history, distinct from the config-only "Execution" gate card below. -->
   <div class="section">
-    <div class="section-title">Execution activity</div>
-    <div class="card">
+    <div class="section-title">Execution activity <span class="muted" style="text-transform:none;font-weight:400;">— all-time historical aggregate</span></div>
+    <div class="card" style="opacity:0.85;">
       <div id="execution-activity-body">
         <div class="kv"><span class="k">Requests claimed (all-time)</span><span class="v">{{ state.execution_activity.requests_claimed_count }}</span></div>
         <div class="kv"><span class="k">Events by type</span><span class="v">
@@ -759,38 +875,6 @@
           <div class="stage-verdict {{ state.pipeline.paper | pipeline_stage_class }}">{{ state.pipeline.paper }}</div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- Row 5: last decision -->
-  <div class="section">
-    <div class="section-title">Last decision</div>
-    <div class="card">
-      {% if state.last_decision %}
-      <div class="last-decision-head">
-        <div>
-          <span class="last-decision-outcome {{ state.last_decision.platform_outcome | state_class }}">{{ state.last_decision.platform_outcome }}</span>
-        </div>
-        <div class="muted">{{ state.last_decision.occurred_at_utc or "—" }}</div>
-      </div>
-      {% if state.last_decision.proposal %}
-      <div class="proposal-grid">
-        <div class="kv"><span class="k">Side</span><span class="v">{{ state.last_decision.proposal.side }}</span></div>
-        <div class="kv"><span class="k">Order type</span><span class="v">{{ state.last_decision.proposal.entry_type }}</span></div>
-        <div class="kv"><span class="k">Reference price</span><span class="v">{{ state.last_decision.proposal.reference_price }}</span></div>
-        <div class="kv"><span class="k">Stop loss</span><span class="v">{{ state.last_decision.proposal.stop_loss_price or "—" }}</span></div>
-        <div class="kv"><span class="k">Take profit</span><span class="v">{{ state.last_decision.proposal.take_profit_price or "—" }}</span></div>
-        <div class="kv"><span class="k">Requested risk</span><span class="v">{{ state.last_decision.proposal.requested_risk_fraction or "—" }}</span></div>
-      </div>
-      <div class="kv" style="margin-top:6px;"><span class="k">Reason codes</span><span class="v">{{ state.last_decision.proposal.reason_codes | join(", ") if state.last_decision.proposal.reason_codes else "—" }}</span></div>
-      {% elif state.last_decision.platform_outcome == "NO_TRADE" %}
-      <p class="muted" style="margin-top:10px;">NO_TRADE is a normal strategy result, not an error.</p>
-      {% elif state.last_decision.platform_outcome_detail %}
-      <p class="muted" style="margin-top:10px;">{{ state.last_decision.platform_outcome_detail }}</p>
-      {% endif %}
-      {% else %}
-      <div class="agent-empty"><b>NO EVIDENCE</b> — PAPER_LITE has not produced a decision yet.</div>
-      {% endif %}
     </div>
   </div>
 
@@ -1167,8 +1251,15 @@
     }
     var ageMs = Date.parse(state.generated_at_utc) - Date.parse(account.observed_at_utc);
     var ageText = formatAge(Math.max(0, ageMs / 1000)) + " ago";
+    // Same 5-minute trust window reconcile() itself already uses for
+    // broker-state snapshot staleness (mirrors app.py's Jinja SSR path).
+    var brokerStale = ageMs > 5 * 60 * 1000;
     var html = "";
-    html += kv("Observed", esc(account.observed_at_utc) + " (" + esc(ageText) + ")");
+    html += kv(
+      "Observed",
+      esc(account.observed_at_utc) + " (" + esc(ageText) + (brokerStale ? " — STALE" : "") + ")",
+      brokerStale ? "warn" : ""
+    );
     html += kv("Server", esc(account.server));
     html += kv("Account", esc(account.account_ref));
     html += kv("Currency / Leverage", esc(account.currency) + " · 1:" + esc(account.leverage));
@@ -1345,6 +1436,21 @@
   function renderPaperPortfolio(state) {
     renderPaperPortfolioAccount(state);
     renderPaperPortfolioPositions(state);
+
+    // Same 15-minute (3x M5) staleness reasoning as build_agent_health() --
+    // a real, durable latest_observation_time_utc that is old means this is
+    // a historical replay, not a currently-running simulated broker.
+    var ribbon = document.getElementById("paper-portfolio-inactive-ribbon");
+    if (ribbon) {
+      var panel = (state && state.paper_portfolio) || {};
+      var obsTime = panel.status === "OK" && panel.portfolio ? panel.portfolio.latest_observation_time_utc : null;
+      var inactive = false;
+      if (obsTime) {
+        var obsAgeMs = Date.parse(state.generated_at_utc) - Date.parse(obsTime);
+        inactive = obsAgeMs > 15 * 60 * 1000;
+      }
+      ribbon.style.display = inactive ? "inline-flex" : "none";
+    }
   }
 
   // Mirrors app.py::pipeline_stage_class() exactly -- a different
@@ -1496,6 +1602,76 @@
     }
   }
 
+  // ---- BID/ASK odometer digits -----------------------------------------
+  //
+  // Display formatting only -- never touches state.latest_tick.bid/ask
+  // themselves, which stay full-precision strings everywhere else (spread,
+  // /api/state, persisted data). formatPrice5dp() fixes the *display*
+  // width at exactly 5 decimals regardless of how many decimals the raw
+  // value carries, so the quote never changes width tick to tick and never
+  // shows more than 5 decimals even if a future feed/format sent more.
+  var REDUCED_MOTION = !!(
+    typeof window !== "undefined" && window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+  var priceElementState = {};
+
+  function formatPrice5dp(raw) {
+    var n = parseFloat(raw);
+    if (isNaN(n)) return null;
+    return n.toFixed(5);
+  }
+
+  // Exposed for tests: builds the fixed-width digit-span structure for one
+  // formatted price string, marking which character positions changed
+  // from `previous` (same length is guaranteed since both are toFixed(5))
+  // with a roll-up/roll-down class, or no class at all when unchanged/
+  // initial/reduced-motion. Pure function, no DOM -- renderPrice() below is
+  // the only thing that actually touches an element.
+  function priceCharSpecs(formatted, previous, reducedMotion) {
+    var isInitial = previous === undefined || previous === null;
+    var changed = !isInitial && previous !== formatted;
+    var direction = null;
+    if (changed) {
+      direction = parseFloat(formatted) > parseFloat(previous) ? "up" : "down";
+    }
+    var specs = [];
+    for (var i = 0; i < formatted.length; i++) {
+      var ch = formatted[i];
+      if (ch === ".") {
+        specs.push({ ch: ch, cls: "price-char" });
+        continue;
+      }
+      var digitChanged = changed && previous.length === formatted.length && previous[i] !== ch;
+      var rollCls = digitChanged && direction && !reducedMotion ? " roll-" + direction : "";
+      specs.push({ ch: ch, cls: "price-char digit" + rollCls });
+    }
+    return specs;
+  }
+
+  function priceDigitsHtml(specs) {
+    var html = "";
+    for (var i = 0; i < specs.length; i++) {
+      html += '<span class="' + specs[i].cls + '">' + esc(specs[i].ch) + "</span>";
+    }
+    return html;
+  }
+
+  function renderPrice(elementId, rawValue) {
+    var el = document.getElementById(elementId);
+    if (!el) return;
+    var formatted = formatPrice5dp(rawValue);
+    if (formatted === null) {
+      el.textContent = rawValue == null ? "—" : String(rawValue);
+      return;
+    }
+    var previous = priceElementState[elementId];
+    if (previous === formatted) return; // unchanged tick -- no DOM work, no animation
+    var specs = priceCharSpecs(formatted, previous, REDUCED_MOTION);
+    el.innerHTML = priceDigitsHtml(specs);
+    priceElementState[elementId] = formatted;
+  }
+
   function applyState(state) {
     renderBrokerPanels(state);
     renderPaperPortfolio(state);
@@ -1523,8 +1699,8 @@
     setText("safety-sub", (state.halt && state.halt.detail) || "—");
 
     if (state.latest_tick) {
-      setText("hero-bid", state.latest_tick.bid);
-      setText("hero-ask", state.latest_tick.ask);
+      renderPrice("hero-bid", state.latest_tick.bid);
+      renderPrice("hero-ask", state.latest_tick.ask);
       setText("hero-spread", state.latest_tick.spread);
       setText("hero-eventtime", state.latest_tick.event_time_utc);
       setText("hero-quality", state.latest_tick.data_quality);
@@ -1554,6 +1730,10 @@
     }
     var chartOverlay = document.getElementById("chart-historical-overlay");
     if (chartOverlay) chartOverlay.style.display = isLive ? "none" : "flex";
+    setText(
+      "chart-source-label",
+      isLive ? "MT5 DEMO live feed → PostgreSQL" : "PostgreSQL (persisted/historical — no active live data session)"
+    );
 
     setText("di-tickcount", state.tick_count);
     setText("di-barcount", state.bar_count);
@@ -1600,6 +1780,10 @@
     consecutive_poll_failures: 0
   };
 
+  // Compact top-bar pill (work order: "make the heartbeat subtle"). While
+  // healthy: just "* LIVE" with a gentle pulse on the dot -- no age text,
+  // no card. Only once polling is STALE/OFFLINE does a concise age/detail
+  // appear at all, and only then (never while healthy, per spec).
   function renderHeartbeat() {
     var now = Date.now();
     var sinceSuccessMs = heartbeat.last_successful_api_poll_at === null
@@ -1607,29 +1791,34 @@
       : now - heartbeat.last_successful_api_poll_at;
 
     var label, cls;
-    if (sinceSuccessMs === null) {
-      label = "DOWN"; cls = "bad";
-    } else if (sinceSuccessMs > DOWN_AFTER_MS) {
-      label = "DOWN"; cls = "bad";
+    if (sinceSuccessMs === null || sinceSuccessMs > DOWN_AFTER_MS) {
+      label = "OFFLINE"; cls = "bad";
     } else if (sinceSuccessMs > STALE_AFTER_MS) {
       label = "STALE"; cls = "warn";
     } else {
       label = "LIVE"; cls = "good";
     }
 
-    setClass("heartbeat-state", "state", cls);
+    setClass("heartbeat-pill", "heartbeat-pill", cls);
     setClass("heartbeat-dot", "dot", cls);
-    setText("heartbeat-text", label);
-    setText(
-      "heartbeat-sub",
-      sinceSuccessMs === null
+
+    var pill = document.getElementById("heartbeat-pill");
+    if (cls === "good") {
+      setText("heartbeat-text", label);
+      if (pill) pill.title = "Browser to /api/state polling status";
+    } else {
+      var ageText = sinceSuccessMs === null
         ? "no successful refresh yet"
-        : "last successful refresh " + formatAge(sinceSuccessMs / 1000) + " ago"
-        + (heartbeat.consecutive_poll_failures > 0
-            ? " (" + heartbeat.consecutive_poll_failures + " failed poll"
-              + (heartbeat.consecutive_poll_failures === 1 ? "" : "s") + " since)"
-            : "")
-    );
+        : formatAge(sinceSuccessMs / 1000) + " ago";
+      setText("heartbeat-text", label + " · " + ageText);
+      if (pill) {
+        pill.title = "Last successful /api/state refresh: " + ageText
+          + (heartbeat.consecutive_poll_failures > 0
+              ? " (" + heartbeat.consecutive_poll_failures + " failed poll"
+                + (heartbeat.consecutive_poll_failures === 1 ? "" : "s") + " since)"
+              : "");
+      }
+    }
   }
 
   function poll() {
@@ -1675,6 +1864,9 @@
       renderTrainerPanel: renderTrainerPanel,
       renderExecutionActivity: renderExecutionActivity,
       applyState: applyState,
+      formatPrice5dp: formatPrice5dp,
+      priceCharSpecs: priceCharSpecs,
+      renderPrice: renderPrice,
     };
   }
 })();

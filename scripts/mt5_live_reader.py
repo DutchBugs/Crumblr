@@ -64,12 +64,36 @@ def _write_health_snapshot(
     Review 1.16 F-050: broker-state health is nested under its own key
     rather than merged into `ReaderHealth`'s payload — two concepts, not one
     overloaded status.
+
+    On Windows, `Path.replace()` can raise `PermissionError` (`WinError 5`)
+    if something else (a dashboard reading the file at the wrong instant,
+    an AV/indexer/cloud-sync scan) briefly holds the destination open —
+    observed in a real continuous run 2026-09-16. That is a transient
+    telemetry-write race, not a market-data or account problem, and must
+    never crash the whole reader: a crashed reader stops real tick/bar
+    collection entirely, which is strictly worse than skipping one health
+    write. Retried a few times, then the write for this poll is skipped
+    (logged, not silent) — the next successful poll (default 5s later)
+    writes a fresh snapshot, so genuine staleness still surfaces via
+    `heartbeat_max_age_seconds` rather than being masked.
     """
     payload = {**health.to_payload(), "broker_state": broker_state_health.to_payload()}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    for attempt in range(3):
+        try:
+            tmp.replace(path)
+            return
+        except OSError as error:
+            if attempt == 2:
+                print(
+                    f"  warning: health snapshot write to {path} failed after 3 attempts "
+                    f"({error}) — skipping this poll's write, reader continues",
+                    file=sys.stderr,
+                )
+                return
+            time.sleep(0.2)
 
 
 def _print_status(

@@ -10,7 +10,8 @@ checks this holds, not only that it was intended.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -103,6 +104,41 @@ def format_age(delta: timedelta) -> str:
         return f"{minutes}m {seconds}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes}m"
+
+
+def format_price5(value: str | None) -> str:
+    """Display-only, stable 5-decimal EUR/USD formatting for the initial
+
+    server render. Never rounds/alters what is persisted or served via
+    `/api/state` (`state.latest_tick.bid`/`ask` stay full-precision strings
+    there) -- this only fixes the width of the very first paint so it
+    already matches what the browser's own `renderPrice()` produces on
+    every poll after, and so a quote never arrives wider than 5 decimals.
+    """
+    if value is None:
+        return "—"
+    try:
+        return f"{Decimal(value):.5f}"
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return str(value)
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    """Parses an ISO-8601 string field (e.g. `PaperPortfolioView
+
+    .latest_observation_time_utc`, which is `str | None`, not a real
+    `datetime`, in the underlying persistence model) into a `datetime` the
+    template can subtract from `state.generated_at_utc` for a staleness
+    check. `None`/malformed input returns `None` rather than raising, so a
+    template `{% if %}` guard can treat "cannot tell" the same as "no
+    evidence" instead of crashing the whole page.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def state_class(value: str | None) -> str:
@@ -342,6 +378,13 @@ def create_app(
     templates.env.filters["state_class"] = state_class
     templates.env.filters["pipeline_stage_class"] = pipeline_stage_class
     templates.env.filters["age"] = format_age
+    templates.env.filters["price5"] = format_price5
+    templates.env.filters["parse_iso"] = parse_iso
+    # So the template can express "is this evidence stale" declaratively
+    # (e.g. `(state.generated_at_utc - x) > timedelta(minutes=15)`) instead
+    # of a bespoke Python-side boolean per panel — same lightweight-filter
+    # convention as `age`/`state_class` above, not a new evidence source.
+    templates.env.globals["timedelta"] = timedelta
 
     def _current_state() -> DashboardState:
         return build_state(

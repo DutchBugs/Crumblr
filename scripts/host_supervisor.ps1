@@ -103,7 +103,45 @@ rebaselined runtime, not the pre-incident one:
   sole runtime-authoritative source; the local setting exists only for
   the admin UI to show something back to the owner, never to select what
   actually runs.
+
+.PARAMETER ReaderDashboardOnly
+Runs only Postgres -> MT5 -> reader -> dashboard (stages 1, 2, 4, 6),
+skipping the Static Agent and PAPER_LITE stages entirely. Added
+2026-09-17 for continuous dashboard/observability persistence
+(CONTINUOUS LIVE DEMO OBSERVABILITY work order) at a moment when the
+real decision runtime in use (a per-bar preflight watcher script, not
+this file's own PAPER_LITE stage) is *not* this script's stage 5 --
+running stage 5 unmodified at logon would silently start a second,
+different decision-adjacent process against a stale post-incident
+config that is not what is actually authorized/running. Default
+(no switch) behavior is completely unchanged, so the original,
+already-reviewed "Crumblr Host Supervisor" task definition in
+install_host_supervisor_task.ps1 continues to mean exactly what it did
+before this parameter existed.
+
+.NOTES
+$ErrorActionPreference stays "Stop" (fail-closed everywhere by default,
+unchanged). PowerShell 5.1 wraps every stderr line from a native process
+(uv/python) as a NativeCommandError, which under "Stop" would otherwise
+abort this whole script even when the process exits 0 and merely logged
+an INFO line to stderr (this codebase's structlog setup does that
+routinely, e.g. mt5_probe.py's own "config.loaded"/"mt5.connected"
+lines) -- found by actually running this script for the first time,
+2026-09-17. Rather than weakening $ErrorActionPreference globally (which
+would also swallow a genuine PowerShell-level bug anywhere else in this
+file), the three specific native calls known to log to stderr are each
+wrapped in their own child scriptblock (`& { $ErrorActionPreference =
+"Continue"; <call> }`) -- a PowerShell child scope, so the relaxation
+never leaks back into the caller's scope or any other call in this file.
+Every real pass/fail decision these three calls feed into already reads
+$LASTEXITCODE explicitly (that automatic variable is not scope-limited
+the way an ordinary variable is), so this changes nothing about this
+script's own control flow.
 #>
+
+param(
+    [switch]$ReaderDashboardOnly
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -328,8 +366,12 @@ function Start-PostgresStage {
         # Uses the project's own engine helper (crumblr.persistence.engine),
         # not a raw psycopg.connect() -- CRUMBLR_DATABASE_URL carries the
         # SQLAlchemy dialect form ("postgresql+psycopg://..."), which a bare
-        # psycopg driver cannot parse on its own.
-        uv run python -c "from crumblr.persistence.engine import create_db_engine; import sqlalchemy; e = create_db_engine(); c = e.connect(); c.execute(sqlalchemy.text('select 1')); c.close()" > $null 2>&1
+        # psycopg driver cannot parse on its own. Local scriptblock relaxes
+        # $ErrorActionPreference only for this one call -- see .NOTES above.
+        & {
+            $ErrorActionPreference = "Continue"
+            uv run python -c "from crumblr.persistence.engine import create_db_engine; import sqlalchemy; e = create_db_engine(); c = e.connect(); c.execute(sqlalchemy.text('select 1')); c.close()" > $null 2>&1
+        }
         if ($LASTEXITCODE -eq 0) { $reachable = $true; break }
         Start-Sleep -Seconds 3
     }
@@ -366,7 +408,13 @@ function Start-Mt5Stage {
         }
 
         Push-Location $RepoRoot
-        uv run python scripts/mt5_probe.py --canonical-symbol $CanonicalSymbol --sanitized-json var\mt5_probe_check.json > var\mt5_probe_attempt.log 2>&1
+        # mt5_probe.py logs real INFO lines (config.loaded/mt5.connected) to
+        # stderr on a normal, successful run -- local scriptblock relaxes
+        # $ErrorActionPreference only for this one call -- see .NOTES above.
+        & {
+            $ErrorActionPreference = "Continue"
+            uv run python scripts/mt5_probe.py --canonical-symbol $CanonicalSymbol --sanitized-json var\mt5_probe_check.json > var\mt5_probe_attempt.log 2>&1
+        }
         $probeExit = $LASTEXITCODE
         Pop-Location
 
@@ -460,9 +508,13 @@ function Start-ReaderStage {
 
     # The expected spec version this deployment is pinned to -- read from
     # config, not hard-coded here, so a real config change is never
-    # silently out of sync with this check.
+    # silently out of sync with this check. Local scriptblock relaxes
+    # $ErrorActionPreference only for this one call -- see .NOTES above.
     Push-Location $RepoRoot
-    $expectedSpec = uv run python -c "from pathlib import Path; from crumblr.config import load_config; from crumblr.domain.enums import Environment; c = load_config(Environment.PAPER, config_dir=Path('config')); m = c.market_for('$CanonicalSymbol'); print(m.expected_spec_version if m else '')" 2>$null
+    $expectedSpec = & {
+        $ErrorActionPreference = "Continue"
+        uv run python -c "from pathlib import Path; from crumblr.config import load_config; from crumblr.domain.enums import Environment; c = load_config(Environment.PAPER, config_dir=Path('config')); m = c.market_for('$CanonicalSymbol'); print(m.expected_spec_version if m else '')" 2>$null
+    }
     Pop-Location
     $expectedSpec = ($expectedSpec | Select-Object -Last 1).Trim()
 
@@ -607,14 +659,18 @@ function Start-DashboardStage {
 }
 
 # ---- Main -----------------------------------------------------------------
-Write-SupervisorLog "supervisor" "run starting"
+Write-SupervisorLog "supervisor" ("run starting" + $(if ($ReaderDashboardOnly) { " (-ReaderDashboardOnly: postgres -> mt5 -> reader -> dashboard only)" } else { "" }))
 
 if (-not (Start-PostgresStage)) { Write-SupervisorLog "supervisor" "STOPPED after postgres"; exit 1 }
 if (-not (Start-Mt5Stage)) { Write-SupervisorLog "supervisor" "STOPPED after mt5"; exit 1 }
-if (-not (Start-StaticAgentStage)) { Write-SupervisorLog "supervisor" "STOPPED after static-agent"; exit 1 }
+if (-not $ReaderDashboardOnly) {
+    if (-not (Start-StaticAgentStage)) { Write-SupervisorLog "supervisor" "STOPPED after static-agent"; exit 1 }
+}
 if (-not (Start-ReaderStage)) { Write-SupervisorLog "supervisor" "STOPPED after reader"; exit 1 }
-if (-not (Start-PaperLiteStage)) { Write-SupervisorLog "supervisor" "STOPPED after paper-lite"; exit 1 }
+if (-not $ReaderDashboardOnly) {
+    if (-not (Start-PaperLiteStage)) { Write-SupervisorLog "supervisor" "STOPPED after paper-lite"; exit 1 }
+}
 Start-DashboardStage | Out-Null
 
-Write-SupervisorLog "supervisor" "run complete, full chain healthy"
+Write-SupervisorLog "supervisor" "run complete, chain healthy"
 exit 0
