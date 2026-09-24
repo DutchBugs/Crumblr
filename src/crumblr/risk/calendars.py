@@ -162,15 +162,33 @@ def calendar_for(
     it decides whether the returned `AlwaysOpenCalendar` resolves entries
     `OPEN` or fails closed. Defaults `False` — a caller that does not pass
     it keeps the pre-ADR-023 fail-closed behaviour exactly.
+
+    Fail-closed by construction (owner correction, calendar-dispatch
+    hardening): every asset class handled here is named explicitly and
+    there is no catch-all default. A future `AssetClass` member with no
+    calendar wired up — an equity-index class, say — must raise rather
+    than silently fall through to `AlwaysOpenCalendar`. Before this
+    correction, an unhandled asset class was treated as a 24/7 market by
+    the same default that legitimately applies to `CRYPTO`; a new asset
+    class is never entitled to that default just because its own calendar
+    has not been written yet.
     """
-    if asset_class in (AssetClass.FX, AssetClass.METAL):
+    if asset_class is AssetClass.FX or asset_class is AssetClass.METAL:
         # METAL maps to the same FX-weekday calendar as FX: this broker
         # trades metals on FX-like hours. Revisit with real evidence if
         # that is ever wrong for a specific metal — a starting assumption
         # stated explicitly, not a claim verified against a real metals
         # session.
         return FxWeekdayCalendar()
-    return AlwaysOpenCalendar(session_policy_approved=session_policy_approved)
+    if asset_class is AssetClass.CRYPTO:
+        return AlwaysOpenCalendar(session_policy_approved=session_policy_approved)
+    raise ValueError(
+        f"no trading calendar is wired up for asset class {asset_class!r} — "
+        "calendar_for() has no catch-all default. Add an explicit branch "
+        "here, with a real calendar and a real session-policy decision, "
+        "before this asset class can be used anywhere; it must never fall "
+        "back to AlwaysOpenCalendar by default."
+    )
 
 
 __all__ = [

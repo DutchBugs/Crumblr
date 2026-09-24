@@ -10,6 +10,9 @@ weekly-close boundary nobody has approved.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
+
+import pytest
 
 from crumblr.domain.enums import AssetClass
 from crumblr.risk.calendars import AlwaysOpenCalendar, FxWeekdayCalendar, calendar_for
@@ -117,3 +120,42 @@ class TestCalendarFor:
         assert isinstance(
             calendar_for(AssetClass.METAL, session_policy_approved=False), FxWeekdayCalendar
         )
+
+
+class TestCalendarForHasNoPermissiveCatchAll:
+    """Calendar-dispatch fail-closed hardening.
+
+    Before this correction, `calendar_for()` was `if FX/METAL: ... else:
+    AlwaysOpenCalendar(...)` — any asset class it did not recognise fell
+    through to the same default that legitimately applies to `CRYPTO`. A
+    future `AssetClass` member (an equity-index class, say) added without
+    also finishing its calendar would then be silently treated as a 24/7
+    market. `calendar_for()` must instead raise for anything it does not
+    explicitly name, with no default to fall back to.
+    """
+
+    def test_an_asset_class_value_with_no_branch_raises(self) -> None:
+        """A `StrEnum` member equals its string value at runtime, so a
+
+        future `AssetClass.INDEX = "INDEX"` added without updating this
+        function would hit the exact same unhandled path a bare string
+        does here — this proves the fail-closed behaviour generalises to
+        that real future case, not only to a synthetic test double.
+        """
+        unhandled = cast(AssetClass, "INDEX")
+        with pytest.raises(ValueError, match="INDEX"):
+            calendar_for(unhandled)
+
+    def test_the_raised_error_names_no_default_fallback(self) -> None:
+        unhandled = cast(AssetClass, "COMMODITY")
+        with pytest.raises(ValueError, match="no catch-all default"):
+            calendar_for(unhandled)
+
+    def test_every_known_asset_class_still_resolves_without_raising(self) -> None:
+        """The hardening must not narrow behaviour for any asset class
+
+        that already has a real calendar — only close the gap for ones
+        that do not.
+        """
+        for asset_class in AssetClass:
+            calendar_for(asset_class)

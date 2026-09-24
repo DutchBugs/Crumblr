@@ -12539,6 +12539,63 @@ the log alone. Active development moves to the next chapter.
 
 ---
 
+## Update 2026-09-24 (ninety-ninth entry) — Market calendar dispatch fail-closed hardening
+
+```text
+Component: risk/calendars.py
+Milestone: self-directed hardening pass, following the read-only US30 market-readiness inventory (2026-09-24) that first surfaced the gap
+Status before: calendar_for() was `if asset_class in (FX, METAL): FxWeekdayCalendar() ; else: AlwaysOpenCalendar(...)` — any asset class not explicitly FX/METAL silently received the same default that legitimately applies to CRYPTO
+Status after: calendar_for() names FX, METAL and CRYPTO explicitly and raises ValueError for anything else — no catch-all default remains
+```
+
+**Why now:** the US30 read-only inventory (this session, same day) found that a
+future `AssetClass.INDEX` member, added without also finishing its
+calendar, would silently fall through to `AlwaysOpenCalendar` —
+`is_market_open()` always `True`, `trading_day()` bucketed by naive UTC
+midnight — both wrong for an exchange-hours instrument. It stayed
+non-trading today only as a side effect of `session_policy_approved`
+defaulting `False` on a different field, not because the dispatch itself
+was safe. This pass closes only that gap. No `AssetClass.INDEX`, no US30
+`MarketConfig`, no config change, no session-policy change — scope was
+kept to exactly the one function.
+
+**Completed:** `calendar_for()` rewritten as three explicit branches
+(FX/METAL → `FxWeekdayCalendar`, CRYPTO → `AlwaysOpenCalendar`, anything
+else → `raise ValueError` naming the unhandled asset class and stating
+there is no default to fall back to) — zero behaviour change for any
+asset class that already has a real calendar. Three new regression tests
+in `tests/unit/test_risk_calendars.py::TestCalendarForHasNoPermissiveCatchAll`:
+an unhandled value raises (proven via a `cast(AssetClass, "INDEX")` sentinel,
+since `AssetClass` is a `StrEnum` — a real future `AssetClass.INDEX = "INDEX"`
+member added without updating this function would hit the exact same
+unhandled branch, so this generalises to the real future case, not just a
+test double); the raised message names "no catch-all default"; every
+currently-known asset class still resolves without raising.
+
+**Evidence:** `uv run ruff check .` / `ruff format --check .` / `uv run
+mypy` all clean (273 source files, no new modules). Full suite: **1727
+passed, 400 skipped** (skips are the standing "no PostgreSQL reachable"
+integration tests plus one MT5-import skip on this host — same shape as
+every prior isolated run in this repo, no new skips introduced).
+`tests/unit/test_risk_calendars.py` specifically: 17/17 passed (14
+pre-existing + 3 new).
+
+**Risk impact:** strictly narrowing — closes a silent-misclassification
+gap, widens no execution authority, changes no config, touches no
+`order_send`/submission-gate flag. EUR/USD and BTC/USD behaviour is
+byte-for-byte unchanged (both covered by the pre-existing fixture tests,
+which still pass unmodified).
+
+**Decision:** new branch `dev1/calendar-dispatch-fail-closed` off
+`origin/main@1f19add2a76474a7a68f0208ab7c46a15ea828bd`, pushed to
+`origin`, not merged — stopping for owner review per standing instruction.
+
+**Next:** owner review; `AssetClass.INDEX` / US30 `MarketConfig` / broker-
+symbol pin remain separate, not-yet-started work (see the same day's US30
+read-only inventory report for the full open-items list).
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
