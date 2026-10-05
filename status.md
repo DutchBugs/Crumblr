@@ -12596,6 +12596,71 @@ read-only inventory report for the full open-items list).
 
 ---
 
+## Update 2026-10-05 (hundredth entry) — Operational Acceptance Pass on `main@77e7888`: dashboard hangs (no 503) when Postgres refuses connections — fixed on a corrective branch
+
+```text
+Component: persistence/engine.py, scripts/run_dashboard.py (Dev 2); live acceptance run of reader + dashboard + Static Agent against Pepperstone DEMO
+Milestone: owner-ordered Operational Acceptance Pass (no new architecture)
+Status before: F-043's "DATABASE UNAVAILABLE" handler existed, but a real Postgres outage made the dashboard hang instead of reaching it
+Status after: dashboard answers 503 "database unavailable" in ~10 s and recovers on its own; corrective branch dev2/dashboard-db-outage-connect-timeout, NOT merged
+```
+
+**Base:** `main@77e78883e350060218c04547800c257c5defedc0`. Test database
+`crumblr_test_dev3` was stale (`8801080869a6`) and was migrated to head
+`fb1abaa2d137`; `crumblr_soak` was already at head. Baseline gates:
+ruff/format/mypy clean on tracked code (the 91 ruff findings and one format
+diff are all in untracked `.claude/` scratch scripts), full suite **2125
+passed, 3 skipped, 0 failed**.
+
+**Live run (2026-10-05 ~11:22-11:50 UTC, Monday, market open):** MT5 terminal,
+reader, dashboard started through `host_supervisor.ps1 -ReaderDashboardOnly`;
+the current Static Agent `main` (`e5e0a2f`, artifact hash `81894d6a…498c5`,
+`mt5_capability=false`) started separately because the supervisor pins the old
+`dcc3770`. Observed: CONNECTED/HEALTHY, bid/ask changing on every 4 s sample,
+tick age 0-4 s, heartbeat <5 s, broker snapshot refreshed ~every 60 s, a new M5
+bar (open 11:25) visible 34 s after its close, in-page refresh without reload.
+Reader killed -> dashboard held CONNECTED until the 180 s heartbeat window,
+then DISCONNECTED/STALE with an explicit "no active live data session" banner
+(at +180 s); reader restarted -> CONNECTED/HEALTHY within 5 s. Static Agent
+stopped -> Agent card stayed amber WAITING, never green.
+
+**Defect found and fixed:** with Postgres unreachable the dashboard did not
+answer for minutes (first request 260 s, next one never) because psycopg's
+connect loop does not return on a refused port on Windows without a
+`connect_timeout`, so `SQLAlchemyError` — and therefore the existing 503
+handler — was never reached. `create_db_engine()` gained an opt-in
+`connect_timeout_seconds` (default unchanged for every other caller);
+`run_dashboard.py` passes 5. After the fix: 503 with the generic message in
+~10 s, no DSN/secret in body or log, recovery to 200 the moment Postgres
+returns. New test
+`tests/integration/test_dashboard.py::...refused_port_without_a_dsn_timeout_still_answers_503_promptly`.
+Gates on the branch: ruff/format/mypy clean, full suite **2126 passed, 3 skipped**.
+
+**NOT done / not observed (stated plainly):** PAPER_LITE and the preflight
+decision loop were not started in this pass — the start (it needs
+`--confirm-paper-incident-clear`) was denied by the permission layer and left
+to the owner. So no fresh Static Trader context/decision, no NO_TRADE from
+this run, no Gateway->Risk->Policy->Supervisor->Paper chain, no live-activity
+feed update and no pipeline/assignment binding were observed live. The
+dashboard's agent/pipeline panels showed the 2026-09-24 evidence throughout.
+Incomplete-broker-snapshot handling was not triggered live (would need a write
+to `crumblr_soak`); it is covered by the existing dashboard tests only.
+
+**Own mistake:** while cleaning up scratch processes I killed one unidentified
+python PID, which was the freshly restarted reader; it was relaunched within
+~1 min. No data was lost (reader is the only writer and re-reads).
+
+**Risk impact:** none on execution authority; dashboard stays read-only; no
+config change; no `order_send`; no secrets in any evidence file.
+
+**Decision:** branch `dev2/dashboard-db-outage-connect-timeout` off
+`main@77e7888`, pushed, not merged — review first.
+
+**Next:** owner review; owner decision on starting the decision loop for the
+remaining live checks; see the gap list in the acceptance report.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:

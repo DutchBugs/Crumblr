@@ -527,6 +527,48 @@ class TestF043PresentationStates:
         assert json_response.json()["detail"] == "database unavailable — see server logs"
         unreachable.dispose()
 
+    def test_a_refused_port_without_a_dsn_timeout_still_answers_503_promptly(
+        self, tmp_path: Path
+    ) -> None:
+        """Operational acceptance 2026-10-05: with the Postgres port refused
+
+        and no `connect_timeout` in the DSN, psycopg's connect loop hung on
+        Windows and the dashboard never answered (so F-043's handler never
+        ran). `connect_timeout_seconds` must bound it."""
+        import socket
+        import time
+
+        from crumblr.persistence.engine import create_db_engine
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            refused_port = probe.getsockname()[1]
+        unreachable = create_db_engine(
+            f"postgresql+psycopg://baduser:badpass@127.0.0.1:{refused_port}/nonexistent",
+            connect_timeout_seconds=2,
+        )
+        app = create_app(
+            engine=unreachable,
+            guard=GUARD,
+            risk_config=RISK_CONFIG,
+            execution_config=EXECUTION_CONFIG,
+            live_trading_acknowledged=False,
+            environment=Environment.PAPER,
+            canonical_symbol=SYMBOL,
+            timeframe="M5",
+            reader_health_path=tmp_path / "health.json",
+        )
+
+        started = time.monotonic()
+        response = TestClient(app).get("/api/state")
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == 503
+        assert response.json()["error"] == "database_unavailable"
+        assert "badpass" not in response.text and str(refused_port) not in response.text
+        assert elapsed < 15
+        unreachable.dispose()
+
 
 class TestF045EnvironmentBadgeIsNotMisreadAsACampaign:
     """Review 1.14 F-045: the top-bar badge must not say `PAPER` while no
