@@ -12656,6 +12656,26 @@ config change; no `order_send`; no secrets in any evidence file.
 **Decision:** branch `dev2/dashboard-db-outage-connect-timeout` off
 `main@77e7888`, pushed, not merged — review first.
 
+**Addendum 2026-10-05 12:00-12:21 UTC — preflight-only loop (owner-authorized):**
+`scripts/agent_canary_execution.py --once` x3 (no permit, no
+`--apply-canary-config`, no incident-clear flag, `--enable-external-supervisor`),
+code commit `77e7888`, against the Static Agent `e5e0a2f` (artifact
+`81894d6a…498c5`). Three fresh decisions (11:59:41, 12:04:18, 12:05:35 UTC),
+each `NO_TRADE` / `OUTSIDE_SESSION`, Gateway accepted, capsule sealed with no
+trade intent / risk / supervisor decision / execution request (nothing to
+evaluate). Dashboard (same open page, never reloaded) moved NO_TRADE 5864 ->
+5866 within ~2-6 s of each run, Last Decision 24 Sep -> fresh, Agent card
+WAITING -> HEALTHY, then back to WAITING at decision age 906 s (rule: 3 x M5).
+**Not reached:** Risk, Policy, Supervisor (no proposal; next executable window
+NY AM 14:00-15:00 UTC, and only if a real setup forms) and Paper
+(PAPER_LITE not running). Acceptance stays **PARTIAL**. Findings kept:
+the supervisor still accepts a stale reader health file (no heartbeat check;
+reproduced against a 3-day-old fixture) and pins Static Agent `dcc3770`
+(running `e5e0a2f` is 17 commits newer, pivot2_engine.py byte-identical, so the
+full supervisor chain would BLOCK at the Agent stage); the NO_TRADE reason
+code is not shown anywhere on the dashboard; the activity feed lists
+oldest-first. Evidence: `var/acceptance_evidence_2026-10-05/` (gitignored).
+
 **Next:** owner review; owner decision on starting the decision loop for the
 remaining live checks; see the gap list in the acceptance report.
 
