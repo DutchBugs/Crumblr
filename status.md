@@ -12596,6 +12596,41 @@ read-only inventory report for the full open-items list).
 
 ---
 
+## Update 2026-10-05 (hundred-and-first entry) — host_supervisor.ps1: Static Agent pin `dcc3770` -> `e5e0a2f`
+
+```text
+Component: scripts/host_supervisor.ps1 ($StaticAgentRequiredHead), tests/unit/test_host_supervisor_pins.py (Dev 2)
+Milestone: Operational Acceptance Pass — unblock the real TRADE_PROPOSAL path
+Status before: pin `dcc3770df67b5251d145c6f7fa08786ea85f8328`; the running, approved Static Agent is 17 commits newer, so Start-StaticAgentStage would BLOCK before any proposal could reach Risk
+Status after: pin `e5e0a2f73033b79e86b8d00866fa92dda4559459`; nothing else changed
+```
+
+**Basis for the revision (stated plainly):** CI #148 could not be inspected from
+this host (`gh` is not authenticated) and Crumblr's `ci.yml` never references the
+Static Agent, so CI #148 itself does not name an Agent SHA. The pin follows the
+owner's instruction that `e5e0a2f` is the approved/running revision: it is the
+Static Agent `origin/main` tip, fast-forward merged on explicit owner order and
+fresh-clone verified (306 passed, production artifact `81894d6a…498c5` and
+ALL_DAY `a62ae50b…1dc67` exact). `pivot2_engine.py` is byte-identical between
+`dcc3770` and `e5e0a2f`, so the `$RequiredStrategyArtifactHash` pin is unchanged.
+
+**Evidence:** PowerShell parse of the script: OK, 0 errors. The script's own
+guard (`$actualStaticAgentHead -ne $StaticAgentRequiredHead`) extracted and
+evaluated against the real Agent repo HEAD: old pin -> blocked, new pin -> not
+blocked (stage itself not run). `tests/unit/test_host_supervisor_pins.py` 10/10;
+`tests/unit` 1663 passed, 1 skipped; ruff/format clean.
+
+**Risk impact:** none on execution authority; pin remains an exact full-SHA
+equality, not a range. Still open and recorded separately: the reader stage of
+this script accepts a stale health file (no heartbeat check).
+
+**Decision:** branch `dev2/supervisor-static-agent-pin-e5e0a2f` off
+`main@77e7888`, not merged. It and `dev2/dashboard-db-outage-connect-timeout`
+both append a status.md entry at the same spot; expect a trivial textual merge
+conflict there when the second one lands.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:

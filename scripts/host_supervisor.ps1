@@ -164,8 +164,8 @@ $DashboardPort = 8050
 
 # crumblr-static-agent-host's exact required commit. Verified against the
 # real repo during this patch (not merely typed): `git -C
-# crumblr-static-agent-host rev-parse HEAD` reads dcc3770df67b5251d145c6f7fa08786ea85f8328.
-$StaticAgentRequiredHead = "dcc3770df67b5251d145c6f7fa08786ea85f8328"
+# crumblr-static-agent-host rev-parse HEAD` reads e5e0a2f73033b79e86b8d00866fa92dda4559459.
+$StaticAgentRequiredHead = "e5e0a2f73033b79e86b8d00866fa92dda4559459"
 
 # The exact StrategyArtifact this deployment authorizes -- not merely "some
 # hash exists". Confirmed live against the real Static Agent's /health
