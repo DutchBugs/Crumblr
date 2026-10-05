@@ -12625,9 +12625,13 @@ equality, not a range. Still open and recorded separately: the reader stage of
 this script accepts a stale health file (no heartbeat check).
 
 **Decision:** branch `dev2/supervisor-static-agent-pin-e5e0a2f` off
-`main@77e7888`, not merged. It and `dev2/dashboard-db-outage-connect-timeout`
-both append a status.md entry at the same spot; expect a trivial textual merge
-conflict there when the second one lands.
+`main@77e7888` was fast-forward merged to `main` (`7629338`) on explicit owner
+instruction, on its own; `dev2/dashboard-db-outage-connect-timeout` stays
+separate and unmerged and appends a status.md entry at the same spot, so expect
+a trivial textual merge conflict there. Note: `host_supervisor.ps1` is the host
+launcher, not part of the Agent decision path — the acceptance driver calls
+`scripts/agent_canary_execution.py` directly, so the old pin never gated a
+decision; it only blocked the supervisor's own Static Agent start stage.
 
 ---
 
