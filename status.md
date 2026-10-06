@@ -12719,6 +12719,56 @@ decision; it only blocked the supervisor's own Static Agent start stage.
 
 ---
 
+## Update 2026-10-06 (hundred-and-second entry) — Demo Trading Operational Readiness pass
+
+```text
+Component: scripts/host_supervisor.ps1 (reader stage), tests (chain + boundary), docs/demo_execution_boundary.md (Dev 2)
+Milestone: Operational Acceptance Pass, part 2 — unattended-DEMO blockers + deterministic verification (acceptance stays PARTIAL)
+Status before: reader stage accepted a stale health file; lower chain never entered live; execution boundary undocumented
+Status after: reader stage requires a fresh connected heartbeat (branch, not merged); chain and boundary pinned by tests; boundary documented
+```
+
+**Merged to `main` this pass (owner-ordered):** `dev2/dashboard-db-outage-connect-timeout`
+(merge `68e8ce2`; the supervisor pin `7629338` was already in). Dashboard on port 8050
+restarted from that tree at 2026-10-06 07:16 UTC; the outage behaviour was re-verified on
+the merged tree (503 in ~10 s, no DSN/password in body or log, instant recovery).
+
+**Branch `dev2/demo-operational-readiness` (NOT merged):**
+- `Test-ReaderHealthEvidence` in `host_supervisor.ps1`: status HEALTHY + connected +
+  exact spec pin + heartbeat <= 60 s (never looser than the file's own max age) + not
+  future-dated; fails closed on anything missing/unparseable. 19 tests run the real
+  function through PowerShell against fixture snapshots; a mutation removing the age
+  check fails 4 of them. Live: accepts the real file, rejects a 3-day-old copy.
+  **Until this branch is merged, the supervisor on `main` still accepts stale evidence.**
+- `tests/unit/test_demo_chain_technical_verification.py` (26 tests): real Gateway, Core
+  Risk, Policy Gate and ReferenceSupervisor driven from fixture proposals. TECHNICAL
+  VERIFICATION ONLY, not live acceptance. Valid proposal through every stage; malformed
+  and inadmissible proposals rejected by the Gateway; real Risk blocks (tight stop ->
+  INVALID_STOP, wide spread, halted kill switch, untrusted open risk) and real Policy
+  refusals (reconciliation unknown/mismatched, incident active/unknown) stop before the
+  external Supervisor; Supervisor approve / veto / silence (UNKNOWN). Mutation (min-stop
+  check disabled) fails the Risk test.
+- `tests/unit/test_demo_execution_boundary.py` (11 tests) + `docs/demo_execution_boundary.md`.
+
+**Evidence:** full suite **2182 passed, 3 skipped, 0 failed** (baseline 2126); ruff / format
+/ mypy clean; replay determinism: two identical `run_replay.py --bars 600` runs, identical md5.
+Read-only live check of the account guard against the real terminal: real account passes
+the pinned DEMO guard, its account ref equals `approved_canary_account_ref`, and the same
+account is refused by deliberately wrong server/currency/leverage/login pins.
+
+**Findings (not fixed here):** a preflight-only run with no permit has no activation
+watermark, so every real proposal ends INELIGIBLE and its request claim is write-once; a
+permit issued after a decision does not make that decision eligible. A genuine proposal
+can therefore become the first canary only if the permit and `--canary-permit-id` run are
+armed before the window. The window driver is preflight-only. Still open: NO_TRADE reason
+not shown on the dashboard, oldest-first activity feed, no age on Last Decision/pipeline,
+LIVE pill is browser-polling only.
+
+**Risk impact:** none on execution authority; no flag, config or permit changed; no order
+path touched; PAPER_LITE not started.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:
