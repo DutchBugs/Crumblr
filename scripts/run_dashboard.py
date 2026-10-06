@@ -26,6 +26,9 @@ from crumblr.persistence.engine import DATABASE_URL_ENV_VAR, create_db_engine, d
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Bounded so an unreachable Postgres answers 503 "database unavailable" instead of hanging.
+DB_CONNECT_TIMEOUT_SECONDS = 5
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -97,7 +100,7 @@ def main() -> int:
         return 2
 
     config = load_config(Environment(args.environment), config_dir=REPO_ROOT / "config")
-    engine = create_db_engine(url)
+    engine = create_db_engine(url, connect_timeout_seconds=DB_CONNECT_TIMEOUT_SECONDS)
     market = config.market_for(args.canonical_symbol)
     app = create_app(
         engine=engine,

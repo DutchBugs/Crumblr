@@ -97,8 +97,16 @@ def database_url(default: str | None = None) -> str:
     return url
 
 
-def create_db_engine(url: str | None = None, *, echo: bool = False) -> Engine:
+def create_db_engine(
+    url: str | None = None, *, echo: bool = False, connect_timeout_seconds: int | None = None
+) -> Engine:
     """Build an engine.
+
+    `connect_timeout_seconds` is opt-in (default: libpq's own, i.e. none). A
+    request-serving process must pass it: on Windows, psycopg's connect loop
+    never returns for a refused port without one, so the process would hang
+    instead of raising the `SQLAlchemyError` its callers map to a clean
+    "database unavailable" answer.
 
     `pool_pre_ping` costs a round trip per checkout and buys back the case
     where a connection died while idle — which, for a process that may sit
@@ -110,6 +118,11 @@ def create_db_engine(url: str | None = None, *, echo: bool = False) -> Engine:
         echo=echo,
         pool_pre_ping=True,
         future=True,
+        connect_args=(
+            {"connect_timeout": connect_timeout_seconds}
+            if connect_timeout_seconds is not None
+            else {}
+        ),
     )
 
 
