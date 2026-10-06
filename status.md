@@ -12739,7 +12739,7 @@ the merged tree (503 in ~10 s, no DSN/password in body or log, instant recovery)
   future-dated; fails closed on anything missing/unparseable. 19 tests run the real
   function through PowerShell against fixture snapshots; a mutation removing the age
   check fails 4 of them. Live: accepts the real file, rejects a 3-day-old copy.
-  The supervisor on `main` now rejects stale evidence (verified against the real script, see below).
+  The supervisor on `main@d4ba90d` now rejects stale evidence: verified 2026-10-06 by driving the real `Start-ReaderStage` (only the health-file path and poll bound substituted) — it accepts the current healthy Reader and rejects stale (4-day), 90 s-old, future-dated (+10 min), `connected=false`, `DEGRADED` and wrong-spec evidence.
 - `tests/unit/test_demo_chain_technical_verification.py` (26 tests): real Gateway, Core
   Risk, Policy Gate and ReferenceSupervisor driven from fixture proposals. TECHNICAL
   VERIFICATION ONLY, not live acceptance. Valid proposal through every stage; malformed
