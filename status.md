@@ -12733,13 +12733,13 @@ Status after: reader stage requires a fresh connected heartbeat (branch, not mer
 restarted from that tree at 2026-10-06 07:16 UTC; the outage behaviour was re-verified on
 the merged tree (503 in ~10 s, no DSN/password in body or log, instant recovery).
 
-**Branch `dev2/demo-operational-readiness` (NOT merged):**
+**Branch `dev2/demo-operational-readiness` (fast-forward merged to `main` on explicit owner instruction, 2026-10-06; it holds only the supervisor reader-stage change plus tests and docs, no runtime code):**
 - `Test-ReaderHealthEvidence` in `host_supervisor.ps1`: status HEALTHY + connected +
   exact spec pin + heartbeat <= 60 s (never looser than the file's own max age) + not
   future-dated; fails closed on anything missing/unparseable. 19 tests run the real
   function through PowerShell against fixture snapshots; a mutation removing the age
   check fails 4 of them. Live: accepts the real file, rejects a 3-day-old copy.
-  **Until this branch is merged, the supervisor on `main` still accepts stale evidence.**
+  The supervisor on `main` now rejects stale evidence (verified against the real script, see below).
 - `tests/unit/test_demo_chain_technical_verification.py` (26 tests): real Gateway, Core
   Risk, Policy Gate and ReferenceSupervisor driven from fixture proposals. TECHNICAL
   VERIFICATION ONLY, not live acceptance. Valid proposal through every stage; malformed
