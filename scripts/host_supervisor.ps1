@@ -488,6 +488,48 @@ function Start-StaticAgentStage {
     return $false
 }
 
+# ---- Reader health evidence predicate -------------------------------------
+# The reader's health snapshot (var\live_reader_health.json) is a file that
+# outlives the reader process. A stage that only looked at `status` /
+# `spec_version` therefore accepted a days-old snapshot as "HEALTHY" before the
+# fresh reader had written anything (observed 2026-10-05: accepted in ~1 s with
+# a 3-day-old heartbeat). Healthy evidence must be BOTH well-formed and fresh:
+# status HEALTHY, connected true, exact spec pin, and a parseable heartbeat no
+# older than $MaxAgeSeconds (never more lenient than the file's own
+# heartbeat_max_age_seconds) and not future-dated beyond clock skew. Fails
+# closed on anything missing or unparseable.
+function Test-ReaderHealthEvidence {
+    param(
+        $Health,
+        [string]$ExpectedSpec,
+        [datetime]$NowUtc,
+        [double]$MaxAgeSeconds = 60
+    )
+    if ($null -eq $Health) { return $false }
+    if ($Health.status -ne "HEALTHY") { return $false }
+    if ($Health.connected -ne $true) { return $false }
+    if (-not $ExpectedSpec -or $Health.spec_version -ne $ExpectedSpec) { return $false }
+    $heartbeat = $Health.heartbeat_at_utc
+    if ($null -eq $heartbeat -or "$heartbeat" -eq "") { return $false }
+    if ($heartbeat -is [datetime]) {
+        $heartbeatUtc = $heartbeat.ToUniversalTime()
+    } else {
+        $parsed = [datetime]::MinValue
+        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        if (-not [datetime]::TryParse("$heartbeat", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) { return $false }
+        $heartbeatUtc = $parsed
+    }
+    $limit = $MaxAgeSeconds
+    $fileLimit = 0.0
+    if ([double]::TryParse("$($Health.heartbeat_max_age_seconds)", [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$fileLimit) -and $fileLimit -gt 0 -and $fileLimit -lt $limit) {
+        $limit = $fileLimit
+    }
+    $age = ($NowUtc.ToUniversalTime() - $heartbeatUtc).TotalSeconds
+    if ($age -gt $limit) { return $false }
+    if ($age -lt -5) { return $false }
+    return $true
+}
+
 # ---- Stage 4: MT5 reader HEALTHY + exact InstrumentSpec pin --------------
 function Start-ReaderStage {
     Write-SupervisorLog "reader" "checking"
@@ -521,14 +563,14 @@ function Start-ReaderStage {
     for ($i = 0; $i -lt 24; $i++) {
         if (Test-Path $healthPath) {
             $health = Get-Content $healthPath -Raw | ConvertFrom-Json
-            if ($health.status -eq "HEALTHY" -and $health.spec_version -eq $expectedSpec) {
-                Write-SupervisorLog "reader" "HEALTHY, spec_version matches pin"
+            if (Test-ReaderHealthEvidence -Health $health -ExpectedSpec $expectedSpec -NowUtc (Get-Date).ToUniversalTime()) {
+                Write-SupervisorLog "reader" "HEALTHY (fresh heartbeat), spec_version matches pin"
                 return $true
             }
         }
         Start-Sleep -Seconds 5
     }
-    Write-SupervisorLog "reader" "BLOCKED: never reached HEALTHY + exact spec pin within bound"
+    Write-SupervisorLog "reader" "BLOCKED: never reached HEALTHY (fresh heartbeat) + exact spec pin within bound"
     return $false
 }
 
