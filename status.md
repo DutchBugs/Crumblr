@@ -12769,6 +12769,46 @@ path touched; PAPER_LITE not started.
 
 ---
 
+## Update 2026-10-06 (hundred-and-third entry) — Canary window driver built (NOT armed, no permit issued)
+
+```text
+Component: src/crumblr/application/canary_window.py, scripts/canary_window_driver.py, docs/demo_execution_boundary.md §7 (Dev 2)
+Milestone: Demo Trading Operational Readiness — preparation for ONE controlled Pepperstone DEMO canary
+Status before: the window driver was preflight-only; a genuine proposal could not be traded (no watermark, write-once claim)
+Status after: a dedicated canary-mode driver exists and is fully tested; no permit exists, nothing is armed, no order path was run
+```
+
+**Merged first (owner-ordered):** the Reader-health fix is on `main` (commit `076ac98`, fast-forward;
+`main` was `bd6551b` at this point). Verified against the real `Start-ReaderStage`: accepts the current
+healthy Reader; rejects stale (4-day), 90 s-old, future-dated (+10 min), disconnected, DEGRADED and wrong-spec evidence.
+
+**Built (branch `dev2/canary-window-driver`, not merged):** decision logic is pure and unit-tested with a fake
+clock; the script supplies real I/O and runs the existing `agent_canary_execution.py --once` with both
+`--apply-canary-config` and `--canary-permit-id`. It refuses to start unless the permit exists, is unconsumed and
+unexpired, equals the operator's restated scope exactly (account fingerprint, server, agent, assignment, artifact,
+entry type, max risk fraction), is issued <= 60 min before and valid <= 10 min beyond the window, and the overlay
+file, live account snapshot and running Agent all agree; runs only inside the selected window, one newly closed bar
+at a time, with the Reader/Agent freshness gate and a permit re-check before every cycle; stops immediately after
+the first submission attempt (accepted or rejected) or any unsubmitted proposal; never retries; never issues, edits
+or consumes a permit; never touches flatten or unrelated flags.
+
+**Evidence:** driver tests 89 (start refusals incl. every scope dimension, overlay wider than approved, window and
+permit-validity limits, stays closed without a valid permit, one bar at a time, bars outside the window excluded,
+stop after attempt/blocked proposal/crash, freshness and permit re-check, no permit writes, child command validated
+against the canary script's own argument parser). 10 mutations of the real library (stop-after-attempt, permit
+re-check, window bound, consumed check, heartbeat check, risk-fraction equality, stale-bar skip, unsubmitted-proposal
+stop, permit validity margins) are each killed by a test. `--check-only` against a non-existent permit id refused
+with only `PERMIT_NOT_FOUND`, i.e. the overlay, live account fingerprint/server and running Agent artifact already
+agree with the intended scope. Orchestrator-level scope checks stay pinned by `test_canary_permit_scope_mismatches.py`.
+
+**Not done, on purpose:** no permit issued, no canary run, no `order_send`, PAPER_LITE not started, no flag changed.
+
+**Open decisions for the owner:** permit scope (entry type is LIMIT because the Static Agent proposes LIMIT; max
+risk fraction; window), explicit in-session authorization for permit issuance and the armed run. A proposal ends in
+a broker submission automatically, within seconds of the bar close, if every gate passes.
+
+---
+
 ## Update YYYY-MM-DD HH:MM UTC
 
 Component:

@@ -91,3 +91,57 @@ All four are explicit, separate acts; none is implied by another:
   (`--apply-canary-config --canary-permit-id`) **before** the window; in that state the run submits
   automatically if every gate passes. "Stop and report before broker execution" and "trade that same
   proposal" cannot both hold; the human gate is the permit itself (scope, risk fraction, short validity).
+
+## 7. The canary window driver (`scripts/canary_window_driver.py`, built, NOT armed)
+
+Decision logic: `src/crumblr/application/canary_window.py` (unit-tested with fakes). The script only supplies
+real I/O. It never issues, edits or consumes a permit (it only reads `permit_for` / `consumption_for`); the
+permit is consumed atomically by the orchestrator inside `agent_canary_execution.py`, the only code that can
+reach `order_send`.
+
+**It refuses to start (exit 2) unless all of these hold:** the permit exists, is unconsumed and unexpired;
+it equals what the operator restated on the command line (account fingerprint, server, agent, assignment,
+artifact hash, entry type, max risk fraction, all exact; a looser restatement is refused, not accepted);
+it was issued at most 60 min before the window start and not after it, and is valid through the window end
+but at most 10 min beyond it; the window is at most 60 min and not already over; `config/agent_canary_demo.yaml`
+contains exactly the four approved lines (no flatten flag, no other key) with the same account fingerprint and
+the current risk-config version; the latest Reader broker snapshot (<= 150 s old) shows the same fingerprint and
+server; and the running Static Agent reports the same artifact hash. It also refuses a dirty tracked tree, so the
+`code_commit` recorded in the capsule is true.
+
+**While running:** one cycle per newly closed M5 bar, only for bars whose decision falls inside the window (a bar
+closing exactly at the window end is excluded), a bar noticed more than 90 s late is skipped, never twice for the
+same bar. Before every cycle it re-reads the permit (consumed or expired stops it) and re-checks Reader heartbeat
+<= 30 s, tick <= 30 s, broker snapshot <= 150 s with COMPLETE position and pending-order sets, dashboard CONNECTED /
+HEALTHY, Agent READY with the exact artifact; anything stale or unreadable stops it (exit 4).
+
+**It stops (never retries):** immediately after the first submission attempt, accepted or rejected (permit consumed
+or `SUBMISSION_STARTED` recorded; exit 10); after any proposal that was not submitted, for human review (exit 3);
+after a crashed cycle, which is inspected once first (exit 4 or 10).
+
+**Evidence:** `var/canary_evidence/<utc>_<permit8>/window_log.jsonl` plus one raw log per cycle: freshness readings,
+outcome and reason codes, Risk and Policy verdicts, every execution event with payload (the broker result follows
+`SUBMISSION_STARTED`), and the permit consumption. `--check-only` evaluates the start conditions and exits without
+running a cycle.
+
+### Operator-chosen permit fields (nothing is defaulted)
+
+| Field | First-canary intent |
+|---|---|
+| `--login`, `--server` | the real DEMO login, `PepperstoneUK-Demo` (becomes fingerprint `4f857e6a72f9ad30`) |
+| `--agent-id` / `--assignment-id` / `--strategy-artifact-hash` | `760e93be-117c-48a3-b997-f258055ec29b` / `f98c0396-dd13-4a99-b1e9-b83ea0f15ed7` / `81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5` |
+| `--entry-type` | one only. The Static Agent proposes `LIMIT`, so a `MARKET` permit would never match |
+| `--max-requested-risk-fraction` | operator's choice; never defaulted. Must equal the driver's `--max-requested-risk-fraction` |
+| `--valid-for-minutes` | from issue time to at most 10 min past the window end |
+| `--issued-by`, `--reason`, optional `--permit-id` | operator identity, why, and an id chosen in advance |
+
+### Commands (not run)
+
+    # 1. operator issues the one-shot permit shortly before the window (CRUMBLR_DATABASE_URL = crumblr_soak)
+    uv run python scripts/issue_canary_permit.py --login <login> --server PepperstoneUK-Demo       --agent-id 760e93be-117c-48a3-b997-f258055ec29b --assignment-id f98c0396-dd13-4a99-b1e9-b83ea0f15ed7       --strategy-artifact-hash 81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5       --entry-type LIMIT --max-requested-risk-fraction <chosen> --valid-for-minutes <N>       --issued-by "<operator>" --reason "<why>" --permit-id <uuid>
+
+    # 2. dry check (read-only): prints the refusals, runs nothing
+    uv run python scripts/canary_window_driver.py --check-only <flags of step 3>
+
+    # 3. the armed run
+    uv run python scripts/canary_window_driver.py --canary-permit-id <uuid> --apply-canary-config       --agent-id 760e93be-117c-48a3-b997-f258055ec29b --assignment-id f98c0396-dd13-4a99-b1e9-b83ea0f15ed7       --strategy-artifact-hash 81894d6a9c44ddb0433c15f9779fb0a2e25c0e1eccee232e2fd145d72cb498c5       --expected-account-ref 4f857e6a72f9ad30 --expected-server PepperstoneUK-Demo       --entry-type LIMIT --max-requested-risk-fraction <chosen>       --window-start <UTC ISO> --window-end <UTC ISO>
